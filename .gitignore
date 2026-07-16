@@ -27,9 +27,10 @@ checkpoints/
 weights/
 
 # --- Datasets (ship tiny public samples only, by explicit exception) ---
-data/
-datasets/
-dataset/
+# anchored to repo root: src/sld/data/ is a source module, not a dataset dir
+/data/
+/datasets/
+/dataset/
 *.csv
 *.tar
 *.tar.gz
