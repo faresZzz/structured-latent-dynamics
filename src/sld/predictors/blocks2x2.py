@@ -43,8 +43,9 @@ class RotationScalingBlocks(nn.Module):
             parameter that can express instability/expansion ("OFF cell") —
             this is deliberate: the constraint ablation needs a true off.
         mode: "continuous" (default) or "discrete", see module docstring.
-        dtype: parameter dtype, fixed at construction (not re-synced if the
-            module is later moved with ``.to()``/``.double()``).
+        dtype: parameter dtype at construction. Computations resolve dtype
+            and device from the parameters at use time, so later
+            ``.to()``/``.double()`` moves are safe.
     """
 
     def __init__(
@@ -92,8 +93,9 @@ class RotationScalingBlocks(nn.Module):
         return self.nu
 
     def _modulus_r(self) -> torch.Tensor:
-        # constrained: r = exp(-softplus(nu_bar)) in (0, 1] for any real
-        # nu_bar (discrete-time stable by construction).
+        # constrained: r = exp(-softplus(nu_bar)) = 1/(1 + exp(nu_bar)),
+        # exact range the OPEN interval (0, 1) — r = 1 is a limit as
+        # nu_bar -> -inf, never attained (discrete-time strictly stable).
         # free: r = exp(nu_bar) > 0, can exceed 1.
         if self.constrained:
             return torch.exp(-F.softplus(self.nu_bar))
@@ -128,7 +130,7 @@ class RotationScalingBlocks(nn.Module):
     def discretize_zoh(
         self, delta: torch.Tensor | float, B_cont: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Exact zero-order-hold discretization of the continuous generators.
+        """Zero-order-hold discretization (A_bar exact; B_bar exact or 1e-10).
 
         Since A_i = alpha_i*I + omega_i*J with J = [[0,-1],[1,0]], J^2 = -I,
         and I, J commute, exp(delta*A_i) has the closed form:
@@ -139,22 +141,27 @@ class RotationScalingBlocks(nn.Module):
         path is exercised here for reuse by a later input-dependent variant).
 
         If ``B_cont`` is given (shape (2*n_pairs, m), block i occupying rows
-        2i:2i+2), also returns the matching B_bar via the standard ZOH
-        integral in closed form:
-            B_bar_i = A_i^{-1} (A_bar_i - I) B_i
-        using the closed-form inverse A_i^{-1} = 1/(alpha_i^2+omega_i^2) *
-        [[alpha_i, omega_i], [-omega_i, alpha_i]]. B_bar is returned with the
-        same shape as B_cont, (2*n_pairs, m). This path only supports scalar
-        or (n_pairs,) delta (a batched-delta B_bar is not needed yet).
+        2i:2i+2), also returns the matching B_bar via the ZOH input integral
+            B_bar_i = Phi_i B_i,   Phi_i = int_0^delta exp(t A_i) dt,
+        which is an ENTIRE function of A_i: Phi -> delta*I as A -> 0. The
+        familiar closed form A^{-1}(A_bar - I) has a merely REMOVABLE
+        singularity at (alpha, omega) = (0, 0) — B_bar is defined there
+        (= delta*B), a point an earlier revision wrongly rejected (caught
+        in adversarial review). Evaluation is branch-selected per block:
+        the closed form where delta^2*(alpha^2 + omega^2) > 1e-6, else the
+        series delta*(I + delta*A/2 + delta^2*A^2/6), whose relative
+        truncation error is < 1e-10 in that regime and which also avoids
+        the exp(delta*A) - I cancellation at small delta*||A||. B_bar is
+        returned with the same shape as B_cont, (2*n_pairs, m). This path
+        only supports scalar or (n_pairs,) delta.
 
         Raises:
             ValueError: in mode="discrete" (nothing to discretize — the
                 block already parametrizes the discrete operator directly).
-            ValueError: if B_cont is given and min(alpha^2 + omega^2) <=
-                1e-12 for any block — A_i is singular there (this can only
-                happen with the free/OFF alpha parametrization at
-                (alpha, omega) = (0, 0); the constrained/ON parametrization
-                alpha = -exp(nu) < 0 makes this trivially unreachable).
+            ValueError: if any element of delta is not strictly positive:
+                the ON-cell guarantee |eig(A_bar)| < 1 requires delta > 0
+                (exp(delta*alpha) > 1 for delta < 0 even with alpha < 0),
+                and a nonpositive ZOH step is meaningless in this repo.
         """
         self._require_mode(
             "continuous",
@@ -162,7 +169,13 @@ class RotationScalingBlocks(nn.Module):
         )
         alpha = self._alpha()
         omega = self.omega
-        delta_t = torch.as_tensor(delta, dtype=self.dtype, device=alpha.device)
+        # dtype/device resolved from the parameters at use time, so the
+        # module survives .to()/.double() moves
+        delta_t = torch.as_tensor(delta, dtype=omega.dtype, device=omega.device)
+        # NaN fails every comparison, so `<= 0` alone would let NaN (and
+        # +inf) through to produce NaN matrices — require finite AND positive
+        if not torch.all(torch.isfinite(delta_t)) or torch.any(delta_t <= 0):
+            raise ValueError("delta must be finite and strictly positive")
 
         # closed-form matrix exponential of a rotation-scaling block
         scale = torch.exp(delta_t * alpha)
@@ -181,23 +194,34 @@ class RotationScalingBlocks(nn.Module):
                 "batched-delta B_bar is not needed yet"
             )
 
+        # Phi_i = int_0^delta exp(t A_i) dt in the (I, J) coefficient basis:
+        # every matrix in play is a*I + b*J, and (pI + qJ)(rI + sJ) =
+        # (pr - qs)I + (ps + qr)J, so the whole computation stays per-block
         denom = alpha**2 + omega**2
-        if torch.min(denom).item() <= 1e-12:
-            raise ValueError(
-                "A_i is singular at (alpha, omega) = (0, 0) for at least one "
-                "block; B_bar is undefined there"
-            )
+        small = (delta_t**2) * denom <= 1e-6
 
-        # closed-form inverse of A_i = alpha*I + omega*J
-        inv_diag = alpha / denom
-        inv_off = omega / denom
-        inv_row0 = torch.stack([inv_diag, inv_off], dim=-1)
-        inv_row1 = torch.stack([-inv_off, inv_diag], dim=-1)
-        A_inv = torch.stack([inv_row0, inv_row1], dim=-2)
+        # closed-form branch: Phi = A^{-1}(A_bar - I), guarded against the
+        # untaken-branch NaN-gradient pitfall of torch.where by a safe denom
+        denom_safe = torch.where(small, torch.ones_like(denom), denom)
+        r = scale * cos - 1.0
+        s = scale * sin
+        a_cf = (alpha * r + omega * s) / denom_safe
+        b_cf = (alpha * s - omega * r) / denom_safe
 
-        eye = torch.eye(2, dtype=self.dtype, device=alpha.device)
+        # series branch (entire-function evaluation through A = 0):
+        # Phi = delta*(I + delta*A/2 + delta^2*A^2/6), with
+        # A^2 = (alpha^2 - omega^2)*I + 2*alpha*omega*J
+        a_ser = delta_t * (1.0 + delta_t * alpha / 2.0 + delta_t**2 * (alpha**2 - omega**2) / 6.0)
+        b_ser = delta_t * (delta_t * omega / 2.0 + delta_t**2 * (2.0 * alpha * omega) / 6.0)
+
+        a_phi = torch.where(small, a_ser, a_cf)
+        b_phi = torch.where(small, b_ser, b_cf)
+        phi_row0 = torch.stack([a_phi, -b_phi], dim=-1)
+        phi_row1 = torch.stack([b_phi, a_phi], dim=-1)
+        Phi = torch.stack([phi_row0, phi_row1], dim=-2)
+
         B = B_cont.reshape(self.n_pairs, 2, -1)
-        B_bar = A_inv @ (A_bar - eye) @ B
+        B_bar = Phi @ B
         return A_bar, B_bar.reshape(2 * self.n_pairs, -1)
 
     def spectral_moduli(self, delta: torch.Tensor | float | None = None) -> torch.Tensor:
@@ -213,7 +237,9 @@ class RotationScalingBlocks(nn.Module):
         if delta is None:
             raise ValueError("mode='continuous' requires delta")
         alpha = self._alpha()
-        delta_t = torch.as_tensor(delta, dtype=self.dtype, device=alpha.device)
+        delta_t = torch.as_tensor(delta, dtype=alpha.dtype, device=alpha.device)
+        if not torch.all(torch.isfinite(delta_t)) or torch.any(delta_t <= 0):
+            raise ValueError("delta must be finite and strictly positive")
         return torch.exp(delta_t * alpha)
 
 

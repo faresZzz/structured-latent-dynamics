@@ -122,18 +122,62 @@ def test_discrete_mode():
         pass
 
 
-def test_zero_alpha_omega_guard_raises():
-    blocks = _make(constrained=False, seed=13)
+def _phi_van_loan(A: torch.Tensor, delta: float) -> torch.Tensor:
+    # independent reference for int_0^delta exp(tA) dt via the Van Loan
+    # augmented matrix: expm(delta*[[A, I],[0, 0]]) has that integral as its
+    # top-right block — no shared code path with the implementation
+    n = A.shape[-1]
+    top = torch.cat([A, torch.eye(n, dtype=A.dtype)], dim=-1)
+    bottom = torch.zeros(n, 2 * n, dtype=A.dtype)
+    M = torch.cat([top, bottom], dim=-2)
+    return torch.matrix_exp(delta * M)[:n, n:]
+
+
+def test_b_bar_is_entire_through_zero():
+    # adversarial-review lock: Phi = int_0^delta exp(tA) dt is an entire
+    # function of A — B_bar exists AT (alpha, omega) = (0, 0) (= delta*B)
+    # and varies continuously through it; an earlier revision wrongly
+    # raised there. Checked against the Van Loan reference across
+    # magnitudes straddling the series/closed-form branch switch.
+    blocks = _make(constrained=False, seed=13, n_pairs=6)
+    magnitudes = (0.0, 1e-9, 1e-6, 1e-4, 1e-2, 0.5)
     with torch.no_grad():
-        blocks.nu[0] = 0.0
-        blocks.omega[0] = 0.0
+        for i, mag in enumerate(magnitudes):
+            blocks.nu[i] = mag       # nu IS alpha in free mode
+            blocks.omega[i] = mag / 2.0
     torch.manual_seed(14)
-    B_cont = torch.randn(2 * N_PAIRS, 3, dtype=DTYPE)
-    try:
-        blocks.discretize_zoh(0.1, B_cont=B_cont)
-        raise AssertionError("expected ValueError from the singular-inverse guard")
-    except ValueError:
-        pass
+    B_cont = torch.randn(12, 3, dtype=DTYPE)
+    delta = 0.1
+    _, B_bar = blocks.discretize_zoh(delta, B_cont=B_cont)
+    B_bar = B_bar.reshape(6, 2, 3)
+    A_blocks = blocks.continuous_blocks().detach()
+    worst = 0.0
+    for i in range(6):
+        expected = _phi_van_loan(A_blocks[i], delta) @ B_cont.reshape(6, 2, 3)[i]
+        err = (B_bar[i] - expected).abs().max().item()
+        worst = max(worst, err)
+        assert err < 1e-12, f"magnitude={magnitudes[i]} err={err:.3e}"
+    # the exact-zero block is delta*B on the nose
+    torch.testing.assert_close(
+        B_bar[0], delta * B_cont.reshape(6, 2, 3)[0], rtol=0.0, atol=1e-14
+    )
+    print(f"[test_b_bar_entire] max abs error across branch switch = {worst:.3e}")
+
+
+def test_nonpositive_delta_rejected():
+    # adversarial-review lock: the ON-cell stability claim holds for
+    # delta > 0 only, so nonpositive deltas must be rejected loudly
+    import pytest
+
+    blocks = _make(constrained=True, seed=16, n_pairs=4)
+    for bad in (0.0, -0.1):
+        with pytest.raises(ValueError):
+            blocks.discretize_zoh(bad)
+        with pytest.raises(ValueError):
+            blocks.spectral_moduli(bad)
+    batched = torch.tensor([[0.1, 0.2, -0.3, 0.4]], dtype=DTYPE)
+    with pytest.raises(ValueError):
+        blocks.discretize_zoh(batched)
 
 
 def test_block_diagonal_assembly():
@@ -145,3 +189,16 @@ def test_block_diagonal_assembly():
         torch.testing.assert_close(full[2 * i : 2 * i + 2, 2 * i : 2 * i + 2], A[i])
     off_block = full[0:2, 2:4]
     assert torch.all(off_block == 0.0)
+
+
+def test_nonfinite_delta_rejected():
+    # NaN fails every comparison so `<= 0` alone would admit it (and +inf)
+    # straight into NaN matrices — finiteness must be enforced explicitly
+    import pytest
+
+    blocks = _make(constrained=True, seed=17, n_pairs=4)
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            blocks.discretize_zoh(bad)
+        with pytest.raises(ValueError):
+            blocks.spectral_moduli(bad)
