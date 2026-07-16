@@ -209,6 +209,56 @@ Les notebooks sont le point d'entrée pédagogique. Rythme imposé, hérité de
 Concept -> Dérivation -> Implémentation minimale -> Vérification -> Parité package -> Interprétation
 ```
 
+### Histoire continue et système conducteur (hérité, adapté)
+
+Ce rythme doit former **une histoire continue**, pas une suite de dépôts
+indépendants. Une cellule ne pose jamais une définition, une équation ou un
+diagnostic à froid : elle répond à un problème posé dans la cellule qui
+précède, et le lecteur doit sentir pourquoi l'étape suivante devient
+nécessaire — pourquoi lifter avant de faire transiter, pourquoi auditer la
+stabilité avant de planifier, pourquoi le stress test d'invariance vient
+avant toute lecture scientifique du diagnostic.
+
+Quand le chapitre s'y prête, choisir un **système conducteur** — le pendule
+amorti pour l'intuition, Lorenz-63 pour le cas adversarial, le régime
+action-conditionné pour l'identifiabilité — et le faire réapparaître à
+l'intuition, dans la dérivation, dans le code, dans les figures et dans la
+conclusion. Il peut être synthétique au début puis structurant pour
+l'application finale, mais garde le même rôle narratif du début à la fin du
+notebook plutôt qu'une suite d'exemples isolés changés à chaque cellule.
+
+### Structure recommandée (adaptée)
+
+1. **Problème et motivation** — quelle propriété de la dynamique ce chapitre
+   traite (stabilité, identifiabilité, coût de planification), et quelle
+   limite du chapitre précédent il éclaire.
+2. **Intuition** — l'idée en mots avant les équations ; le rôle de chaque
+   objet (lifting, projection, gramien, marge) posé avant sa formule.
+3. **Système / régime de données** — le système RK4 ou le régime LeJEPA du
+   chapitre : conditions initiales, actions, bruit d'observation ; **un tracé
+   de trajectoire avant tout entraînement ou audit** — jamais un diagnostic
+   affiché sur un système que le lecteur n'a pas encore vu.
+4. **Dérivation** (niveau 1, règle des trois niveaux ci-dessous) — chaque
+   terme expliqué ; une équation arrive comme la formalisation d'une question
+   déjà posée, jamais en empilement.
+5. **Implémentation minimale** (niveau 2) — dans l'ordre de compréhension, un
+   mini-test ou un `assert` juste après chaque bloc important.
+6. **Parité package** (niveau 3).
+7. **Expérience / audit** — la boucle (entraînement, audit, calibration,
+   planning) lisible : préparation, calcul, lecture séparés.
+8. **Résultats & diagnostics** — **les objets appris montrés avant toute
+   métrique finale** (le spectre, le champ de gramiens, la marge $J^q$) ;
+   chaque figure suivie d'une interprétation réelle, jamais décorative.
+9. **Cas limite / contre-exemple** — le cas adversarial du chapitre (Lorenz,
+   le contre-exemple des gates 1-D) relié aux courbes déjà montrées, pas une
+   expérience isolée surgie sans lien.
+10. **Limites & pont** — ce que ce niveau de structure apporte, où il ne
+    suffit pas, pourquoi le chapitre suivant devient nécessaire (l'échelle des
+    trois profondeurs, statement §3). Bloc court **"quand ce niveau de
+    structure paie, quand descendre au suivant"** — sans arbre de décision
+    exhaustif.
+11. **Lien avec `sld`** — pointeur module par module vers ce qui a été prouvé.
+
 ### La règle des trois niveaux (spécifique à ce projet)
 
 Chaque objet mathématique central d'un notebook passe par trois niveaux,
@@ -256,6 +306,30 @@ boucle de polish : une passe décisive, puis la revue.
   conceptuels en mermaid (`fill:none`, information par bordure : gris `#64748b`,
   vert `#16a34a`, bleu `#2563eb`, orange `#d97706`) ; matplotlib pour les
   données.
+- **Attention aux échelles visuelles** : Lorenz-63 diverge, un spectre proche
+  du cercle unité écrase les modes contractifs, un pseudospectre explose près
+  d'un bloc non normal — fixer explicitement les limites d'axes pertinentes
+  (souvent log ou VPT plutôt que temps brut) plutôt que laisser un autoscale
+  masquer la forme que la figure enseigne, et expliquer ce choix.
+- **Objets appris montrés avant la métrique finale** : avant de commenter une
+  valeur de facture ou un taux de succès, montrer les objets que l'audit a
+  mesurés — spectre ou champ de spectres locaux, gramien, marge $J^q$,
+  Lip(π). Une bonne lecture explique ce que le predictor a appris de la
+  dynamique, pas seulement le score final.
+- **Équations reliées au code** : introduire la question que résout
+  l'équation avant de l'écrire, expliquer le passage entre deux formes (ex.
+  la ZOH exacte du bloc 2×2), puis annoncer explicitement la fonction ou
+  l'attribut du code qui l'incarne (`audit/jacobian.py:total_jacobian`) —
+  jamais une formule qui reste sans ancrage dans `sld`.
+- **Stabilité numérique expliquée en cellule** : quand une cellule utilise QR
+  au lieu du produit brut de Jacobiennes, Cholesky au lieu d'un
+  pseudo-inverse, ou un garde `(α,ω)≠(0,0)`, expliquer en une phrase le
+  problème numérique évité (cf. carte des pièges §5) et confirmer que la
+  correction ne change pas l'objet mathématique enseigné.
+- **Mini-tests lisibles** : un `assert` seul ou un `print` suffit rarement —
+  quand le test valide une propriété dynamique (stabilité, conservation
+  d'énergie, VPT), l'accompagner de la courbe ou du portrait de phase qui la
+  rend visible.
 - **Citations avec lien cliquable**, format `[Auteur (année), Titre](url)` ;
   chaque lien **vérifié par WebFetch avant insertion** (protocole ✱ du
   workspace) ; jamais de citation morte.
@@ -264,8 +338,15 @@ boucle de polish : une passe décisive, puis la revue.
 - **Hygiène** : `execution_count: null`, outputs nettoyés avant commit
   (`scripts/check_notebooks.py` en gate) ; les figures destinées au README vivent
   dans `assets/`, régénérées par `make figN`.
+- **Conclusion active** : ne pas se contenter de lister ce qui a été prouvé —
+  expliquer pourquoi le rung suivant de l'échelle (§3 OBJECTIFS, ladder du
+  statement) devient nécessaire, et fermer sur le bloc court "quand ce niveau
+  de structure paie, quand descendre au suivant" (point 10 de la structure
+  recommandée ci-dessus).
 - **Passe humanizer unique** sur le texte des notebooks et du README avant
-  publication — sans toucher aux équations, noms d'API et citations.
+  publication (une seule passe décisive, pas une boucle — cf. « Qualité, pas
+  quantité » ci-dessus) — sans toucher aux équations, noms d'API, variables
+  ni citations.
 
 ---
 
