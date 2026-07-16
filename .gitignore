@@ -46,6 +46,7 @@ papers/
 .venv/
 venv/
 *.egg-info/
+uv.lock
 env/
 __pycache__/
 *.py[cod]
