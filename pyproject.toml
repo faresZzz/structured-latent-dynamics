@@ -1,21 +1,13 @@
-# Generic pyproject.toml template — drop into a Python project and fill in the placeholders.
-#
-# Package name convention: use underscores (e.g. my_project), even if the repo
-# name uses dashes (e.g. my-project). Only the importable package name matters here.
-#
-# After filling in the placeholders, install in editable mode:
-#   uv pip install -e ".[dev]"
-#
-# Code and notebooks then import with no sys.path hacks:
-#   from your_project_name import ...
-
 [project]
 name = "sld"
 version = "0.1.0"
 description = "Structured latent dynamics in JEPA world models: when does explicit dynamical structure improve rollout stability, state sufficiency, and planning — at what compute cost per successful decision."
 requires-python = ">=3.12"
 dependencies = [
-  # "numpy",
+  "torch",
+  "numpy",
+  "matplotlib",
+  "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +15,12 @@ dev = [
   "pre-commit>=3.7",
   "pytest",
   "ipykernel",
+  "ruff",
+  "nb-clean>=4.0.1",
 ]
+
+[project.scripts]
+sld-factorial = "sld.experiments.factorial:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

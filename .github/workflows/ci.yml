@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project (editable, dev extras)
+        run: uv pip install --system -e ".[dev]"
+
+      - name: Tests
+        run: uv run --no-sync pytest -q
+
+      - name: Compile check
+        run: uv run --no-sync python -m compileall -q src tests
+
+      # Expected to fail until Wave 9 writes sld/experiments/factorial.py and
+      # experiments/configs/smoke.yaml (see RESUME_SESSION.md). A red "Smoke"
+      # step before then is the honest signal, not a bug in this workflow —
+      # REGLES §1: never fake a passing signal.
+      - name: Smoke
+        run: make smoke
