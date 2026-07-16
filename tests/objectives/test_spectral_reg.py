@@ -66,3 +66,19 @@ def test_rho_d_domain_validated():
     for bad in (0.0, 1.0, 1.3, -0.2):
         with pytest.raises(ValueError):
             SpectralSeparationReg(rho_d=bad)
+
+
+def test_nonpositive_or_nonfinite_moduli_and_nan_beta_rejected():
+    import math
+
+    import pytest
+    import torch
+
+    from sld.objectives.spectral_reg import SpectralSeparationReg
+
+    reg = SpectralSeparationReg(rho_d=0.9, beta=1.0)
+    for bad in ([0.0, 0.5], [-0.1, 0.5], [math.inf, 0.5], [math.nan, 0.5]):
+        with pytest.raises(ValueError):
+            reg(torch.tensor(bad, dtype=torch.float64))
+    with pytest.raises(ValueError):
+        SpectralSeparationReg(beta=math.nan)

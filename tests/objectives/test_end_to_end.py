@@ -62,7 +62,6 @@ def test_jepa_mlp_overfits_one_trajectory():
         list(encoder.parameters()) + list(predictor.parameters()), lr=2e-3
     )
 
-    pred_value = float("inf")
     for _ in range(4000):
         opt.zero_grad()
         z = encoder(x)                                   # (201, z)
@@ -74,14 +73,47 @@ def test_jepa_mlp_overfits_one_trajectory():
         total.backward()
         opt.step()
         target.update(encoder)
-        pred_value = losses["pred"].item()
 
-    latent_std = encoder(x).std(dim=0).mean().item()
-    print(f"[end-to-end] pred={pred_value:.2e} latent_std={latent_std:.3f}")
-    # the Wave 2 gate: plumbing overfits one trajectory below 1e-4 while the
-    # latent space stays alive (a collapsed encoder would fail the std floor)
+    # every reported number evaluated on the SAME final model state
+    # (adversarial-review fix: loss was recorded pre-update, stats post-)
+    with torch.no_grad():
+        z = encoder(x)
+        pred_value = jepa(predictor(z[:-1], u), target(x[1:]))["pred"].item()
+        # identity baseline = the EXACT loss of a zero-residual predictor:
+        # online embeddings passed through unchanged, regressed on the same
+        # targets (adversarial-review fix: using target(x[:-1]) here would
+        # only coincide with this when online == EMA target)
+        identity_baseline = jepa(z[:-1], target(x[1:]))["pred"].item()
+        # action sensitivity: a predictor that actually uses u must degrade
+        # when u is shuffled in time (a u-ignoring interpolator would not)
+        u_shuffled = u[torch.randperm(len(u), generator=torch.Generator().manual_seed(0))]
+        pred_shuffled = jepa(predictor(z[:-1], u_shuffled), target(x[1:]))["pred"].item()
+        per_dim_std = z.std(dim=0)
+        # participation ratio of the latent covariance spectrum: a rank-one
+        # embedding (all dims copies of one signal) scores 1, a spread one
+        # scores near the latent dim — kills the collapse construction that
+        # passed the earlier mean-std check (adversarial review)
+        z_centered = z - z.mean(dim=0, keepdim=True)
+        eigvals = torch.linalg.eigvalsh(z_centered.T @ z_centered / (len(z) - 1))
+        participation_ratio = eigvals.sum().pow(2) / eigvals.pow(2).sum()
+
+    print(
+        f"[end-to-end] pred={pred_value:.2e} identity={identity_baseline:.2e} "
+        f"ratio={pred_value / identity_baseline:.3f} "
+        f"shuffled-u={pred_shuffled:.2e} min_std={per_dim_std.min():.3f} "
+        f"PR={participation_ratio:.2f}"
+    )
+    # the Wave 2 gate, hardened (scope: single-trajectory PLUMBING gate,
+    # deliberately overfit — generalization is Wave 3+ territory): the
+    # predictor must beat the exact zero-residual identity baseline by 10x
+    # (identity solutions score ratio 1), degrade by 3x when actions are
+    # time-shuffled (a u-ignoring interpolator would not), keep every
+    # latent dimension alive, and spread covariance across dimensions
     assert pred_value < 1e-4
-    assert latent_std > 0.1
+    assert pred_value < 0.1 * identity_baseline
+    assert pred_shuffled > 3.0 * pred_value
+    assert per_dim_std.min().item() > 0.1
+    assert participation_ratio.item() > 4.0
 
 
 def test_collapse_without_vicreg_is_trivial():

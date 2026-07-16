@@ -105,3 +105,57 @@ def test_loss_is_zero_when_prediction_matches_target_exactly() -> None:
     z = torch.randn(4, 4, generator=torch.Generator().manual_seed(2))
     out = JEPALoss()(z, z)
     assert out["total"].item() == 0.0
+
+
+def test_tau_domain_validated():
+    # adversarial-review lock: the EMA update is a convex combination only
+    # for tau in [0, 1]; outside it silently extrapolates
+    import pytest
+    from torch import nn
+
+    from sld.objectives.jepa import EMATarget
+
+    for bad in (-0.1, 1.1):
+        with pytest.raises(ValueError):
+            EMATarget(nn.Linear(2, 2), tau=bad)
+    EMATarget(nn.Linear(2, 2), tau=0.0)  # boundaries are legal
+    EMATarget(nn.Linear(2, 2), tau=1.0)
+
+
+def test_shape_mismatch_rejected_not_broadcast():
+    # adversarial-review lock: F.mse_loss silently broadcasts mismatched
+    # time/batch dims into a wrong comparison — the loss must refuse
+    import pytest
+    import torch
+
+    from sld.objectives.jepa import JEPALoss
+
+    jepa = JEPALoss()
+    with pytest.raises(ValueError):
+        jepa(torch.randn(10, 4), torch.randn(10, 1))
+    with pytest.raises(ValueError):
+        jepa(torch.randn(9, 4), torch.randn(10, 4))
+    # lifted path: h_hat must match lift(z), not z
+    lift = torch.nn.Linear(4, 6)
+    with pytest.raises(ValueError):
+        jepa(torch.randn(10, 4), torch.randn(10, 4), lift=lift)
+    out = jepa(torch.randn(10, 6), torch.randn(10, 4), lift=lift)
+    assert out["pred"].shape == ()
+
+
+def test_target_eval_mode_is_persistent():
+    # nn.Module.train() recurses into children: without the override an
+    # enclosing model's .train() would silently re-arm the target's train
+    # mode (dropout/BN batch-stats) — eval must survive train() calls
+    from torch import nn
+
+    from sld.objectives.jepa import EMATarget
+
+    ema = EMATarget(nn.Sequential(nn.Linear(2, 2), nn.Dropout(0.5)))
+    assert not ema.target.training
+    ema.train()
+    assert ema.training
+    assert not ema.target.training
+    ema.train(False)
+    ema.train(True)
+    assert not ema.target.training

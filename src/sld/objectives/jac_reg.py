@@ -19,9 +19,11 @@ be silently wrong by the state dimension. Verified against an analytic
 Two declared implementation choices (spike decision, see the report):
   1. Detached linearization point: the penalty evaluates J^q at
      q_t.detach() — a semi-gradient that shapes the Jacobian at the visited
-     states while treating the visitation distribution as fixed. Achieved
-     margins are measured post-hoc by the audit, so this affects
-     optimization dynamics only, never a reported diagnostic.
+     states while treating the visitation distribution as fixed (the
+     dropped term contracts SECOND derivatives of the step with the rollout
+     sensitivity dq_t/dtheta). Achieved margins are measured post-hoc by
+     the audit, so this affects optimization dynamics only, never a
+     reported diagnostic.
   2. Deferred single-JVP evaluation: all sampled states and probes are
      evaluated in ONE batched `torch.func.jvp` call per rollout (measured
      overhead 1.36x vs 4-6x for the naive per-step, per-probe loop).
@@ -93,6 +95,18 @@ class TotalJacobianPenalty:
             the zero returned when the Bernoulli draw keeps no step (a plain
             mean over kept steps would be biased low by the factor
             1 - (1-p)^T; caught in adversarial review, locked by test).
+            The multiplier d is the INPUT dimension of step_fn (correct
+            even for non-square maps: E[vv^T] = I_d/d lives in input space).
+
+            Declared variance (adversarial-review quantification): the
+            Bernoulli mask is shared across the batch, so its noise does
+            NOT average down with B. For per-step values mu_t the mask-only
+            CV is sqrt((1-p)/(p*T_eff)) with T_eff = (sum mu_t)^2 /
+            sum(mu_t^2) <= T — at the training config T=20, p=0.25 this is
+            ~39 % per rollout in the equal-step LOWER-BOUND case, and grows
+            toward sqrt((1-p)/p) when one step dominates. Acceptable for a
+            REGULARIZER averaged over optimizer steps; never acceptable for
+            a reported number (the audit uses exact dense Jacobians).
         """
         T, B, d = q_seq.shape
         keep = (

@@ -3,7 +3,15 @@
 Bardes, Ponce & LeCun, "VICReg: Variance-Invariance-Covariance Regularization
 for Self-Supervised Learning", arXiv:2105.04906
 (https://arxiv.org/abs/2105.04906). Used here as the anti-collapse terms:
-variance keeps every embedding dimension alive, covariance decorrelates them.
+variance PENALIZES collapsed dimensions, covariance decorrelates them.
+
+Honest limit (adversarial-review note): at an EXACTLY constant coordinate
+the variance-hinge gradient is exactly zero (d var/dz vanishes at equality),
+so exact collapse is a zero-gradient stationary point these terms cannot
+escape — they make collapse unattractive, they do not guarantee escape from
+it. Exact collapse requires pre-activations exactly constant across the
+batch (zero weights, saturated activations, or data in a weight nullspace);
+the end-to-end gate checks the trained latent variance directly.
 """
 
 from __future__ import annotations

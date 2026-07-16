@@ -48,6 +48,37 @@ def test_u_is_frozen_the_object_is_J_wrt_q():
     assert abs(mean_est - truth) / truth < 0.05
 
 
+def test_u_row_alignment_with_jointly_dependent_jacobian():
+    # adversarial-review lock: the earlier u-test had J independent of u, so
+    # a q/u row misalignment was invisible (and any u-only Jacobian is
+    # permutation-invariant in the mean). Here step(q, u) = u_0*q_0*q gives
+    # J = u_0*(q_0*I + e_0 q^T)... with ||J||_F^2 = u_0^2*(d*q_0^2 + ||q||^2
+    # + 2*q_0^2), jointly and non-separably dependent on the (q, u) PAIR,
+    # and u_0 := 1 + q_0^2 couples them: the aligned analytic mean (~200)
+    # and the decoupled one (~72) are far apart, so a pairing bug cannot
+    # hide inside the 5% tolerance. (J = u_0*(q e_0^T + q_0 I): the q
+    # column sits at j=0, i.e. d(q_0*q_i)/dq_j has the q_i's in column 0.)
+    torch.manual_seed(0)
+    d = 5
+    T, B = 3, 16
+
+    def step(q, u):
+        return u[:, :1] * q[:, :1] * q
+
+    q_seq = torch.randn(T, B, d, dtype=torch.float64)
+    u_seq = 1.0 + q_seq[..., :1] ** 2  # (T, B, 1), coupled to q's row
+    q0 = q_seq[..., 0]
+    bracket = d * q0**2 + (q_seq**2).sum(-1) + 2.0 * q0**2
+    truth = (u_seq[..., 0] ** 2 * bracket).mean().item()
+
+    g = torch.Generator().manual_seed(11)
+    pen = TotalJacobianPenalty(k_probes=8, step_subsample=1.0, generator=g)
+    draws = [pen(step, q_seq, u_seq).item() for _ in range(300)]
+    mean_est = sum(draws) / len(draws)
+    print(f"[jac_reg u-align] mean={mean_est:.2f} aligned-truth={truth:.2f}")
+    assert abs(mean_est - truth) / truth < 0.05
+
+
 def test_gradients_reach_module_params():
     torch.manual_seed(0)
     net = nn.Sequential(nn.Linear(6, 32), nn.Tanh(), nn.Linear(32, 6))
@@ -141,3 +172,18 @@ def test_training_with_penalty_lowers_spectral_norm():
     norm_with = train(mu=0.01)
     print(f"[jac_reg training] spectral norm without={norm_without:.3f} with={norm_with:.3f}")
     assert norm_with < norm_without
+
+
+def test_rectangular_step_uses_input_dimension():
+    # the multiplier is the INPUT dimension d (E[vv^T] = I_d/d lives in
+    # input space): verified on a genuinely rectangular map J = A (o != d)
+    torch.manual_seed(0)
+    d_in, d_out = 6, 11
+    A = torch.randn(d_out, d_in, dtype=torch.float64)
+    truth = (A * A).sum().item()
+    g = torch.Generator().manual_seed(21)
+    pen = TotalJacobianPenalty(k_probes=8, step_subsample=1.0, generator=g)
+    q_seq = torch.randn(3, 8, d_in, dtype=torch.float64)
+    draws = [pen(_linear_step(A), q_seq).item() for _ in range(300)]
+    mean_est = sum(draws) / len(draws)
+    assert abs(mean_est - truth) / truth < 0.05

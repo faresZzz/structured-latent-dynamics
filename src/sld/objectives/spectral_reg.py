@@ -8,6 +8,8 @@ display object, never the stability verdict.
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 
@@ -21,8 +23,10 @@ class SpectralSeparationReg(nn.Module):
     plain tensor, not a model dependency).
 
     forward(moduli):
+        # moduli validated first: finite and strictly positive, ValueError
+        # otherwise (no silent clamp — an invalid modulus is a caller bug)
         hinge = sum_i max(0, moduli_i - 1)^2          # nothing outside the unit circle
-        log_m = log(clamp(moduli, min=1e-12))
+        log_m = log(moduli)
         double_well = beta * sum_i min(log_m_i^2, (log_m_i - log(rho_d))^2)
         return hinge + double_well
 
@@ -36,13 +40,30 @@ class SpectralSeparationReg(nn.Module):
         # unit circle, else the "zero exactly at {1, rho_d}" contract is false
         if not 0.0 < rho_d < 1.0:
             raise ValueError(f"rho_d must be in (0, 1), got {rho_d}")
+        # beta <= 0 flips the regularizer's sign or disables the double well
+        # entirely; NaN passes a bare `<= 0` check (NaN comparisons are
+        # false), so finiteness is required explicitly
+        if not math.isfinite(beta) or beta <= 0.0:
+            raise ValueError(f"beta must be finite and > 0, got {beta}")
         self.rho_d = rho_d
         self.beta = beta
 
     def forward(self, moduli: torch.Tensor) -> torch.Tensor:
+        # integer moduli would silently truncate before the log; reject.
+        # spectral moduli are positive by definition (they come from
+        # spectral_moduli()), so zero/negative/non-finite input is a caller
+        # bug to refuse, not to clamp into silence
+        if not torch.is_floating_point(moduli):
+            raise ValueError("moduli must be a floating-point tensor")
+        if not torch.all(torch.isfinite(moduli)) or torch.any(moduli <= 0):
+            raise ValueError("moduli must be finite and strictly positive")
+        # NOTE: at the exact midpoint m = sqrt(rho_d) the double well has a
+        # nondifferentiable CUSP LOCAL MAXIMUM (positive left derivative,
+        # negative right derivative); torch.minimum averages the two equal-
+        # branch gradients to zero exactly there — measure-zero, declared.
         hinge = torch.clamp(moduli - 1.0, min=0.0).pow(2).sum()
 
-        log_m = torch.clamp(moduli, min=1e-12).log()
+        log_m = moduli.log()
         log_rho_d = torch.log(torch.as_tensor(self.rho_d, dtype=moduli.dtype, device=moduli.device))
         well_at_one = log_m.pow(2)
         well_at_rho_d = (log_m - log_rho_d).pow(2)

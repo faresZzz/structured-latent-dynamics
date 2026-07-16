@@ -30,20 +30,43 @@ class EMATarget(nn.Module):
 
     def __init__(self, online: nn.Module, tau: float = 0.996) -> None:
         super().__init__()
+        # the update is a convex combination only for tau in [0, 1];
+        # anything else silently extrapolates (adversarial-review lock)
+        if not 0.0 <= tau <= 1.0:
+            raise ValueError(f"tau must be in [0, 1], got {tau}")
         self.tau = tau
         self.target = copy.deepcopy(online)
+        # deterministic target: eval mode freezes any train-time stochastic
+        # or stats-mutating layers (dropout, BatchNorm batch-stats). A no-op
+        # for this repo's BN-free MLP encoders, declared for safety.
+        self.target.eval()
         for p in self.target.parameters():
             p.requires_grad_(False)
+
+    def train(self, mode: bool = True) -> EMATarget:
+        # nn.Module.train() recurses into children, which would silently
+        # re-arm the target's train mode (e.g. via an enclosing model's
+        # .train()) — the target's eval mode must be persistent
+        super().train(mode)
+        self.target.eval()
+        return self
 
     @torch.no_grad()
     def update(self, online: nn.Module) -> None:
         """EMA-update parameters; copy buffers verbatim.
 
-        Buffers (e.g. BatchNorm running mean/var) are not EMA'd: they must
-        match the online network's current input regime exactly, since the
-        target is only ever evaluated on the same inputs the online encoder
-        just saw. Averaging them would lag the online statistics for no
-        benefit.
+        Static-topology contract: ``online`` must keep the same parameter/
+        buffer names as at construction — no tying, adding, renaming or
+        removing afterwards (lookup is by canonical name; a rename raises
+        KeyError, a removal would silently leave stale target state).
+
+        Buffer policy (declared, not claimed optimal): buffers are copied
+        verbatim, i.e. the target SHARES the online network's running
+        statistics, and the target always runs in eval mode. For this
+        repo's encoders (BN-free MLPs) the branch is inert. If a future
+        encoder carries BatchNorm, revisit explicitly: copied online
+        moments under EMA-lagged weights are a design choice, not a
+        mathematical necessity.
         """
         target_params = dict(self.target.named_parameters())
         for name, p_online in online.named_parameters():
@@ -95,11 +118,19 @@ class JEPALoss(nn.Module):
         z_sg = z_target.detach()
 
         if lift is None:
-            pred = nn.functional.mse_loss(h_hat, z_sg)
+            target_tensor = z_sg
         else:
             # both the target embedding and its lift are stopped: this term
             # shapes only the predictor path (h_hat), never psi.
-            pred = nn.functional.mse_loss(h_hat, lift(z_sg).detach())
+            target_tensor = lift(z_sg).detach()
+        # exact shape match enforced: F.mse_loss would silently broadcast
+        # mismatched time/batch dims into a wrong comparison
+        if h_hat.shape != target_tensor.shape:
+            raise ValueError(
+                f"h_hat {tuple(h_hat.shape)} and its regression target "
+                f"{tuple(target_tensor.shape)} must match exactly"
+            )
+        pred = nn.functional.mse_loss(h_hat, target_tensor)
 
         consistency = torch.zeros((), dtype=pred.dtype, device=pred.device)
         total = pred
