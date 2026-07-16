@@ -122,19 +122,19 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `base.py` | `DynamicalSystem` (protocol) | Contrat : `f(x,u)`, `integrate(x0,u_seq,dt)` (RK4), `sample_ic(regime)`, `observe(x,mode)`, `linearize(x*,u*)` ; dims, bornes d'action | ⬜ |
-| `damped_pendulum.py` | `DampedPendulum` | $\ddot\theta = -\omega^2\sin\theta - 2\zeta\omega\dot\theta + u$ ; eigvals analytiques de la linéarisation ; énergie | ⬜ |
-| `coupled_oscillators.py` | `CoupledOscillators` | 2 masses-ressorts amorties, force sur la masse 1 ; modes analytiques ; $W_c$ exact (système linéaire) | ⬜ |
-| `lorenz63.py` | `Lorenz63` | σ=10, ρ=28, β=8/3 ; autonome ; $\lambda_{\max} \approx 0.906$ en référence | ⬜ |
-| `cartpole.py` | `CartPole` | équations complètes, force continue ; linéarisation à l'équilibre haut | ⬜ |
+| `base.py` | `DynamicalSystem` (protocol) | Contrat : `f(x,u)`, `integrate(x0,u_seq,dt)` (RK4), `sample_ic(regime)`, `observe(x,mode)`, `linearize(x*,u*)` ; dims, bornes d'action | ✅ |
+| `damped_pendulum.py` | `DampedPendulum` | $\ddot\theta = -\omega^2\sin\theta - 2\zeta\omega\dot\theta + u$ ; eigvals analytiques de la linéarisation ; énergie | ✅ |
+| `coupled_oscillators.py` | `CoupledOscillators` | 2 masses-ressorts amorties, force sur la masse 1 ; modes analytiques ; $W_c$ exact (système linéaire) | ✅ |
+| `lorenz63.py` | `Lorenz63` | σ=10, ρ=28, β=8/3 ; autonome ; $\lambda_{\max} \approx 0.906$ en référence | ✅ |
+| `cartpole.py` | `CartPole` | équations complètes, force continue ; linéarisation à l'équilibre haut | ✅ |
 
 ### 4.2 `data/` — régimes et observations
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `regimes.py` | `OURegime`, `NarrowPolicyRegime`, `AnisotropicRegime`, `ActionConditionedRegime` | Échantillonneurs (IC, u_seq) des 4 régimes LeJEPA (plan v2 §3.3) | ⬜ |
-| `mixing.py` | `SmoothMixing`, `PartialObservation` | Mixing non linéaire bijectif $x = g(z)$ (rotation fixe ∘ tanh-affine ∘ rotation, inverse en forme fermée, Lipschitz déclaré) ; variantes partielles | ⬜ |
-| `generate.py` | `build_dataset` | (système × régime × obs × seed) → NPZ train/val/test + meta JSON | ⬜ |
+| `regimes.py` | `OURegime`, `NarrowPolicyRegime`, `AnisotropicRegime`, `ActionConditionedRegime` | Échantillonneurs (IC, u_seq) des 4 régimes LeJEPA (plan v2 §3.3) | ✅ |
+| `mixing.py` | `SmoothMixing`, `PartialObservation` | Mixing non linéaire bijectif $x = g(z)$ (rotation fixe ∘ tanh-affine ∘ rotation, inverse en forme fermée, Lipschitz déclaré) ; variantes partielles | ✅ |
+| `generate.py` | `build_dataset` | (système × régime × obs × seed) → NPZ train/val/test + meta JSON | ✅ |
 
 ### 4.3 `encoders/`
 
