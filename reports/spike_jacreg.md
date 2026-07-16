@@ -62,8 +62,9 @@ needed — with two declared implementation choices:
 1. **Detached linearization point**: the penalty evaluates ||J^q||_F^2 at
    `q_t.detach()` — a semi-gradient, standard in Jacobian-regularization
    practice: the penalty shapes J at the visited states, treating the
-   visitation distribution as fixed (dropping the third-order term
-   (d||J||²/dq)(dq_t/dθ)). The achieved margins are measured post-hoc by
+   visitation distribution as fixed (dropping the term (d||J||²/dq)
+   (dq_t/dθ), which contracts SECOND derivatives of the step with the
+   rollout sensitivity). The achieved margins are measured post-hoc by
    the audit, so this choice affects optimization dynamics only, never a
    reported diagnostic.
 2. **Deferred single-JVP evaluation**: sampled (detached) states are
@@ -78,6 +79,23 @@ Fresh probes are drawn per call from an explicit `torch.Generator`
 unbiasedness bound.
 
 ## Post-review amendments (two-model adversarial pass, Codex)
+
+0. **Second high-effort round (fresh thread).** Additional accepted
+   findings: (a) the per-step noise quoted in Experiment 1 measures sphere
+   noise at p=1 only — the Bernoulli mask is shared across the batch, so
+   its contribution does NOT average down with B: mask-only CV =
+   sqrt((1-p)/(p*T_eff)) with T_eff = (Σ_t mu_t)² / Σ_t mu_t² ≤ T, which is
+   ≈ 39 % per rollout at T=20, p=0.25 in the equal-step LOWER-BOUND case
+   (T_eff = T) and approaches sqrt((1-p)/p) ≈ 173 % when one step
+   dominates. Declared and
+   accepted for a regularizer averaged over optimizer steps; never
+   acceptable for a reported number. (b) The dropped semi-gradient term
+   contracts SECOND derivatives of the step with rollout sensitivities
+   (earlier wording said "third-order"). (c) In `blocks2x2`, the ZOH input
+   integral is an entire function of A — B_bar exists at (alpha, omega) =
+   (0, 0) (= delta*B); the implementation now branch-selects a series
+   evaluation there instead of wrongly raising, and nonpositive delta is
+   rejected (the ON stability claim needs delta > 0).
 
 1. **Bernoulli subsampling bias fixed.** A plain mean over kept steps is
    biased low by `1 - (1-p)^T` because an empty draw returns zero
