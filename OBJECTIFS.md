@@ -149,7 +149,7 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
 | `base.py` | `Predictor` (protocol), `PredictorState` | Contrat : `step(h,u,state)`, `rollout(h0,u_seq)`, `local_operator(h,u,state) → (A,B) \| None`. Docstring de sémantique : rollout itère dans H, π read-only, `local_operator` = LECTURE seulement, jamais l'objet de stabilité | ⬜ |
-| `blocks2x2.py` | `RotationScalingBlocks`, `discretize_zoh` | Paramétrisation $(\alpha_i, \omega_i)$ → blocs réels 2×2 ; ZOH exacte en forme fermée ; cellule ON : $\alpha_i = -e^{\nu_i}$ ; garde $(\alpha,\omega) \neq (0,0)$ | ⬜ |
+| `blocks2x2.py` | `RotationScalingBlocks`, `discretize_zoh` | Paramétrisation $(\alpha_i, \omega_i)$ → blocs réels 2×2 ; ZOH exacte en forme fermée ; cellule ON : $\alpha_i = -e^{\nu_i}$ ; garde $(\alpha,\omega) \neq (0,0)$ | ✅ |
 | `mlp.py` | `MLPPredictor` | $\hat h_{t+1} = \mathrm{MLP}([h;u])$ + résiduel ; `local_operator` → None | ⬜ |
 | `transformer.py` | `CausalTransformerPredictor` | 2 blocs d'attention causale sur la fenêtre du rollout ; famille générique + baseline O(H²) de la facture | ⬜ |
 | `min_ssm.py` | `SelectiveSSMPredictor` | $\bar A(c_t)$ diagonal réel, $\Delta(c_t)$, $\bar B(c_t)$ ; scan séquentiel ; régime LPV, jamais « Koopman » | ⬜ |
@@ -160,10 +160,10 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `jepa.py` | `JEPALoss` | prédiction latente + EMA target + stop-grad ; consistance liftée λ_c ($\hat h \approx \mathrm{sg}[\psi(z)]$) ; horizons TF/FR déclarés | ⬜ |
-| `vicreg.py` | `variance_loss`, `covariance_loss` | anti-collapse sur ψ(z), appliqué à tous les bras | ⬜ |
-| `jac_reg.py` | `TotalJacobianPenalty` | facteur contrainte commun μ_J : pénalité sur $\lVert J^q \rVert$ (état augmenté) par sondes JVP/Hutchinson, pas sous-échantillonnés — LE point techniquement risqué (spike S1) | ⬜ |
-| `spectral_reg.py` | `SpectralSeparationReg` | hinge + double-puits log-module — **ablation de la famille spectrale seulement**, jamais dans le facteur commun | ⬜ |
+| `jepa.py` | `JEPALoss` | prédiction latente + EMA target + stop-grad ; consistance liftée λ_c ($\hat h \approx \mathrm{sg}[\psi(z)]$) ; horizons TF/FR déclarés | ✅ |
+| `vicreg.py` | `variance_loss`, `covariance_loss` | anti-collapse sur ψ(z), appliqué à tous les bras | ✅ |
+| `jac_reg.py` | `TotalJacobianPenalty` | facteur contrainte commun μ_J : pénalité sur $\lVert J^q \rVert$ (état augmenté) par sondes JVP/Hutchinson, pas sous-échantillonnés — LE point techniquement risqué (spike S1) | ✅ |
+| `spectral_reg.py` | `SpectralSeparationReg` | hinge + double-puits log-module — **ablation de la famille spectrale seulement**, jamais dans le facteur commun | ✅ |
 
 ### 4.6 `training/`
 
