@@ -45,6 +45,7 @@ papers/
 # --- Python ---
 .venv/
 venv/
+*.egg-info/
 env/
 __pycache__/
 *.py[cod]
