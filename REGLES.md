@@ -156,6 +156,26 @@ d'ensemble :
 - Anglais pour tout ce qui est public (code, docstrings, README, notebooks) ;
   le français reste pour les documents de gouvernance internes.
 
+**Contrat public de sortie d'un run** (condition de comparabilité du factorial —
+inspiré du contrat `{agent, history, metrics, paths}` de `RL_from_scratch`).
+Toute exécution `Trainer.fit(...)` ou `sld-factorial` retourne / écrit un objet
+avec les mêmes clés quelle que soit la famille de predictor :
+
+```python
+{"model": model, "history": history, "metrics": summary, "paths": paths}
+```
+
+- `history` : clés stables entre familles — `train_loss`, `val_loss`,
+  `epoch`/`step`, et par diagnostic quand applicable (`jac_margin`, `r_ctrl`,
+  `lip_pi`, `vpt`). Un champ absent pour une famille (ex. `lip_pi` pour un
+  predictor sans projection) est explicitement `None`, jamais omis en silence.
+- `metrics` : résumé court et fini (dernière/meilleure valeur, seed, hash de
+  config) — jamais un tenseur brut.
+- `paths` : `config.yaml`, `metrics.csv`, `audit.json`, `ckpt.pt`, `figs/`
+  (cf. `OBJECTIFS.md` §3). Ce contrat est ce qui permet à `viz/` de lire
+  `results/` sans connaître la famille de predictor — ne pas le casser sans
+  migrer toutes les familles en même temps.
+
 ---
 
 ## 7. Tests
@@ -265,11 +285,59 @@ lire le plan -> situer -> prouver (notebook ou note) -> implémenter (package)
    de l'exposer.
 5. Mettre à jour la colonne Statut d'`OBJECTIFS.md` §4/§5.
 6. Commits atomiques, identité git de l'utilisateur uniquement, jamais
-   d'attribution IA (politique globale du workspace).
+   d'attribution IA (politique globale du workspace). **Aucun commit sans
+   demande explicite de l'utilisateur.**
 
 ---
 
-## 10. Règle finale
+## 10. SOLID appliqué au projet
+
+`§2` fixe déjà la frontière et l'open/closed sur les familles de predictor ;
+ce qui suit le rend explicite composant par composant, dans le style de
+`machine_learning_from_scratch`/`RL_from_scratch` :
+
+- **Single Responsibility** : un module = un rôle (`audit/spectral.py` affiche,
+  `audit/jacobian.py` audite la stabilité, `calibration/triage.py` décide) ;
+  un fichier de predictor = une famille.
+- **Open/Closed** : ajouter une famille de predictor, un système, ou un
+  diagnostic = un fichier + une entrée de registry + ses tests de contrat.
+  Ni l'audit, ni le trainer, ni les configs existantes ne changent (§2).
+- **Liskov** : toute famille respecte le contrat `Predictor` (§2, `predictors/base.py`)
+  — `rollout`, `local_operator` — sans exception cachée par famille ; le code
+  client (`audit/`, `training/`, `viz/`) ne suppose jamais une famille précise.
+- **Interface Segregation** : `audit/` ne connaît pas `planning/` ; `viz/` ne
+  connaît que `results/`, jamais les objets vivants (modèle, optimiseur).
+- **Dependency Inversion** : `calibration/` dépend de `audit/` et de
+  `training/`, jamais l'inverse ; `experiments/` orchestre, il n'implémente
+  aucune équation lui-même.
+
+---
+
+## 11. Vérification minimale
+
+Dans le venv (`uv`, jamais le Python système), avant de considérer une wave ou
+un composant terminé :
+
+```bash
+pytest -q
+python -m compileall -q src tests
+python3 /Users/captain/Documents/Projects/_publication/validate_publication.py \
+    /Users/captain/Documents/Projects/structured-latent-dynamics
+```
+
+- Le validateur doit sortir **0 FAIL** — gate obligatoire, **jamais
+  `--no-verify`, jamais de contournement, jamais désactivé**.
+- Gold tests (§7) au vert avant tout run de grille — un gold test rouge bloque
+  la grille, pas seulement le CI.
+- Stress test d'invariance (§4/§7) au vert avant qu'un diagnostic entre dans
+  une figure.
+- Notebook : JSON valide, outputs nettoyés, `execution_count: null`
+  (`scripts/check_notebooks.py`), pas de hack `sys.path`, parité package
+  vérifiée (§8, niveau 3).
+
+---
+
+## 12. Règle finale
 
 Quand deux choix sont possibles, choisir celui qui rend le résultat plus
 **vérifiable** : plus facile à reproduire, à auditer, à réfuter. Ce repo vend
