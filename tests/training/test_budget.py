@@ -113,3 +113,40 @@ def test_out_of_reach_budget_raises():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+def test_flops_component_locks():
+    # adversarial review round 2: the affine-growth test alone also passed
+    # the old undercounted formulas -- lock the individual terms.
+    from torch import nn
+
+    from sld.training.budget import count_flops_per_step
+
+    # (1) bilinear - constant = exactly the interaction term + combine add
+    kw = dict(d_z=4, n_pairs=2, d_u=3, delta=0.05, psi_hidden=(8,), pi_hidden=(8,))
+    m_const = KoopmanSSMPredictor(regime="constant", **kw)
+    m_bilin = KoopmanSSMPredictor(regime="bilinear", **kw)
+    d_h = m_const.d_h
+    diff = count_flops_per_step(m_bilin) - count_flops_per_step(m_const)
+    expected = 2 * (3 * d_h * d_h) + d_h  # 2 FLOPs/MAC * d_u*d_h^2 + combine add
+    print(f"[flops-lock] bilinear-constant diff = {diff}, expected = {expected}")
+    assert diff == expected
+
+    # (2) koopman trajectory = H*step + one lift + H projections, exactly
+    H = 7
+    psi_macs = sum(
+        m.in_features * m.out_features for m in m_const.psi.modules() if isinstance(m, nn.Linear)
+    )
+    pi_macs = sum(
+        m.in_features * m.out_features for m in m_const.pi.modules() if isinstance(m, nn.Linear)
+    )
+    traj = count_flops_per_trajectory(m_const, H)
+    assert traj == H * count_flops_per_step(m_const) + 2 * psi_macs + H * 2 * pi_macs
+
+    # (3) min_ssm step = 2*linear MACs (independently enumerated) + 4*d_state
+    # elementwise (delta*b, A*m, B*v, sum) + d_h residual add
+    m_ssm = SelectiveSSMPredictor(d_h=4, d_u=2, d_state=8)
+    lin_macs = sum(
+        m.in_features * m.out_features for m in m_ssm.modules() if isinstance(m, nn.Linear)
+    )
+    assert count_flops_per_step(m_ssm) == 2 * lin_macs + 4 * m_ssm.d_state + m_ssm.d_h

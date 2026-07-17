@@ -208,6 +208,17 @@ def test_bounds_validated_and_default_init_finite_rollout():
     gen = torch.Generator().manual_seed(8)
     h0 = torch.randn(5, 4, generator=gen)
     u_seq = torch.randn(200, 5, 2, generator=gen)
-    out = model.rollout(h0, u_seq)
-    print(f"[default-init] 200-step rollout max |h| = {out.abs().max().item():.3e}")
-    assert torch.isfinite(out).all()
+    # thread step manually so the INTERNAL state m is checked too: h alone
+    # can look finite while m overflows (0 * inf -> NaN one step later) --
+    # adversarial review round 2. Claim locked here: 200 steps at default
+    # init, full state (h, m); free-running stability beyond this is an
+    # audit object, not a construction guarantee.
+    h, state = h0, PredictorState()
+    for t in range(u_seq.shape[0]):
+        h, state = model.step(h, u_seq[t], state)
+        assert torch.isfinite(h).all(), f"h nonfinite at step {t}"
+        assert torch.isfinite(state.m).all(), f"m nonfinite at step {t}"
+    print(
+        f"[default-init] 200-step max |h| = {h.abs().max().item():.3e}, "
+        f"max |m| = {state.m.abs().max().item():.3e}"
+    )

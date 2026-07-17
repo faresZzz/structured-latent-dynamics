@@ -109,19 +109,23 @@ def test_run_identity_is_config_plus_seed(tmp_path):
 
 
 def test_hash_determinism_sensitivity_and_results_root_exclusion(tmp_path):
-    run_dir_a = Trainer(_mlp_config(tmp_path)).run_dir
-    run_dir_b = Trainer(_mlp_config(tmp_path)).run_dir
-    print(f"[trainer] same-config run dirs: {run_dir_a} vs {run_dir_b}")
-    assert run_dir_a == run_dir_b
+    # run_dir itself is resolved at fit time (it includes the DATA hash,
+    # round 2); the config side of the identity is testable pre-fit
+    hash_a = Trainer(_mlp_config(tmp_path)).config_hash
+    hash_b = Trainer(_mlp_config(tmp_path)).config_hash
+    print(f"[trainer] same-config hashes: {hash_a} vs {hash_b}")
+    assert hash_a == hash_b
 
-    run_dir_c = Trainer(_mlp_config(tmp_path, lr=1e-3)).run_dir
-    print(f"[trainer] different-lr run dir: {run_dir_c}")
-    assert run_dir_c != run_dir_a
+    hash_c = Trainer(_mlp_config(tmp_path, lr=1e-3)).config_hash
+    print(f"[trainer] different-lr hash: {hash_c}")
+    assert hash_c != hash_a
 
-    # results_root is infrastructure, not identity: same hash, different root
+    # results_root is infrastructure, not identity
     other = Trainer(_mlp_config(tmp_path, results_root=str(tmp_path / "elsewhere")))
-    assert other.run_dir.name == run_dir_a.name
-    assert other.run_dir != run_dir_a
+    assert other.config_hash == hash_a
+
+    # unresolved until data is known
+    assert Trainer(_mlp_config(tmp_path)).run_dir is None
 
 
 def test_train_loss_decreases(tmp_path):
@@ -188,3 +192,85 @@ def test_missing_required_key_raises(tmp_path):
     del config["family"]
     with pytest.raises(ValueError):
         Trainer(config)
+
+
+def test_different_data_different_run_identity(tmp_path):
+    # adversarial review round 2: the dataset generation spec is part of the
+    # run identity -- same config, different data seed -> different run dir
+    cfg = _mlp_config(tmp_path, epochs=1)
+    result_a = Trainer(cfg).fit(_small_dataset(seed=0, n_episodes=6, T=10))
+    result_b = Trainer(dict(cfg)).fit(_small_dataset(seed=1, n_episodes=6, T=10))
+    dir_a = Path(result_a["paths"]["ckpt"]).parent
+    dir_b = Path(result_b["paths"]["ckpt"]).parent
+    print(f"[trainer] data-seed 0 -> {dir_a.name}, data-seed 1 -> {dir_b.name}")
+    assert dir_a != dir_b
+
+    # and data without its meta block is rejected outright
+    import pytest
+
+    bad = {k: v for k, v in _small_dataset(n_episodes=6, T=10).items() if k != "meta"}
+    with pytest.raises(ValueError):
+        Trainer(_mlp_config(tmp_path)).fit(bad)
+
+
+def test_model_keys_applied_or_rejected(tmp_path):
+    import pytest
+
+    # a model-defining key not applicable to the family is REJECTED
+    with pytest.raises(ValueError):
+        Trainer(_mlp_config(tmp_path, delta=0.05))
+    # an applicable key is APPLIED to the constructed model
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(
+        tmp_path,
+        exp_name="trainer_test_heads",
+        family="transformer",
+        n_heads=4,
+        epochs=1,
+        # d_model moves on an n_heads-stride grid: a 2k target is unreachable
+        # within 5% at stride 4, so this sub-test budgets at 10k
+        target_params=10_000,
+    )
+    result = Trainer(cfg).fit(data)
+    assert result["model"]["predictor"].n_heads == 4
+    print("[trainer] transformer n_heads=4 applied from config")
+
+
+def test_weight_domain_enforced(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError):
+        Trainer(_mlp_config(tmp_path, w_fr=-1.0))  # negative != disabled
+    with pytest.raises(ValueError):
+        Trainer(_mlp_config(tmp_path, w_fr=float("nan")))
+    with pytest.raises(ValueError):
+        Trainer(_mlp_config(tmp_path, w_tf=0.0, w_fr=0.0))  # nothing to train
+
+
+def test_disabled_fr_branch_never_called(tmp_path, monkeypatch):
+    # adversarial review round 2: prove the skip, don't infer it -- a
+    # disabled FR branch that still got called would raise here
+    import sld.predictors.base as base_mod
+
+    def _boom(self, h0, u_seq):
+        raise AssertionError("FR rollout called despite w_fr=0")
+
+    monkeypatch.setattr(base_mod.PredictorModule, "rollout", _boom)
+    data = _small_dataset(n_episodes=6, T=10)
+    result = Trainer(_mlp_config(tmp_path, exp_name="trainer_test_skip", w_fr=0.0)).fit(data)
+    assert all(np.isfinite(v) for v in result["history"]["train_loss"])
+    print("[trainer] w_fr=0: rollout never invoked")
+
+
+def test_nonfinite_loss_aborts_run(tmp_path, monkeypatch):
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    monkeypatch.setattr(
+        trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan"))
+    )
+    data = _small_dataset(n_episodes=6, T=10)
+    with pytest.raises(RuntimeError, match="nonfinite"):
+        Trainer(_mlp_config(tmp_path, exp_name="trainer_test_nan")).fit(data)
+    print("[trainer] nonfinite loss aborted the run")

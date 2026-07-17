@@ -409,6 +409,19 @@ def test_selective_step_bounds_are_validated():
             d_z=2, n_pairs=1, d_u=1, delta=0.05, regime="selective",
             delta_min=0.1, delta_max=0.2, dtype=DTYPE,
         )
+    # STRICT interior (round 2): delta sitting exactly ON a clamp boundary
+    # starts saturated toward that side -- rejected
+    with pytest.raises(ValueError):
+        KoopmanSSMPredictor(
+            d_z=2, n_pairs=1, d_u=1, delta=0.2, regime="selective",
+            delta_min=0.01, delta_max=0.2, dtype=DTYPE,
+        )
+    # bounds are selective-only (round 2): a fixed-regime model with a tiny
+    # physical step must NOT be rejected by unused clamp defaults
+    tiny = KoopmanSSMPredictor(
+        d_z=2, n_pairs=1, d_u=1, delta=1e-6, regime="constant", dtype=DTYPE
+    )
+    assert tiny.delta == 1e-6
 
 
 def test_selective_gate_alive_at_init():

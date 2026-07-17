@@ -50,9 +50,24 @@ _DEFAULTS = {
 # models MUST be reconstructible from the config alone -- REGLES section 6)
 _REQUIRED_KEYS = ("exp_name", "seed", "family", "d_x", "d_z", "d_u")
 
-# optional keys forwarded to get_predictor/match_budget (koopman_ssm's
-# physical/scientific knobs; absent keys are simply not forwarded)
-_PREDICTOR_PASSTHROUGH = ("delta", "regime", "constrained", "n_pairs")
+# model-defining config keys accepted PER FAMILY: a key present in the config
+# but not applicable to the declared family is REJECTED at construction --
+# silently ignoring it would let distinct run identities build identical
+# models (adversarial review round 2)
+_FAMILY_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    "mlp": frozenset(),
+    "transformer": frozenset({"n_heads", "max_len"}),
+    "min_ssm": frozenset({"delta_min", "delta_max"}),
+    "koopman_ssm": frozenset(
+        {"delta", "regime", "constrained", "n_pairs", "delta_min", "delta_max"}
+    ),
+}
+_MODEL_KEYS = frozenset().union(*_FAMILY_CONFIG_KEYS.values())
+
+# objective weights: must be finite and >= 0 (a negative weight silently
+# behaving as "disabled" was adversarial review round 2's finding), and at
+# least one PREDICTION objective must be active or there is nothing to train
+_WEIGHT_KEYS = ("w_tf", "w_fr", "w_var", "w_cov")
 
 _HISTORY_DIAGNOSTIC_KEYS = ("jac_margin", "r_ctrl", "lip_pi", "vpt")
 
@@ -108,6 +123,25 @@ class Trainer:
             raise ValueError(f"config must include {missing}")
         self.config = {**_DEFAULTS, **config}
 
+        family = self.config["family"]
+        if family not in _FAMILY_CONFIG_KEYS:
+            raise ValueError(
+                f"unknown family: {family!r}, expected one of {tuple(_FAMILY_CONFIG_KEYS)}"
+            )
+        # every model-defining key present must be applicable to the family:
+        # applied or rejected, never silently ignored
+        inapplicable = sorted((_MODEL_KEYS - _FAMILY_CONFIG_KEYS[family]) & set(config))
+        if inapplicable:
+            raise ValueError(
+                f"config keys {inapplicable} are not applicable to family {family!r}"
+            )
+        for key in _WEIGHT_KEYS:
+            w = self.config[key]
+            if not (isinstance(w, (int, float)) and math.isfinite(w) and w >= 0):
+                raise ValueError(f"{key} must be finite and >= 0, got {w!r}")
+        if self.config["w_tf"] <= 0 and self.config["w_fr"] <= 0:
+            raise ValueError("at least one prediction objective (w_tf or w_fr) must be > 0")
+
         # canonical config string: sort_keys=True makes it a pure function of
         # the resolved dict's content, not of insertion order; this EXACT
         # string is both what gets hashed and what is written to config.yaml.
@@ -117,9 +151,10 @@ class Trainer:
         hashed = {k: v for k, v in self.config.items() if k != "results_root"}
         self._canonical_yaml = yaml.safe_dump(hashed, sort_keys=True)
         self.config_hash = hashlib.sha1(self._canonical_yaml.encode("utf-8")).hexdigest()[:8]
-        self.run_dir = (
-            Path(self.config["results_root"]) / self.config["exp_name"] / self.config_hash
-        )
+        # the FULL run identity also covers the dataset's generation spec
+        # (adversarial review round 2): run_dir is resolved in fit(), once
+        # the data -- and hence its fingerprint -- is known
+        self.run_dir: Path | None = None
 
     def _composite_loss(
         self,
@@ -205,13 +240,22 @@ class Trainer:
     def fit(self, data: dict) -> dict:
         """Build the models FROM the config, then train on ``data``.
 
-        A run is ``config + seed`` (REGLES section 6): ``fit`` seeds the
-        global RNG FIRST and only then constructs the encoder
+        A run is ``config + seed + dataset spec`` (REGLES section 6): ``fit``
+        seeds the global RNG FIRST and only then constructs the encoder
         (``FrameMLPEncoder(d_x, d_z, encoder_hidden)``) and the
         parameter-matched predictor (``get_predictor(family, d_z, d_u,
         target_params, ...)``), so identical config + seed reconstructs
         identical initial weights -- models built by the caller with
         unseeded RNG would break run-identity (adversarial review round 1).
+        The run directory is ``<results_root>/<exp_name>/<config_hash>-
+        <data_hash>`` where ``data_hash`` fingerprints ``data["meta"]`` (the
+        ``build_dataset`` generation spec: system/regime and their params,
+        seed, dt, T, episode splits, observation maps) -- scientifically
+        different datasets can never share a run identity (adversarial
+        review round 2). ``data`` without a ``meta`` block is rejected.
+        Declared scope: the fingerprint covers the generation SPEC; arrays
+        mutated out-of-band without touching ``meta`` are outside it (the
+        replay contract in ``sld.data`` is what ties spec to arrays).
         Encoder scope at v0: FRAME encoder only; the windowed-observation
         data path (sliding windows feeding ``WindowMLPEncoder``) arrives
         with Wave 6 and is NOT wired here.
@@ -225,10 +269,24 @@ class Trainer:
         never a result).
         """
         cfg = self.config
+        # dataset spec enters the run identity BEFORE anything is written
+        if "meta" not in data:
+            raise ValueError(
+                "data must carry its build_dataset 'meta' block: the dataset "
+                "generation spec is part of the run identity"
+            )
+        meta = {k: v for k, v in data["meta"].items() if k != "paths"}  # paths = infra
+        data_hash = hashlib.sha1(
+            json.dumps(meta, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:8]
+        self.run_dir = (
+            Path(cfg["results_root"]) / cfg["exp_name"] / f"{self.config_hash}-{data_hash}"
+        )
+
         set_seed(cfg["seed"])  # seed BEFORE model construction (run identity)
 
         encoder = FrameMLPEncoder(cfg["d_x"], cfg["d_z"], tuple(cfg["encoder_hidden"]))
-        passthrough = {k: cfg[k] for k in _PREDICTOR_PASSTHROUGH if k in cfg}
+        passthrough = {k: cfg[k] for k in _FAMILY_CONFIG_KEYS[cfg["family"]] if k in cfg}
         predictor = get_predictor(
             cfg["family"],
             cfg["d_z"],

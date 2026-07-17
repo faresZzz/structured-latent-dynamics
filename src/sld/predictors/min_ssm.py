@@ -84,9 +84,13 @@ class SelectiveSSMPredictor(PredictorModule):
         self.W_in = nn.Linear(d_h + d_u, d_state)
         self.W_out = nn.Linear(d_state, d_h)
         # zero-init the residual readout (standard residual-branch practice):
-        # at construction h_next == h exactly, so an untrained model is finite
-        # over any free-running horizon (the default Linear init made the
-        # residual loop expansive around h=0 -- adversarial review round 1)
+        # at construction h_next == h exactly, which removes the expansive
+        # h-residual loop the default Linear init produced (adversarial
+        # review round 1). This is NOT a full-state boundedness guarantee:
+        # the internal recurrence on m stays unconstrained (b_t grows with m
+        # through the selectivity path), so free-running stability remains an
+        # AUDIT object (Wave 4), never a construction claim; the test locks
+        # (h, m) finiteness over 200 steps at default init, no more.
         nn.init.zeros_(self.W_out.weight)
         nn.init.zeros_(self.W_out.bias)
 
