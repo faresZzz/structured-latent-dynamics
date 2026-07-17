@@ -419,3 +419,33 @@ def test_explicit_none_default_same_identity(tmp_path):
     h_none = Trainer(explicit_none).config_hash
     print(f"[defaults] omitted={h_base} explicit-None={h_none}")
     assert h_base == h_none
+
+
+def test_disabled_branch_zero_does_not_leak_ambient_dtype(tmp_path):
+    # round 7: with a disabled branch (w_fr=0) and the other terms active,
+    # the placeholder zero must not promote the loss accumulation to the
+    # ambient dtype -- evidence standard: identical COMPLETE histories,
+    # metrics, and metrics.csv bytes across ambient default dtypes
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg_a = _mlp_config(
+        tmp_path, exp_name="trainer_test_zero_dtype", w_fr=0.0, epochs=2,
+        results_root=str(tmp_path / "root_a"),
+    )
+    cfg_b = dict(cfg_a, results_root=str(tmp_path / "root_b"))
+
+    result_a = Trainer(cfg_a).fit(data)  # ambient float32
+
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        result_b = Trainer(cfg_b).fit(data)
+    finally:
+        torch.set_default_dtype(prev)
+
+    assert result_a["history"] == result_b["history"]
+    assert result_a["metrics"]["final_train_loss"] == result_b["metrics"]["final_train_loss"]
+    assert result_a["metrics"]["final_val_loss"] == result_b["metrics"]["final_val_loss"]
+    csv_a = Path(result_a["paths"]["metrics_csv"]).read_text()
+    csv_b = Path(result_b["paths"]["metrics_csv"]).read_text()
+    assert csv_a == csv_b
+    print("[trainer] disabled-branch run bit-identical across ambient dtypes")

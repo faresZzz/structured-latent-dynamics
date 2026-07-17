@@ -251,8 +251,11 @@ class Trainer:
 
         # zero-weighted branches are NOT evaluated at all: a diverging FR
         # rollout must not poison a TF-only run through 0 * NaN (adversarial
-        # review round 1), and skipping them also skips their compute
-        zero = torch.zeros(())
+        # review round 1), and skipping them also skips their compute. The
+        # placeholder zero is EXPLICITLY float32: created under the restored
+        # ambient dtype it would promote the whole loss accumulation to
+        # float64 and change history low bits across ambients (round 7)
+        zero = torch.zeros((), dtype=torch.float32)
 
         if cfg["w_tf"] > 0:
             # -- teacher-forced term: step over the TRUE prefix h_true_t = lift(z_t) --
