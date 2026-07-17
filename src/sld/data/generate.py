@@ -107,7 +107,11 @@ def _describe_obs(obs) -> list:
                 "PartialObservation, SmoothMixing); plain functions/lambdas/"
                 "partials have no canonical identity for the dataset meta"
             )
-        entry = {"class": type(step).__name__, "params": _spec_params(step)}
+        entry = {
+            # module-qualified: same-named custom classes must not collide
+            "class": f"{type(step).__module__}.{type(step).__qualname__}",
+            "params": _spec_params(step),
+        }
         if hasattr(step, "lipschitz_bound"):
             entry["lipschitz_bound"] = step.lipschitz_bound()
         description.append(entry)
@@ -129,8 +133,14 @@ def build_dataset(
     # the full generation spec is validated/described BEFORE any rollout: a
     # rejected obs (lambda, opaque state) must fail fast, not after episodes
     # were integrated or side effects ran (adversarial review round 5)
-    system_spec = {"class": type(system).__name__, "params": _spec_params(system)}
-    regime_spec = {"class": type(regime).__name__, "params": _spec_params(regime)}
+    system_spec = {
+        "class": f"{type(system).__module__}.{type(system).__qualname__}",
+        "params": _spec_params(system),
+    }
+    regime_spec = {
+        "class": f"{type(regime).__module__}.{type(regime).__qualname__}",
+        "params": _spec_params(regime),
+    }
     obs_spec = _describe_obs(obs)
 
     rng = np.random.default_rng(seed)

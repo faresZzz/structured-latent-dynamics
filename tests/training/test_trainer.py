@@ -353,18 +353,69 @@ def test_family_defaults_canonicalized_into_identity(tmp_path):
 
 
 def test_float32_policy_enforced_under_ambient_float64(tmp_path):
-    # round 5: the declared CPU/float32 policy must not depend on the ambient
-    # global default dtype
+    # rounds 5+6: the declared CPU/float32 policy must not depend on the
+    # ambient global default dtype -- and construction must be NATIVE
+    # float32 (float64-then-cast consumes the RNG differently, so the same
+    # config+seed would otherwise give different weights per ambient state).
+    # Evidence standard from the review: bit-identical runs across ambients.
     data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_f32", epochs=1)
+
+    result_native = Trainer(cfg).fit(data)  # ambient float32 (default)
+
     prev = torch.get_default_dtype()
     torch.set_default_dtype(torch.float64)
     try:
-        result = Trainer(
-            _mlp_config(tmp_path, exp_name="trainer_test_f32", epochs=1)
-        ).fit(data)
+        result_ambient = Trainer(dict(cfg)).fit(data)
     finally:
         torch.set_default_dtype(prev)
-    for module in (result["model"]["encoder"], result["model"]["predictor"]):
+
+    for module in (result_ambient["model"]["encoder"], result_ambient["model"]["predictor"]):
         for p in module.parameters():
             assert p.dtype == torch.float32
-    print("[trainer] all params float32 under ambient float64")
+    for key in ("encoder", "predictor"):
+        sd_a = result_native["model"][key].state_dict()
+        sd_b = result_ambient["model"][key].state_dict()
+        for k in sd_a:
+            torch.testing.assert_close(sd_a[k], sd_b[k], atol=0.0, rtol=0.0)
+    assert result_native["history"]["train_loss"] == result_ambient["history"]["train_loss"]
+    print("[trainer] bit-identical run across ambient default dtypes")
+
+
+def test_min_ssm_tiny_interval_rejected_consistently(tmp_path):
+    # round 6: min_ssm bound validation now runs inside the enforced-float32
+    # construction context, so an interval that underflows float32 is
+    # rejected regardless of the ambient default dtype
+    import pytest
+
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(
+        tmp_path,
+        exp_name="trainer_test_tiny",
+        family="min_ssm",
+        delta_min=1e-60,
+        delta_max=1e-40,
+        epochs=1,
+    )
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        with pytest.raises(ValueError, match="dtype"):
+            Trainer(cfg).fit(data)
+    finally:
+        torch.set_default_dtype(prev)
+    print("[trainer] tiny min_ssm interval rejected under ambient float64 too")
+
+
+def test_explicit_none_default_same_identity(tmp_path):
+    # round 6: an explicit delta_max: null must hash like the omitted default
+    base = _mlp_config(
+        tmp_path, family="koopman_ssm", delta=0.05, regime="selective"
+    )
+    explicit_none = _mlp_config(
+        tmp_path, family="koopman_ssm", delta=0.05, regime="selective", delta_max=None
+    )
+    h_base = Trainer(base).config_hash
+    h_none = Trainer(explicit_none).config_hash
+    print(f"[defaults] omitted={h_base} explicit-None={h_none}")
+    assert h_base == h_none

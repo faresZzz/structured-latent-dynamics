@@ -175,24 +175,31 @@ class Trainer:
                 raise ValueError(f"{key} must be an integer >= 1, got {v!r}")
         # family defaults are canonicalized INTO the config before hashing:
         # an omitted default and an explicitly-supplied default value are the
-        # SAME model, so they must be the SAME run identity (round 5)
+        # SAME model, so they must be the SAME run identity (round 5). An
+        # explicit None means "use the default" and is normalized the same
+        # way -- setdefault alone would hash null as a distinct identity
+        # (round 6)
+        def _resolve(key: str, default) -> None:
+            if self.config.get(key) is None:
+                self.config[key] = default
+
         if family == "transformer":
-            self.config.setdefault("n_heads", 2)
-            self.config.setdefault("max_len", 512)
+            _resolve("n_heads", 2)
+            _resolve("max_len", 512)
         elif family == "min_ssm":
-            self.config.setdefault("delta_min", 1e-4)
-            self.config.setdefault("delta_max", 10.0)
+            _resolve("delta_min", 1e-4)
+            _resolve("delta_max", 10.0)
         elif family == "koopman_ssm":
             # conditional requiredness is schema validation, not a fit-time
             # surprise (round 5): delta is koopman's physical ZOH step
-            if "delta" not in self.config:
+            if self.config.get("delta") is None:
                 raise ValueError("family 'koopman_ssm' requires delta in the config")
-            self.config.setdefault("regime", "bilinear")
-            self.config.setdefault("constrained", True)
-            self.config.setdefault("n_pairs", self.config["d_z"])
+            _resolve("regime", "bilinear")
+            _resolve("constrained", True)
+            _resolve("n_pairs", self.config["d_z"])
             if self.config["regime"] == "selective":
-                self.config.setdefault("delta_min", 1e-4)
-                self.config.setdefault("delta_max", 10.0 * self.config["delta"])
+                _resolve("delta_min", 1e-4)
+                _resolve("delta_max", 10.0 * self.config["delta"])
         # selective-only knobs on a fixed regime would hash into the identity
         # while constructing identical dynamics (round 3); the check reads the
         # USER-supplied keys (canonicalization never adds them to fixed regimes)
@@ -352,20 +359,25 @@ class Trainer:
 
         set_seed(cfg["seed"])  # seed BEFORE model construction (run identity)
 
-        encoder = FrameMLPEncoder(cfg["d_x"], cfg["d_z"], tuple(cfg["encoder_hidden"]))
-        passthrough = {k: cfg[k] for k in _FAMILY_CONFIG_KEYS[cfg["family"]] if k in cfg}
-        predictor = get_predictor(
-            cfg["family"],
-            cfg["d_z"],
-            cfg["d_u"],
-            target_params=cfg["target_params"],
-            **passthrough,
-        )
-        # the declared CPU/float32 policy is ENFORCED, not assumed: an
-        # ambient torch.set_default_dtype(float64) must not leak unrecorded
-        # global state into the run identity (adversarial review round 5)
-        encoder = encoder.to(torch.float32)
-        predictor = predictor.to(torch.float32)
+        # the declared CPU/float32 policy is enforced AT CONSTRUCTION, not by
+        # casting afterwards: init draws consume the RNG differently per
+        # dtype, so float64-then-cast is a DIFFERENT seeded model than native
+        # float32, and casting would be exactly the dtype narrowing the
+        # bounds contract declares unsupported (adversarial review round 6)
+        ambient = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        try:
+            encoder = FrameMLPEncoder(cfg["d_x"], cfg["d_z"], tuple(cfg["encoder_hidden"]))
+            passthrough = {k: cfg[k] for k in _FAMILY_CONFIG_KEYS[cfg["family"]] if k in cfg}
+            predictor = get_predictor(
+                cfg["family"],
+                cfg["d_z"],
+                cfg["d_u"],
+                target_params=cfg["target_params"],
+                **passthrough,
+            )
+        finally:
+            torch.set_default_dtype(ambient)
 
         lifted = hasattr(predictor, "lift")
         lift_fn = predictor.lift if lifted else (lambda z: z)
