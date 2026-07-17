@@ -39,6 +39,12 @@ class SmoothMixing:
         b_range: tuple[float, float] = (-0.3, 0.3),
     ) -> None:
         self.dim = dim
+        # constructor spec retained as public attrs: the dataset meta must be
+        # able to REGENERATE this mixing, not just verify its matrices
+        # (adversarial review round 4)
+        self.seed = seed
+        self.a_range = a_range
+        self.b_range = b_range
         rng = np.random.default_rng(seed)
         self.R_1 = _random_rotation(dim, rng)
         self.R_2 = _random_rotation(dim, rng)

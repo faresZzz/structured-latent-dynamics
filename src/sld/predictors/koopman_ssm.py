@@ -125,6 +125,19 @@ class KoopmanSSMPredictor(PredictorModule):
                     "selective regime needs 0 < delta_min < delta < delta_max "
                     "(strict interior: a boundary init is a dead gate)"
                 )
+            # the ordering must SURVIVE the construction dtype: a python-float
+            # interval can underflow/overflow to a dead gate once cast (e.g.
+            # delta=1e-50 in float32 collapses to 0) -- round 4
+            cast = torch.tensor(
+                [self.delta_min, self.delta, self.delta_max], dtype=dtype
+            )
+            if not (
+                torch.isfinite(cast).all() and 0.0 < cast[0] < cast[1] < cast[2]
+            ):
+                raise ValueError(
+                    f"delta bounds collapse in dtype {dtype}: cast to {cast.tolist()} "
+                    "-- the strict interior must survive the construction dtype"
+                )
 
         # read-out maps: pi is read-only w.r.t. the recurrence (base.py contract)
         self.psi = _make_mlp(d_z, self.d_h, psi_hidden, dtype)

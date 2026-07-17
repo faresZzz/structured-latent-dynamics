@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import types
+from functools import partial
 
 import numpy as np
 
@@ -26,7 +28,7 @@ def _spec_params(obj) -> dict:
     for key, value in sorted(vars(obj).items()):
         if key.startswith("_"):
             continue
-        if isinstance(value, (bool, str)):
+        if value is None or isinstance(value, (bool, str)):
             params[key] = value
         elif isinstance(value, (int, np.integer)):
             params[key] = int(value)
@@ -43,6 +45,15 @@ def _spec_params(obj) -> dict:
                 params[key] = {
                     "sha1": hashlib.sha1(np.ascontiguousarray(value).tobytes()).hexdigest()
                 }
+        else:
+            # STRICT: an attribute the meta cannot represent would make two
+            # distinct specs collide silently (round 4) -- refuse instead
+            raise ValueError(
+                f"{type(obj).__name__}.{key} ({type(value).__name__}) is not "
+                "meta-serializable: dataset spec objects may only carry "
+                "None/bool/str/int/float, flat tuples/lists of scalars, or "
+                "numpy arrays as public attributes"
+            )
     return params
 
 
@@ -66,7 +77,16 @@ def _describe_obs(obs) -> list:
     for step in _as_callable_list(obs):
         # class name alone is NOT an identity: two PartialObservation
         # instances with different indices generate different x -- record
-        # the full generation-affecting parameters (round 3)
+        # the full generation-affecting parameters (round 3). Plain
+        # functions/lambdas/partials carry NO canonical spec at all (every
+        # lambda serializes identically), so they are refused outright
+        # (round 4): obs steps must be spec-carrying class instances.
+        if isinstance(step, (types.FunctionType, types.BuiltinFunctionType, partial)):
+            raise ValueError(
+                "obs steps must be spec-carrying class instances (e.g. "
+                "PartialObservation, SmoothMixing); plain functions/lambdas/"
+                "partials have no canonical identity for the dataset meta"
+            )
         entry = {"class": type(step).__name__, "params": _spec_params(step)}
         if hasattr(step, "lipschitz_bound"):
             entry["lipschitz_bound"] = step.lipschitz_bound()

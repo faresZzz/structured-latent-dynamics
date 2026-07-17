@@ -460,3 +460,19 @@ def test_selective_large_delta_initializes():
     assert torch.isfinite(bias).all()
     # softplus(bias) recovers delta (softplus ~ identity at this magnitude)
     assert abs(torch.nn.functional.softplus(bias).item() - 1000.0) < 1e-6
+
+
+def test_selective_bounds_must_survive_construction_dtype():
+    # round 4: a python-float interval that underflows in the construction
+    # dtype recreates the dead gate the validation exists to prevent
+    with pytest.raises(ValueError, match="dtype"):
+        KoopmanSSMPredictor(
+            d_z=2, n_pairs=1, d_u=1, delta=1e-50, regime="selective",
+            delta_min=1e-60, delta_max=1e-40, dtype=torch.float32,
+        )
+    # the same interval is perfectly valid at float64
+    model = KoopmanSSMPredictor(
+        d_z=2, n_pairs=1, d_u=1, delta=1e-50, regime="selective",
+        delta_min=1e-60, delta_max=1e-40, dtype=torch.float64,
+    )
+    assert torch.isfinite(model.W_c.bias).all()

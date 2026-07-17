@@ -72,6 +72,14 @@ class SelectiveSSMPredictor(PredictorModule):
             raise ValueError("delta_min and delta_max must be finite")
         if not (0.0 < delta_min < delta_max):
             raise ValueError("need 0 < delta_min < delta_max")
+        # and the interval must survive the parameter dtype (default float32):
+        # a python-float bound like 1e-50 underflows to 0 once cast -- round 4
+        cast = torch.tensor([delta_min, delta_max], dtype=torch.get_default_dtype())
+        if not (torch.isfinite(cast).all() and 0.0 < cast[0] < cast[1]):
+            raise ValueError(
+                f"delta bounds collapse in dtype {torch.get_default_dtype()}: "
+                f"cast to {cast.tolist()}"
+            )
         self.d_h = d_h
         self.d_u = d_u
         self.d_state = d_state

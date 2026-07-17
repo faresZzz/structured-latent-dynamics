@@ -72,6 +72,17 @@ _BUDGET_OWNED_KEYS = frozenset(
     {"d_model", "d_ff", "n_layers", "hidden", "d_state", "psi_hidden", "pi_hidden"}
 )
 
+# derived or policy-owned constructor names, rejected for every family
+# (round 4 -- closes the schema over ALL public predictor-constructor names):
+# d_h is derived (d_z for plain families, 2*n_pairs for koopman_ssm); dtype
+# is the Trainer's precision policy (CPU float32, declared in the class
+# docstring), not a per-run knob. Classification of every constructor name:
+#   forwarded: d_z, d_u (required keys) + _FAMILY_CONFIG_KEYS per family
+#   budget-owned (rejected): hidden, d_model, d_ff, n_layers, d_state,
+#     psi_hidden, pi_hidden
+#   derived/policy (rejected): d_h, dtype
+_DERIVED_OR_POLICY_KEYS = frozenset({"d_h", "dtype"})
+
 # objective weights: must be finite and >= 0 (a negative weight silently
 # behaving as "disabled" was adversarial review round 2's finding), and at
 # least one PREDICTION objective must be active or there is nothing to train
@@ -149,6 +160,19 @@ class Trainer:
                 f"config keys {budget_owned} are capacity knobs owned by match_budget -- "
                 "set target_params instead (params +/-5% is the fairness contract)"
             )
+        derived = sorted(_DERIVED_OR_POLICY_KEYS & set(config))
+        if derived:
+            raise ValueError(
+                f"config keys {derived} are derived or policy-owned (d_h follows from "
+                "d_z/n_pairs; precision is the Trainer's declared CPU/float32 policy)"
+            )
+        # loop integers must be usable BEFORE any artifact is created: an
+        # empty epoch loop would still write success-only artifacts and then
+        # crash on the empty history (round 4)
+        for key in ("epochs", "batch_episodes", "h_fr"):
+            v = self.config[key]
+            if not (isinstance(v, int) and not isinstance(v, bool) and v >= 1):
+                raise ValueError(f"{key} must be an integer >= 1, got {v!r}")
         # selective-only knobs on a fixed regime would hash into the identity
         # while constructing identical dynamics (round 3)
         if family == "koopman_ssm" and self.config.get("regime", "bilinear") != "selective":

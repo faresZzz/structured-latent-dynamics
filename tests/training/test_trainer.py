@@ -314,3 +314,19 @@ def test_failed_rerun_leaves_no_stale_success_artifacts(tmp_path, monkeypatch):
         Trainer(dict(cfg)).fit(data)
     print(f"[trainer] after failed rerun: ckpt={ckpt.exists()}, audit={audit.exists()}")
     assert not ckpt.exists() and not audit.exists()
+
+
+def test_derived_policy_keys_and_bad_epochs_rejected(tmp_path):
+    import pytest
+
+    # round 4: d_h is derived, dtype is the declared precision policy --
+    # hashing them while ignoring them would fake distinct identities
+    with pytest.raises(ValueError, match="derived or policy"):
+        Trainer(_mlp_config(tmp_path, d_h=999))
+    with pytest.raises(ValueError, match="derived or policy"):
+        Trainer(_mlp_config(tmp_path, family="koopman_ssm", delta=0.05, dtype="float64"))
+    # loop integers validated BEFORE any artifact: an empty epoch loop would
+    # write success-only artifacts then crash on the empty history
+    for bad in ({"epochs": 0}, {"batch_episodes": 0}, {"h_fr": 0}, {"epochs": 2.5}):
+        with pytest.raises(ValueError):
+            Trainer(_mlp_config(tmp_path, **bad))

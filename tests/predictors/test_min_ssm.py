@@ -222,3 +222,12 @@ def test_bounds_validated_and_default_init_finite_rollout():
         f"[default-init] 200-step max |h| = {h.abs().max().item():.3e}, "
         f"max |m| = {state.m.abs().max().item():.3e}"
     )
+
+
+def test_bounds_must_survive_default_dtype():
+    import pytest
+
+    # round 4: bounds are used against float32 activations -- an interval
+    # that underflows once cast is rejected at construction
+    with pytest.raises(ValueError, match="dtype"):
+        SelectiveSSMPredictor(d_h=2, d_u=1, d_state=4, delta_min=1e-60, delta_max=1e-40)

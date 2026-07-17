@@ -99,3 +99,51 @@ def test_meta_distinguishes_nonscalar_generation_params():
     m_c = build_dataset(regime=regime_c, obs=PartialObservation((0,)), **common)["meta"]
     print(f"[meta] regime params a={m_a['regime']['params']} c={m_c['regime']['params']}")
     assert _strip_paths(m_a) != _strip_paths(m_c)
+
+
+def test_obs_without_canonical_spec_rejected():
+    # adversarial review round 4: every lambda serializes identically -- a
+    # spec-less callable would collide distinct datasets under one identity
+    import numpy as np
+    import pytest
+
+    from sld.data.generate import build_dataset
+    from sld.systems.damped_pendulum import DampedPendulum
+    from sld.data.regimes import OURegime
+
+    common = dict(
+        system=DampedPendulum(), regime=OURegime(), n_episodes=4, T=10, dt=0.02, seed=3
+    )
+    with pytest.raises(ValueError, match="canonical identity"):
+        build_dataset(obs=lambda z: 2 * z, **common)
+
+    class OpaqueObs:
+        def __init__(self):
+            self.lookup = {"gain": 2.0}  # dict attr: not meta-serializable
+
+        def __call__(self, z):
+            return np.asarray(z) * self.lookup["gain"]
+
+    with pytest.raises(ValueError, match="meta-serializable"):
+        build_dataset(obs=OpaqueObs(), **common)
+
+
+def test_smooth_mixing_meta_roundtrip():
+    # round 4: the meta must REGENERATE the mixing, not just fingerprint it
+    import numpy as np
+
+    from sld.data.generate import _spec_params
+    from sld.data.mixing import SmoothMixing
+
+    mix = SmoothMixing(dim=17, seed=5)
+    params = _spec_params(mix)
+    rebuilt = SmoothMixing(
+        dim=params["dim"],
+        seed=params["seed"],
+        a_range=tuple(params["a_range"]),
+        b_range=tuple(params["b_range"]),
+    )
+    probe = np.random.default_rng(0).normal(size=(3, 17))
+    err = np.abs(mix(probe) - rebuilt(probe)).max()
+    print(f"[roundtrip] SmoothMixing rebuild max abs err = {err:.3e}")
+    assert err == 0.0
