@@ -184,3 +184,30 @@ def test_overfit_one_pendulum_trajectory():
     print(f"[overfit] final_loss={loss.item():.3e} elapsed={elapsed:.1f}s")
     assert elapsed < 60.0
     assert loss.item() < 1e-3
+
+
+def test_bounds_validated_and_default_init_finite_rollout():
+    import pytest
+
+    # adversarial review round 1 (two locks):
+    # 1) NaN / inverted / non-positive step-size bounds must raise.
+    for kwargs in (
+        {"delta_min": float("nan")},
+        {"delta_max": float("inf")},
+        {"delta_min": 0.0},
+        {"delta_min": 2.0, "delta_max": 1.0},
+    ):
+        with pytest.raises(ValueError):
+            SelectiveSSMPredictor(d_h=2, d_u=1, d_state=8, **kwargs)
+    # 2) the DEFAULT construction is finite over a long free rollout: W_out
+    # is zero-initialized (h_next == h at init), fixing the expansive
+    # residual loop the old default init produced.
+    with torch.random.fork_rng():
+        torch.manual_seed(7)
+        model = SelectiveSSMPredictor(d_h=4, d_u=2, d_state=16)
+    gen = torch.Generator().manual_seed(8)
+    h0 = torch.randn(5, 4, generator=gen)
+    u_seq = torch.randn(200, 5, 2, generator=gen)
+    out = model.rollout(h0, u_seq)
+    print(f"[default-init] 200-step rollout max |h| = {out.abs().max().item():.3e}")
+    assert torch.isfinite(out).all()

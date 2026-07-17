@@ -7,6 +7,12 @@ them at the SAME parameter budget, OBJECTIFS' cross-family comparison).
 exact by construction, and fast at this scale (widths in the tens to low
 hundreds for the 10k-30k targets used in this study).
 
+Scope of the matching (declared): the PREDICTOR's parameters only. The
+encoder is outside this budget -- any factorial arm that varies the encoder
+(frame vs window) is NOT capacity-matched by this module, and the
+pre-registration (Wave 5) must either hold the encoder fixed across
+compared arms or declare encoder capacity as a separate, unmatched factor.
+
 ``count_flops_per_step``/``count_flops_per_trajectory`` are a SEPARATE axis
 from the parameter budget: two families matched on the same parameter count
 can still cost very different FLOPs per step -- most visibly the
@@ -21,15 +27,8 @@ from torch import nn
 from sld.predictors.koopman_ssm import KoopmanSSMPredictor
 from sld.predictors.min_ssm import SelectiveSSMPredictor
 from sld.predictors.mlp import MLPPredictor
+from sld.predictors.registry import _FAMILY_CONSTRUCTORS
 from sld.predictors.transformer import CausalTransformerPredictor
-
-# family name -> constructor, the single source of truth reused by registry.py
-_FAMILY_CONSTRUCTORS: dict[str, type] = {
-    "mlp": MLPPredictor,
-    "transformer": CausalTransformerPredictor,
-    "min_ssm": SelectiveSSMPredictor,
-    "koopman_ssm": KoopmanSSMPredictor,
-}
 
 
 def count_params(model: nn.Module) -> int:
@@ -99,7 +98,13 @@ def _koopman_flops(model: KoopmanSSMPredictor) -> int:
         return 2 * (wc_macs + av_macs + bu_macs) + elementwise
 
     affine_macs = d_h * d_h + d_u * d_h
-    flops = 2 * affine_macs + d_h  # + elementwise combine add
+    # the ZOH input integral Phi @ B_cont IS executed by every step (the
+    # affine operator is re-discretized at use time): per pair a (2x2)@(2xd_u)
+    # block matmul, 4*d_u MACs -- "as executed" counts it (adversarial
+    # review round 1); the O(n_pairs) trig/exp scalar assembly stays declared
+    # negligible
+    zoh_b_macs = 4 * d_u * n_pairs
+    flops = 2 * (affine_macs + zoh_b_macs) + d_h  # + elementwise combine add
     if model.regime == "bilinear":
         interaction_macs = d_u * d_h * d_h
         flops += 2 * interaction_macs + d_h  # + elementwise combine add
@@ -142,15 +147,26 @@ def count_flops_per_step(model: nn.Module, t: int = 1) -> int:
 
 
 def count_flops_per_trajectory(model: nn.Module, H: int) -> int:
-    """Sum of ``count_flops_per_step(model, t)`` for ``t = 0 .. H - 1``.
+    """Full read-out bill of an H-step trajectory (not just ``H * step``).
 
     Quadratic in ``H`` for the transformer (``sum_{t=0}^{H-1} (f0 + c*t) =
     H*f0 + c*H*(H-1)/2`` -- the O(H^2) compute bill behind the O(H^2)-per-
     trajectory baseline framing in ``transformer.py``'s module docstring);
-    exactly linear in ``H`` for the other three families, whose per-step
-    cost does not depend on ``t``.
+    AFFINE in ``H`` for the other three families (constant per-step cost,
+    plus for the lifted family a constant lift).
+
+    For ``koopman_ssm`` the bill includes what a read-out rollout actually
+    executes beyond ``step``: ONE lift ``psi`` at the start and ONE
+    projection ``pi`` per step (its psi/pi hold most of its matched
+    parameters -- excluding them would systematically undercount the family,
+    adversarial review round 1). The other families' read-out is their step
+    output itself; their per-step Linears are already fully counted.
     """
-    return sum(count_flops_per_step(model, t) for t in range(H))
+    total = sum(count_flops_per_step(model, t) for t in range(H))
+    if isinstance(model, KoopmanSSMPredictor):
+        # 2 FLOPs/MAC over psi once + pi at every step
+        total += 2 * _linear_macs(model.psi) + H * 2 * _linear_macs(model.pi)
+    return total
 
 
 def _kwargs_for(family: str, w: int, d_z: int, d_u: int, fixed: dict) -> dict:

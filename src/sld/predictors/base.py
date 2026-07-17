@@ -6,10 +6,13 @@ Semantics locked by OBJECTIFS section 4.4 -- subclasses must not weaken them:
   For lifted families (``koopman_ssm``) the read-out projection ``pi`` is
   read-only: it never feeds back into the recurrence.
 - ``local_operator`` is a READING of the local linear(ized) transition,
-  exposed for the audit instrument (Fig. 2 of the plan). It is NEVER the
-  object of stability claims (REGLES sections 3 and 5): stability is audited
-  offline on the total Jacobian of the augmented state, not on any displayed
-  operator.
+  exposed for the audit instrument (Fig. 2 of the plan) -- it feeds the
+  DISPLAYED local spectra field and nothing else. It is NEVER the object of
+  stability claims (REGLES sections 3 and 5), and the audit's quantitative
+  objects (total Jacobians, Jacobian products, LTV Gramians) are built by
+  autograd on the FULL augmented state ``(h, m)`` offline (Wave 4), never
+  from this pair: a frozen-context, per-family-space reading misses the
+  ``h``-loop and the control-through-scheduling paths by construction.
 - ``PredictorState`` makes the augmented state explicit. ``m`` carries
   whatever context a family threads across steps (selective-SSM hidden
   state, transformer KV cache); ``m=None`` is the universal fresh state.

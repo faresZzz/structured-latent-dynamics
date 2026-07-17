@@ -27,22 +27,12 @@ def _transformer() -> CausalTransformerPredictor:
 
 
 def _min_ssm() -> SelectiveSSMPredictor:
-    model = SelectiveSSMPredictor(d_h=D_H, d_u=D_U, d_state=8)
-    # ponytail: default nn.Linear init gives this family's h-residual loop
-    # (h -> c -> b_t/v_t -> m_next -> W_out -> h_next) a spectral radius > 1
-    # around h=0 at these dims -- verified empirically over 300 (seed, data)
-    # combinations, ALL diverging a raw 50-step rollout regardless of input
-    # scale (a finite-time blowup in the untrained dynamics, not an input-
-    # magnitude effect: base.py disclaims any stability guarantee on h
-    # itself). Downscaling the loop weights (same "adjust untrained init in
-    # the test" pattern test_koopman_ssm.py uses for its own gates) keeps
-    # the contract's "all finite" check about the STEP contract, not an
-    # accident of default init variance.
-    with torch.no_grad():
-        for lin in (model.W_c, model.W_delta, model.W_b, model.W_in, model.W_out):
-            lin.weight.mul_(0.3)
-            lin.bias.mul_(0.3)
-    return model
+    # the DEFAULT construction must satisfy the finiteness contract as-is:
+    # min_ssm zero-inits its residual readout W_out precisely so an untrained
+    # model is finite over any horizon (adversarial review round 1 -- the
+    # earlier default init made the h-residual loop expansive and this test
+    # had to downscale weights, which masked the defect instead of fixing it)
+    return SelectiveSSMPredictor(d_h=D_H, d_u=D_U, d_state=8)
 
 
 def _koopman(regime: str) -> KoopmanSSMPredictor:

@@ -104,11 +104,12 @@ class JEPALoss(nn.Module):
     silent half-wired JEPA bug. ``total = pred + lambda_c * consistency``.
 
     Stop-grad discipline: ``target_z`` is ALWAYS detached before either term
-    is formed, regardless of what the caller already did to it -- but
-    ``lift`` itself is not detached from. When ``lift`` is a family's own
-    learned lifting ``psi`` (as wired by the Trainer), its parameters DO
-    receive gradient through ``consistency`` -- psi trains through this
-    term. Only the target embedding ``target_z`` is stopped.
+    is formed, regardless of what the caller already did to it, and the
+    lifted regression target ``lift(sg[target_z])`` is detached as a WHOLE
+    (the plan's ``h_hat ~ sg[psi(z_target)]``): ``psi`` must not be able to
+    move the target toward ``h_hat`` through this term. ``psi`` still
+    trains through the prediction path, where ``lift(z)`` feeds the
+    predictor's input upstream of ``pred_z``.
     """
 
     def __init__(self, lambda_c: float = 0.0) -> None:
@@ -141,9 +142,11 @@ class JEPALoss(nn.Module):
         if h_hat is None:
             consistency = torch.zeros((), dtype=pred.dtype, device=pred.device)
         else:
-            # lift is NOT detached from: its params (psi) train through this
-            # term. Only the target embedding z_sg is already stopped above.
-            lifted_target = lift(z_sg)
+            # the WHOLE lifted target is stopped (sg[psi(sg[z])], OBJECTIFS
+            # 4.5): psi must not be able to move the regression target toward
+            # h_hat through this term. psi still trains through the pred path
+            # (h_true = lift(z) feeds the predictor upstream).
+            lifted_target = lift(z_sg).detach()
             if h_hat.shape != lifted_target.shape:
                 raise ValueError(
                     f"h_hat {tuple(h_hat.shape)} and its lifted regression target "

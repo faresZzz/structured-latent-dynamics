@@ -77,9 +77,11 @@ def test_ema_update_math_and_buffer_verbatim_copy() -> None:
     )
 
 
-def test_consistency_stops_grad_at_target_but_not_lift() -> None:
-    # Wave 3: lift (psi) trains THROUGH consistency -- only the target
-    # embedding itself must receive no gradient (the classic JEPA leak).
+def test_consistency_target_is_fully_stopped() -> None:
+    # Wave 3 (post-adversarial-review): the WHOLE lifted target
+    # sg[psi(sg[z])] is stopped -- neither the target embedding NOR the lift
+    # parameters receive gradient through consistency (psi must not chase
+    # h_hat; it trains through the pred path upstream instead).
     gen = torch.Generator().manual_seed(1)
     pred_z = torch.randn(5, 4, generator=gen, requires_grad=True)
     target_z = torch.randn(5, 4, generator=gen).requires_grad_(True)
@@ -92,9 +94,7 @@ def test_consistency_stops_grad_at_target_but_not_lift() -> None:
     assert target_z.grad is None or torch.all(target_z.grad == 0)
 
     for p in lift.parameters():
-        assert p.grad is not None
-        assert torch.isfinite(p.grad).all()
-        assert (p.grad != 0).any()
+        assert p.grad is None or torch.all(p.grad == 0)
 
     for leaf in (pred_z, h_hat):
         assert leaf.grad is not None

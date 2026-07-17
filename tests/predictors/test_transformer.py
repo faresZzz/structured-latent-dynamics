@@ -174,3 +174,32 @@ def test_overfit_one_trajectory():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+def test_cache_content_is_used():
+    # adversarial review round 1: length-based tests pass even if cached K/V
+    # were appended but ignored. Same current token, same position, two
+    # DIFFERENT prefixes -> the outputs must differ, proving attention reads
+    # the cache CONTENT.
+    with torch.random.fork_rng():
+        torch.manual_seed(11)
+        model = CausalTransformerPredictor(d_h=3, d_u=2, d_model=16, n_heads=2)
+    gen = torch.Generator().manual_seed(12)
+
+    def run_prefix(seed_offset: int) -> PredictorState:
+        g = torch.Generator().manual_seed(100 + seed_offset)
+        state = PredictorState()
+        for _ in range(2):
+            h_p = torch.randn(4, 3, generator=g)
+            u_p = torch.randn(4, 2, generator=g)
+            _, state = model.step(h_p, u_p, state)
+        return state
+
+    state_a, state_b = run_prefix(0), run_prefix(1)
+    h_cur = torch.randn(4, 3, generator=gen)
+    u_cur = torch.randn(4, 2, generator=gen)
+    out_a, _ = model.step(h_cur, u_cur, state_a)
+    out_b, _ = model.step(h_cur, u_cur, state_b)
+    diff = (out_a - out_b).abs().max().item()
+    print(f"[cache-content] max |out_a - out_b| = {diff:.3e}")
+    assert diff > 1e-6, "outputs identical across different prefixes: cache content unused"

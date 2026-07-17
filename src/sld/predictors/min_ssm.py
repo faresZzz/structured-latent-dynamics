@@ -66,6 +66,12 @@ class SelectiveSSMPredictor(PredictorModule):
         delta_max: float = 10.0,
     ) -> None:
         super().__init__()
+        # step-size bounds must define a real interval: NaN/inverted/negative
+        # bounds would silently break the softplus+clamp guard downstream
+        if not (math.isfinite(delta_min) and math.isfinite(delta_max)):
+            raise ValueError("delta_min and delta_max must be finite")
+        if not (0.0 < delta_min < delta_max):
+            raise ValueError("need 0 < delta_min < delta_max")
         self.d_h = d_h
         self.d_u = d_u
         self.d_state = d_state
@@ -77,6 +83,12 @@ class SelectiveSSMPredictor(PredictorModule):
         self.W_b = nn.Linear(d_state, d_state)
         self.W_in = nn.Linear(d_h + d_u, d_state)
         self.W_out = nn.Linear(d_state, d_h)
+        # zero-init the residual readout (standard residual-branch practice):
+        # at construction h_next == h exactly, so an untrained model is finite
+        # over any free-running horizon (the default Linear init made the
+        # residual loop expansive around h=0 -- adversarial review round 1)
+        nn.init.zeros_(self.W_out.weight)
+        nn.init.zeros_(self.W_out.bias)
 
         # continuous diagonal generator a_cont = -exp(a_log) < 0, initialized
         # so a_cont in [-1, -0.1]: negative real diagonal (no oscillatory

@@ -112,6 +112,15 @@ class KoopmanSSMPredictor(PredictorModule):
         self.regime = regime
         self.delta_min = float(delta_min)
         self.delta_max = float(10.0 * delta if delta_max is None else delta_max)
+        # the clamp interval must be a real interval containing the base step,
+        # else the selective gate is dead (saturated clamp = zero gradient)
+        # or silently broken (NaN/inverted bounds) from the first call
+        if not (math.isfinite(self.delta_min) and math.isfinite(self.delta_max)):
+            raise ValueError("delta_min and delta_max must be finite")
+        if not (0.0 < self.delta_min < self.delta_max):
+            raise ValueError("need 0 < delta_min < delta_max")
+        if regime == "selective" and not (self.delta_min <= self.delta <= self.delta_max):
+            raise ValueError("selective regime needs delta_min <= delta <= delta_max")
 
         # read-out maps: pi is read-only w.r.t. the recurrence (base.py contract)
         self.psi = _make_mlp(d_z, self.d_h, psi_hidden, dtype)
@@ -134,6 +143,13 @@ class KoopmanSSMPredictor(PredictorModule):
         elif regime == "selective":
             # LPV code net: c_t = W_c(concat([h, u])) -> per-pair delta_t
             self.W_c = nn.Linear(self.d_h + d_u, n_pairs, dtype=dtype)
+            # bias so softplus(bias) == delta: at init the gate sits at the
+            # base step, INSIDE the clamp interval -- a zero bias would give
+            # softplus(0) ~ 0.693, saturated against delta_max = 10*delta for
+            # any delta < 0.07, zeroing every W_c gradient (dead gate,
+            # adversarial review round 1)
+            with torch.no_grad():
+                self.W_c.bias.fill_(math.log(math.expm1(self.delta)))
 
     # -- lifting / projection -------------------------------------------------
 

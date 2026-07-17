@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -19,9 +20,11 @@ import torch
 import yaml
 from torch import nn
 
+from sld.encoders.frame_mlp import FrameMLPEncoder
 from sld.objectives.jepa import EMATarget, JEPALoss
 from sld.objectives.vicreg import covariance_loss, variance_loss
 from sld.predictors.base import PredictorState
+from sld.predictors.registry import get_predictor
 from sld.training.seeding import set_seed
 
 # resolved for any key the caller omits; unknown extra keys the caller DOES
@@ -38,8 +41,18 @@ _DEFAULTS = {
     "h_fr": 5,
     "w_var": 1.0,
     "w_cov": 1.0,
+    "encoder_hidden": [64, 64],
+    "target_params": 10_000,
     "results_root": "results",
 }
+
+# model-building keys every run must declare (a run is config + seed, so the
+# models MUST be reconstructible from the config alone -- REGLES section 6)
+_REQUIRED_KEYS = ("exp_name", "seed", "family", "d_x", "d_z", "d_u")
+
+# optional keys forwarded to get_predictor/match_budget (koopman_ssm's
+# physical/scientific knobs; absent keys are simply not forwarded)
+_PREDICTOR_PASSTHROUGH = ("delta", "regime", "constrained", "n_pairs")
 
 _HISTORY_DIAGNOSTIC_KEYS = ("jac_margin", "r_ctrl", "lip_pi", "vpt")
 
@@ -90,16 +103,19 @@ class Trainer:
     """
 
     def __init__(self, config: dict) -> None:
-        if "exp_name" not in config:
-            raise ValueError("config must include 'exp_name'")
-        if "seed" not in config:
-            raise ValueError("config must include 'seed'")
+        missing = [k for k in _REQUIRED_KEYS if k not in config]
+        if missing:
+            raise ValueError(f"config must include {missing}")
         self.config = {**_DEFAULTS, **config}
 
         # canonical config string: sort_keys=True makes it a pure function of
         # the resolved dict's content, not of insertion order; this EXACT
-        # string is both what gets hashed and what is written to config.yaml
-        self._canonical_yaml = yaml.safe_dump(self.config, sort_keys=True)
+        # string is both what gets hashed and what is written to config.yaml.
+        # results_root is EXCLUDED from the hashed identity: it is
+        # infrastructure (where artifacts land), not science (what the run
+        # is) -- adversarial review round 1.
+        hashed = {k: v for k, v in self.config.items() if k != "results_root"}
+        self._canonical_yaml = yaml.safe_dump(hashed, sort_keys=True)
         self.config_hash = hashlib.sha1(self._canonical_yaml.encode("utf-8")).hexdigest()[:8]
         self.run_dir = (
             Path(self.config["results_root"]) / self.config["exp_name"] / self.config_hash
@@ -119,43 +135,57 @@ class Trainer:
         h_fr: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """One composite loss evaluation: TF + FR + VICReg, on one episode batch."""
+        cfg = self.config
         T = u_bt.shape[0]
         z = encoder(x_bt)  # (T+1, B, d_z) online
         z_tgt = ema(x_bt)  # (T+1, B, d_z) EMA target, no grad by construction
 
-        # -- teacher-forced term: step over the TRUE prefix h_true_t = lift(z_t) --
-        h_true = lift_fn(z[:T])  # (T, B, d_h)
-        state = PredictorState()
-        h_hats = []
-        for t in range(T):
-            h_next, state = predictor.step(h_true[t], u_bt[t], state)
-            h_hats.append(h_next)
-        h_hat_tf = torch.stack(h_hats, dim=0)  # (T, B, d_h)
-        pred_z_tf = project_fn(h_hat_tf)  # (T, B, d_z)
-        tf_out = jepa(
-            pred_z_tf,
-            z_tgt[1:],
-            h_hat=h_hat_tf if lifted else None,
-            lift=lift_fn if lifted else None,
-        )
+        # zero-weighted branches are NOT evaluated at all: a diverging FR
+        # rollout must not poison a TF-only run through 0 * NaN (adversarial
+        # review round 1), and skipping them also skips their compute
+        zero = torch.zeros(())
 
-        # -- free-running term: rollout h_fr <= T steps from h0 = lift(z_0) --
-        h0 = lift_fn(z[0])  # (B, d_h)
-        h_hat_fr = predictor.rollout(h0, u_bt[:h_fr])  # (h_fr, B, d_h)
-        pred_z_fr = project_fn(h_hat_fr)  # (h_fr, B, d_z)
-        fr_out = jepa(
-            pred_z_fr,
-            z_tgt[1 : h_fr + 1],
-            h_hat=h_hat_fr if lifted else None,
-            lift=lift_fn if lifted else None,
-        )
+        if cfg["w_tf"] > 0:
+            # -- teacher-forced term: step over the TRUE prefix h_true_t = lift(z_t) --
+            h_true = lift_fn(z[:T])  # (T, B, d_h)
+            state = PredictorState()
+            h_hats = []
+            for t in range(T):
+                h_next, state = predictor.step(h_true[t], u_bt[t], state)
+                h_hats.append(h_next)
+            h_hat_tf = torch.stack(h_hats, dim=0)  # (T, B, d_h)
+            pred_z_tf = project_fn(h_hat_tf)  # (T, B, d_z)
+            tf_out = jepa(
+                pred_z_tf,
+                z_tgt[1:],
+                h_hat=h_hat_tf if lifted else None,
+                lift=lift_fn if lifted else None,
+            )
+        else:
+            tf_out = {"total": zero, "pred": zero, "consistency": zero}
 
-        # -- VICReg anti-collapse on the lifted online embeddings (every arm, OBJECTIFS 4.5) --
-        zl = lift_fn(z)  # (T+1, B, d_h); variance/covariance_loss flatten leading dims themselves
-        var = variance_loss(zl)
-        cov = covariance_loss(zl)
+        if cfg["w_fr"] > 0:
+            # -- free-running term: rollout h_fr <= T steps from h0 = lift(z_0) --
+            h0 = lift_fn(z[0])  # (B, d_h)
+            h_hat_fr = predictor.rollout(h0, u_bt[:h_fr])  # (h_fr, B, d_h)
+            pred_z_fr = project_fn(h_hat_fr)  # (h_fr, B, d_z)
+            fr_out = jepa(
+                pred_z_fr,
+                z_tgt[1 : h_fr + 1],
+                h_hat=h_hat_fr if lifted else None,
+                lift=lift_fn if lifted else None,
+            )
+        else:
+            fr_out = {"total": zero, "pred": zero, "consistency": zero}
 
-        cfg = self.config
+        if cfg["w_var"] > 0 or cfg["w_cov"] > 0:
+            # -- VICReg anti-collapse on the lifted online embeddings (every arm) --
+            zl = lift_fn(z)  # (T+1, B, d_h); the losses flatten leading dims themselves
+            var = variance_loss(zl) if cfg["w_var"] > 0 else zero
+            cov = covariance_loss(zl) if cfg["w_cov"] > 0 else zero
+        else:
+            var = cov = zero
+
         total = (
             cfg["w_tf"] * tf_out["total"]
             + cfg["w_fr"] * fr_out["total"]
@@ -172,17 +202,40 @@ class Trainer:
         }
         return total, diag
 
-    def fit(self, encoder: nn.Module, predictor, data: dict) -> dict:
-        """Train ``encoder`` + ``predictor`` on ``data`` (a ``build_dataset`` output).
+    def fit(self, data: dict) -> dict:
+        """Build the models FROM the config, then train on ``data``.
+
+        A run is ``config + seed`` (REGLES section 6): ``fit`` seeds the
+        global RNG FIRST and only then constructs the encoder
+        (``FrameMLPEncoder(d_x, d_z, encoder_hidden)``) and the
+        parameter-matched predictor (``get_predictor(family, d_z, d_u,
+        target_params, ...)``), so identical config + seed reconstructs
+        identical initial weights -- models built by the caller with
+        unseeded RNG would break run-identity (adversarial review round 1).
+        Encoder scope at v0: FRAME encoder only; the windowed-observation
+        data path (sliding windows feeding ``WindowMLPEncoder``) arrives
+        with Wave 6 and is NOT wired here.
 
         Returns the REGLES section 6 public contract:
         ``{"model", "history", "metrics", "paths"}``. Writes artifacts to
         ``self.run_dir``: ``config.yaml``, ``metrics.csv``, ``ckpt.pt``,
         ``audit.json`` (placeholder ``{}``, filled by the Wave 4 audit
-        offline), ``figs/`` (empty).
+        offline), ``figs/`` (empty). Any nonfinite train/val loss ABORTS
+        the run with ``RuntimeError`` (finite-metrics law: NaN is a bug,
+        never a result).
         """
         cfg = self.config
-        set_seed(cfg["seed"])  # global RNG mutation by design (seeding.py); trainer-level knob
+        set_seed(cfg["seed"])  # seed BEFORE model construction (run identity)
+
+        encoder = FrameMLPEncoder(cfg["d_x"], cfg["d_z"], tuple(cfg["encoder_hidden"]))
+        passthrough = {k: cfg[k] for k in _PREDICTOR_PASSTHROUGH if k in cfg}
+        predictor = get_predictor(
+            cfg["family"],
+            cfg["d_z"],
+            cfg["d_u"],
+            target_params=cfg["target_params"],
+            **passthrough,
+        )
 
         lifted = hasattr(predictor, "lift")
         lift_fn = predictor.lift if lifted else (lambda z: z)
@@ -237,6 +290,14 @@ class Trainer:
                     )
 
                 train_loss, val_loss = float(train_total.item()), float(val_total.item())
+                # finite-metrics law (REGLES section 6): a nonfinite loss is a
+                # bug, never a result -- abort loudly instead of writing a
+                # completed-looking run (adversarial review round 1)
+                if not (math.isfinite(train_loss) and math.isfinite(val_loss)):
+                    raise RuntimeError(
+                        f"nonfinite loss at epoch {epoch}: train={train_loss}, "
+                        f"val={val_loss} -- run aborted, artifacts incomplete"
+                    )
                 history["epoch"].append(epoch)
                 history["train_loss"].append(train_loss)
                 history["val_loss"].append(val_loss)

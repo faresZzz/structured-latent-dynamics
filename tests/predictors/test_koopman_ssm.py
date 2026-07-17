@@ -276,10 +276,14 @@ def test_gold_bilinear_koopman_spectrum():
     # ALONE does NOT identify the block spectrum. With linear equal-dim psi/pi
     # there is a gauge freedom -- pi_W A_bar psi_W = M is solvable for ANY
     # (alpha, omega) -- so one-step training reaches MSE ~1e-33 with a wrong
-    # spectrum. A free-running term is what breaks the gauge: matching
-    # pi_W A_bar^k psi_W = M^k for k >= 2 forces psi_W pi_W = I, i.e. pi = psi^-1,
-    # which makes A_bar SIMILAR to M and pins its eigenvalues. The spec flagged
-    # this free-running term as "optional if it helps"; here it is necessary.
+    # spectrum (measured: omega off by 3x). Multi-step matching breaks the
+    # gauge: in the IDEAL square/unbiased/purely-linear case, fitting
+    # pi_W A_bar^k psi_W = M^k for k >= 2 forces psi_W pi_W = I, making A_bar
+    # similar to M. That idealized argument MOTIVATES the free-running loss;
+    # it is not a proof for the actual affine (biased) controlled model with
+    # a live bilinear term. The evidence for identification is the assertion
+    # below itself: converged fit (checked) + eigenvalues matching the
+    # independent analytic reference at 1e-2.
     x0_win, u_win, tgt_win = _free_running_windows(states, actions, H=10)
 
     torch.manual_seed(0)
@@ -300,6 +304,11 @@ def test_gold_bilinear_koopman_spectrum():
         opt.step()
         sched.step()
     print(f"[gold] final free-running MSE = {loss.item():.3e}")
+    # non-vacuity: the eigenvalue check below only means something if the fit
+    # actually converged (adversarial review round 1). Threshold calibrated
+    # 3x above the measured converged value (3.47e-6); an unconverged or
+    # gauge-broken fit sits orders of magnitude away on either side.
+    assert loss.item() < 1e-5, f"gold fit did not converge: MSE={loss.item():.3e}"
 
     # learned discrete pair: eigenvalues of the assembled 2x2 A_bar
     A_bar_blocks, _ = model.blocks.discretize_zoh(dt)
@@ -314,10 +323,22 @@ def test_gold_bilinear_koopman_spectrum():
     print(f"[gold] per-eigenvalue relative error = {rel}")
     assert np.all(rel < 1e-2), f"gold spectrum gate: rel={rel}"
 
-    # on linear data the bilinear coupling must vanish relative to B_bar_0
-    _, B_bar_0 = model._discrete_affine()
-    ratio = (torch.linalg.norm(model.B_j) / torch.linalg.norm(B_bar_0)).item()
-    print(f"[gold] ||B_j|| / ||B_bar_0|| = {ratio:.3e}")
+    # on linear data the bilinear coupling must vanish -- compared through its
+    # EFFECT on the data, not raw parameter norms: under the prediction-
+    # preserving lift rescale h -> c*h, ||B_bar_0|| scales by c while ||B_j||
+    # does not, so a raw norm ratio is pure gauge (adversarial review round
+    # 1). Both effect terms below scale by c, so their ratio is
+    # gauge-invariant.
+    with torch.no_grad():
+        _, B_bar_0 = model._discrete_affine()
+        h_data = model.lift(x0_win)  # (B, d_h) lifted window starts
+        u_data = u_win[0]  # (B, d_u) matching first-step actions
+        bilinear_effect = torch.einsum("bj,jkl,bl->bk", u_data, model.B_j, h_data)
+        affine_effect = u_data @ B_bar_0.T
+        ratio = (
+            torch.linalg.norm(bilinear_effect) / torch.linalg.norm(affine_effect)
+        ).item()
+    print(f"[gold] ||sum_j u_j B_j h|| / ||B_bar_0 u|| on data = {ratio:.3e}")
     assert ratio < 0.1
 
 
@@ -364,3 +385,50 @@ def test_guards():
             KoopmanSSMPredictor(
                 d_z=2, n_pairs=1, d_u=1, delta=bad, regime="constant", dtype=DTYPE
             )
+
+
+def test_selective_step_bounds_are_validated():
+    # adversarial review round 1: NaN / inverted / non-positive clamp bounds
+    # would silently break the softplus+clamp guard -- they must raise at
+    # construction, and the base delta must sit inside the selective interval
+    bad_bounds = [
+        {"delta_min": float("nan")},
+        {"delta_max": float("inf")},
+        {"delta_min": -1e-3},
+        {"delta_min": 0.0},
+        {"delta_min": 0.5, "delta_max": 0.1},
+    ]
+    for kwargs in bad_bounds:
+        with pytest.raises(ValueError):
+            KoopmanSSMPredictor(
+                d_z=2, n_pairs=1, d_u=1, delta=0.05, regime="selective", dtype=DTYPE, **kwargs
+            )
+    # delta outside [delta_min, delta_max] is a dead gate from step one
+    with pytest.raises(ValueError):
+        KoopmanSSMPredictor(
+            d_z=2, n_pairs=1, d_u=1, delta=0.05, regime="selective",
+            delta_min=0.1, delta_max=0.2, dtype=DTYPE,
+        )
+
+
+def test_selective_gate_alive_at_init():
+    # adversarial review round 1: with the old zero bias, softplus(0)=0.693
+    # saturated against delta_max=10*delta for any delta < 0.07 -- W_c got
+    # zero gradient (dead gate). The bias init softplus(bias)=delta must put
+    # the init step INSIDE the clamp interval.
+    model = KoopmanSSMPredictor(
+        d_z=2, n_pairs=2, d_u=1, delta=0.05, regime="selective", dtype=DTYPE
+    )
+    gen = torch.Generator().manual_seed(3)
+    h = torch.randn(4, model.d_h, generator=gen, dtype=DTYPE)
+    u = torch.randn(4, 1, generator=gen, dtype=DTYPE)
+    c = model.W_c(torch.cat([h, u], dim=-1))
+    delta_t = torch.clamp(torch.nn.functional.softplus(c), model.delta_min, model.delta_max)
+    interior = (delta_t > model.delta_min) & (delta_t < model.delta_max)
+    print(f"[gate] init delta_t range = [{delta_t.min():.4f}, {delta_t.max():.4f}]")
+    assert interior.all(), "selective gate saturated at init"
+    # and the gradient actually reaches W_c through the step
+    h_next, _ = model.step(h, u, PredictorState())
+    h_next.sum().backward()
+    assert model.W_c.weight.grad is not None
+    assert (model.W_c.weight.grad != 0).any()

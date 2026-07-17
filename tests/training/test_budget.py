@@ -83,12 +83,17 @@ def test_transformer_trajectory_flops_superlinear(H):
 
 @pytest.mark.parametrize("H", [50, 100])
 @pytest.mark.parametrize("family", ["mlp", "min_ssm", "koopman_ssm"])
-def test_other_families_trajectory_flops_exactly_linear(family, H):
+def test_other_families_trajectory_flops_exactly_affine(family, H):
+    # AFFINE in H, not proportional: koopman_ssm's trajectory bill carries a
+    # constant one-time lift on top of its per-step cost (step + projection),
+    # so the exact-linearity claim is equal increments, integer arithmetic
     model = _build(family)
     f_h = count_flops_per_trajectory(model, H)
     f_2h = count_flops_per_trajectory(model, 2 * H)
-    print(f"[budget] {family} trajectory flops H={H} -> {f_h}, 2H -> {f_2h}")
-    assert f_2h == 2 * f_h  # integer arithmetic, exact ratio == 2
+    f_3h = count_flops_per_trajectory(model, 3 * H)
+    print(f"[budget] {family} trajectory flops H={H} -> {f_h}, 2H -> {f_2h}, 3H -> {f_3h}")
+    assert f_3h - f_2h == f_2h - f_h  # constant per-step cost, exact
+    assert f_2h > f_h > 0
 
 
 def test_unknown_family_raises():

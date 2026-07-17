@@ -10,7 +10,20 @@ comparing families at a fixed parameter budget is comparing like with like.
 
 from __future__ import annotations
 
-from sld.training.budget import _FAMILY_CONSTRUCTORS, match_budget
+from sld.predictors.koopman_ssm import KoopmanSSMPredictor
+from sld.predictors.min_ssm import SelectiveSSMPredictor
+from sld.predictors.mlp import MLPPredictor
+from sld.predictors.transformer import CausalTransformerPredictor
+
+# family name -> constructor: lives HERE (predictors) so the dependency runs
+# one way only (training.budget imports this map; predictors never imports
+# training at module scope -- adversarial review round 1, circular import)
+_FAMILY_CONSTRUCTORS: dict[str, type] = {
+    "mlp": MLPPredictor,
+    "transformer": CausalTransformerPredictor,
+    "min_ssm": SelectiveSSMPredictor,
+    "koopman_ssm": KoopmanSSMPredictor,
+}
 
 FAMILIES: tuple[str, ...] = tuple(_FAMILY_CONSTRUCTORS)
 
@@ -27,5 +40,10 @@ def get_predictor(family: str, d_z: int, d_u: int, target_params: int = 10_000, 
             hits ``target_params`` within +/-5% (propagated from
             ``match_budget``).
     """
+    # imported lazily: training depends on predictors at module scope, never
+    # the reverse (keeps `import sld.training` and `import sld.predictors`
+    # both clean in a fresh process, in either order)
+    from sld.training.budget import match_budget
+
     kwargs = match_budget(family, d_z, d_u, target_params=target_params, **overrides)
     return _FAMILY_CONSTRUCTORS[family](**kwargs)
