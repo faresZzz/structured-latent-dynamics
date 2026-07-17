@@ -153,7 +153,10 @@ class KoopmanSSMPredictor(PredictorModule):
             # any delta < 0.07, zeroing every W_c gradient (dead gate,
             # adversarial review round 1)
             with torch.no_grad():
-                self.W_c.bias.fill_(math.log(math.expm1(self.delta)))
+                # stable inverse softplus: log(e^d - 1) = d + log(1 - e^-d);
+                # the naive log(expm1(d)) overflows for large validated d
+                # (adversarial review round 3)
+                self.W_c.bias.fill_(self.delta + math.log(-math.expm1(-self.delta)))
 
     # -- lifting / projection -------------------------------------------------
 

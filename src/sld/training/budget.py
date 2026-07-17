@@ -137,10 +137,11 @@ def count_flops_per_step(model: nn.Module, t: int = 1) -> int:
     if isinstance(model, CausalTransformerPredictor):
         return _transformer_flops(model, t)
     if isinstance(model, SelectiveSSMPredictor):
-        # W_c, W_delta, W_b, W_in, W_out; elementwise: delta_t*b_t (B_bar),
-        # A_bar_t*m, B_bar_t*v_t, their sum (4*d_state), plus the residual
-        # combine add (d_h)
-        elementwise = 4 * model.d_state + model.d_h
+        # W_c, W_delta, W_b, W_in, W_out; elementwise: delta_t*a_cont (the
+        # exp itself is activation-exempt), delta_t*b_t (B_bar), A_bar_t*m,
+        # B_bar_t*v_t, their sum (5*d_state), plus the residual combine
+        # add (d_h)
+        elementwise = 5 * model.d_state + model.d_h
         return 2 * _linear_macs(model) + elementwise
     if isinstance(model, KoopmanSSMPredictor):
         return _koopman_flops(model)

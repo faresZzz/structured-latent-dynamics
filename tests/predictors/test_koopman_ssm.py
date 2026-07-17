@@ -445,3 +445,18 @@ def test_selective_gate_alive_at_init():
     h_next.sum().backward()
     assert model.W_c.weight.grad is not None
     assert (model.W_c.weight.grad != 0).any()
+
+
+def test_selective_large_delta_initializes():
+    # adversarial review round 3: log(expm1(delta)) overflowed for large
+    # validated delta -- the stable inverse softplus must accept anything
+    # the validation admits
+    model = KoopmanSSMPredictor(
+        d_z=2, n_pairs=1, d_u=1, delta=1000.0, regime="selective",
+        delta_min=1.0, delta_max=2000.0, dtype=DTYPE,
+    )
+    bias = model.W_c.bias.detach()
+    print(f"[large-delta] W_c bias = {bias}")
+    assert torch.isfinite(bias).all()
+    # softplus(bias) recovers delta (softplus ~ identity at this magnitude)
+    assert abs(torch.nn.functional.softplus(bias).item() - 1000.0) < 1e-6

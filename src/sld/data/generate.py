@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 
@@ -10,16 +11,38 @@ import numpy as np
 from sld.systems.base import DynamicalSystem
 
 
-def _scalar_params(obj) -> dict:
-    """Instance attributes of ``obj`` that are plain ints/floats, JSON-ready."""
+def _spec_params(obj) -> dict:
+    """Every generation-affecting instance attribute of ``obj``, JSON-ready.
+
+    The meta block is the dataset's identity document (the Trainer hashes it
+    into the run identity), so it must distinguish EVERY parameter that can
+    change the generated arrays -- scalars, but also tuples/lists (e.g.
+    ``PartialObservation.indices``) and small ndarrays (e.g.
+    ``ActionConditionedRegime.K_gain``); serializing only scalars let
+    distinct specs collide (adversarial review round 3). Large arrays are
+    recorded by content hash instead of value.
+    """
     params = {}
-    for key, value in vars(obj).items():
-        if isinstance(value, bool):
+    for key, value in sorted(vars(obj).items()):
+        if key.startswith("_"):
             continue
-        if isinstance(value, (int, np.integer)):
+        if isinstance(value, (bool, str)):
+            params[key] = value
+        elif isinstance(value, (int, np.integer)):
             params[key] = int(value)
         elif isinstance(value, (float, np.floating)):
             params[key] = float(value)
+        elif isinstance(value, (tuple, list)) and all(
+            isinstance(x, (bool, str, int, float, np.integer, np.floating)) for x in value
+        ):
+            params[key] = [x if isinstance(x, (bool, str)) else float(x) for x in value]
+        elif isinstance(value, np.ndarray):
+            if value.size <= 256:
+                params[key] = value.tolist()
+            else:
+                params[key] = {
+                    "sha1": hashlib.sha1(np.ascontiguousarray(value).tobytes()).hexdigest()
+                }
     return params
 
 
@@ -41,7 +64,10 @@ def _apply_obs(obs, z_true: np.ndarray) -> np.ndarray:
 def _describe_obs(obs) -> list:
     description = []
     for step in _as_callable_list(obs):
-        entry = {"class": type(step).__name__}
+        # class name alone is NOT an identity: two PartialObservation
+        # instances with different indices generate different x -- record
+        # the full generation-affecting parameters (round 3)
+        entry = {"class": type(step).__name__, "params": _spec_params(step)}
         if hasattr(step, "lipschitz_bound"):
             entry["lipschitz_bound"] = step.lipschitz_bound()
         description.append(entry)
@@ -87,8 +113,8 @@ def build_dataset(
         for name, idx in split_idx.items()
     }
     result["meta"] = {
-        "system": {"class": type(system).__name__, "params": _scalar_params(system)},
-        "regime": {"class": type(regime).__name__, "params": _scalar_params(regime)},
+        "system": {"class": type(system).__name__, "params": _spec_params(system)},
+        "regime": {"class": type(regime).__name__, "params": _spec_params(regime)},
         "obs": _describe_obs(obs),
         "dt": dt,
         "T": T,

@@ -274,3 +274,43 @@ def test_nonfinite_loss_aborts_run(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="nonfinite"):
         Trainer(_mlp_config(tmp_path, exp_name="trainer_test_nan")).fit(data)
     print("[trainer] nonfinite loss aborted the run")
+
+
+def test_budget_owned_and_selective_only_keys_rejected(tmp_path):
+    import pytest
+
+    # capacity knobs are owned by match_budget: naming one in a config would
+    # be hashed but ignored -- rejected (adversarial review round 3)
+    with pytest.raises(ValueError, match="capacity"):
+        Trainer(_mlp_config(tmp_path, family="transformer", n_layers=5))
+    with pytest.raises(ValueError, match="capacity"):
+        Trainer(_mlp_config(tmp_path, hidden=[32, 32]))
+    # selective-only clamp bounds on a fixed koopman regime: fake identity
+    with pytest.raises(ValueError, match="selective"):
+        Trainer(
+            _mlp_config(
+                tmp_path, family="koopman_ssm", delta=0.05, regime="constant", delta_min=1e-3
+            )
+        )
+
+
+def test_failed_rerun_leaves_no_stale_success_artifacts(tmp_path, monkeypatch):
+    # adversarial review round 3: success then forced-nonfinite rerun on the
+    # SAME identity must not leave the old ckpt/audit beside new truncated
+    # metrics (a mixed directory reads as a completed run)
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_stale", epochs=1)
+    result = Trainer(cfg).fit(data)
+    ckpt = Path(result["paths"]["ckpt"])
+    audit = Path(result["paths"]["audit"])
+    assert ckpt.exists() and audit.exists()
+
+    monkeypatch.setattr(trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan")))
+    with pytest.raises(RuntimeError, match="nonfinite"):
+        Trainer(dict(cfg)).fit(data)
+    print(f"[trainer] after failed rerun: ckpt={ckpt.exists()}, audit={audit.exists()}")
+    assert not ckpt.exists() and not audit.exists()

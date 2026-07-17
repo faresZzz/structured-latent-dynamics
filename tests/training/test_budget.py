@@ -143,10 +143,10 @@ def test_flops_component_locks():
     traj = count_flops_per_trajectory(m_const, H)
     assert traj == H * count_flops_per_step(m_const) + 2 * psi_macs + H * 2 * pi_macs
 
-    # (3) min_ssm step = 2*linear MACs (independently enumerated) + 4*d_state
-    # elementwise (delta*b, A*m, B*v, sum) + d_h residual add
+    # (3) min_ssm step = 2*linear MACs (independently enumerated) + 5*d_state
+    # elementwise (delta*a_cont, delta*b, A*m, B*v, sum) + d_h residual add
     m_ssm = SelectiveSSMPredictor(d_h=4, d_u=2, d_state=8)
     lin_macs = sum(
         m.in_features * m.out_features for m in m_ssm.modules() if isinstance(m, nn.Linear)
     )
-    assert count_flops_per_step(m_ssm) == 2 * lin_macs + 4 * m_ssm.d_state + m_ssm.d_h
+    assert count_flops_per_step(m_ssm) == 2 * lin_macs + 5 * m_ssm.d_state + m_ssm.d_h

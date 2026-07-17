@@ -69,3 +69,33 @@ def test_npz_and_meta_round_trip(tmp_path):
     assert meta["obs"][0]["lipschitz_bound"] == obs.lipschitz_bound()
     all_idx = set(meta["splits"]["train"]) | set(meta["splits"]["val"]) | set(meta["splits"]["test"])
     assert all_idx == set(range(6))
+
+
+def test_meta_distinguishes_nonscalar_generation_params():
+    # adversarial review round 3: the meta block is the dataset's identity
+    # document -- distinct generation specs must produce distinct meta, for
+    # tuple params (PartialObservation.indices) and array params
+    # (ActionConditionedRegime.K_gain) alike.
+    import numpy as np
+
+    from sld.data.generate import build_dataset
+    from sld.data.mixing import PartialObservation
+    from sld.data.regimes import ActionConditionedRegime
+    from sld.systems.damped_pendulum import DampedPendulum
+
+    system = DampedPendulum()
+
+    def _strip_paths(meta):
+        return {k: v for k, v in meta.items() if k != "paths"}
+
+    common = dict(system=system, n_episodes=4, T=10, dt=0.02, seed=3)
+    regime = ActionConditionedRegime(K_gain=np.array([[0.5, 0.0]]))
+    m_a = build_dataset(regime=regime, obs=PartialObservation((0,)), **common)["meta"]
+    m_b = build_dataset(regime=regime, obs=PartialObservation((1,)), **common)["meta"]
+    print(f"[meta] obs params a={m_a['obs'][0]['params']} b={m_b['obs'][0]['params']}")
+    assert _strip_paths(m_a) != _strip_paths(m_b)
+
+    regime_c = ActionConditionedRegime(K_gain=np.array([[0.0, 0.5]]))
+    m_c = build_dataset(regime=regime_c, obs=PartialObservation((0,)), **common)["meta"]
+    print(f"[meta] regime params a={m_a['regime']['params']} c={m_c['regime']['params']}")
+    assert _strip_paths(m_a) != _strip_paths(m_c)

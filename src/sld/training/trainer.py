@@ -64,6 +64,14 @@ _FAMILY_CONFIG_KEYS: dict[str, frozenset[str]] = {
 }
 _MODEL_KEYS = frozenset().union(*_FAMILY_CONFIG_KEYS.values())
 
+# capacity knobs are OWNED by match_budget (the fairness contract sizes them
+# from target_params): a config naming one directly would be hashed into the
+# run identity yet silently ignored by the forwarding above -- reject them
+# outright (adversarial review round 3)
+_BUDGET_OWNED_KEYS = frozenset(
+    {"d_model", "d_ff", "n_layers", "hidden", "d_state", "psi_hidden", "pi_hidden"}
+)
+
 # objective weights: must be finite and >= 0 (a negative weight silently
 # behaving as "disabled" was adversarial review round 2's finding), and at
 # least one PREDICTION objective must be active or there is nothing to train
@@ -135,6 +143,20 @@ class Trainer:
             raise ValueError(
                 f"config keys {inapplicable} are not applicable to family {family!r}"
             )
+        budget_owned = sorted(_BUDGET_OWNED_KEYS & set(config))
+        if budget_owned:
+            raise ValueError(
+                f"config keys {budget_owned} are capacity knobs owned by match_budget -- "
+                "set target_params instead (params +/-5% is the fairness contract)"
+            )
+        # selective-only knobs on a fixed regime would hash into the identity
+        # while constructing identical dynamics (round 3)
+        if family == "koopman_ssm" and self.config.get("regime", "bilinear") != "selective":
+            selective_only = sorted({"delta_min", "delta_max"} & set(config))
+            if selective_only:
+                raise ValueError(
+                    f"config keys {selective_only} apply only to regime='selective'"
+                )
         for key in _WEIGHT_KEYS:
             w = self.config[key]
             if not (isinstance(w, (int, float)) and math.isfinite(w) and w >= 0):
@@ -314,6 +336,12 @@ class Trainer:
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "figs").mkdir(exist_ok=True)
+        # success-only artifacts from a PREVIOUS run of this identity are
+        # removed up front: an aborted rerun must not leave a stale ckpt/audit
+        # beside fresh truncated metrics, masquerading as a complete run
+        # (adversarial review round 3)
+        for stale in ("ckpt.pt", "audit.json"):
+            (self.run_dir / stale).unlink(missing_ok=True)
         config_path = self.run_dir / "config.yaml"
         config_path.write_text(self._canonical_yaml)
 
