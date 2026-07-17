@@ -24,6 +24,22 @@ def _spec_params(obj) -> dict:
     distinct specs collide (adversarial review round 3). Large arrays are
     recorded by content hash instead of value.
     """
+    # explicit override hook: an object whose behavior depends on non-public
+    # state MUST provide its own complete canonical spec (round 5) -- the
+    # vars() harvest below only sees public attributes, and that visibility
+    # IS the contract for objects without the hook
+    if hasattr(obj, "spec_params"):
+        return dict(obj.spec_params())
+
+    def _scalar(x):
+        # types preserved exactly: int -> int (a float cast would collide
+        # 2**53 with 2**53 + 1, round 5), float -> float, bool/str as-is
+        if isinstance(x, (bool, str)):
+            return x
+        if isinstance(x, (int, np.integer)):
+            return int(x)
+        return float(x)
+
     params = {}
     for key, value in sorted(vars(obj).items()):
         if key.startswith("_"):
@@ -37,13 +53,17 @@ def _spec_params(obj) -> dict:
         elif isinstance(value, (tuple, list)) and all(
             isinstance(x, (bool, str, int, float, np.integer, np.floating)) for x in value
         ):
-            params[key] = [x if isinstance(x, (bool, str)) else float(x) for x in value]
+            params[key] = [_scalar(x) for x in value]
         elif isinstance(value, np.ndarray):
             if value.size <= 256:
-                params[key] = value.tolist()
+                params[key] = {"dtype": str(value.dtype), "values": value.tolist()}
             else:
+                # dtype and shape are part of the identity: identical bytes
+                # under a different view are a different array (round 5)
                 params[key] = {
-                    "sha1": hashlib.sha1(np.ascontiguousarray(value).tobytes()).hexdigest()
+                    "dtype": str(value.dtype),
+                    "shape": list(value.shape),
+                    "sha1": hashlib.sha1(np.ascontiguousarray(value).tobytes()).hexdigest(),
                 }
         else:
             # STRICT: an attribute the meta cannot represent would make two
@@ -52,7 +72,7 @@ def _spec_params(obj) -> dict:
                 f"{type(obj).__name__}.{key} ({type(value).__name__}) is not "
                 "meta-serializable: dataset spec objects may only carry "
                 "None/bool/str/int/float, flat tuples/lists of scalars, or "
-                "numpy arrays as public attributes"
+                "numpy arrays as public attributes (or provide spec_params())"
             )
     return params
 
@@ -106,6 +126,13 @@ def build_dataset(
     split_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1),
 ) -> dict:
     """Roll out ``n_episodes`` under ``regime``, apply ``obs``, split, optionally write to disk."""
+    # the full generation spec is validated/described BEFORE any rollout: a
+    # rejected obs (lambda, opaque state) must fail fast, not after episodes
+    # were integrated or side effects ran (adversarial review round 5)
+    system_spec = {"class": type(system).__name__, "params": _spec_params(system)}
+    regime_spec = {"class": type(regime).__name__, "params": _spec_params(regime)}
+    obs_spec = _describe_obs(obs)
+
     rng = np.random.default_rng(seed)
 
     z_true = np.empty((n_episodes, T + 1, system.state_dim), dtype=np.float64)
@@ -133,9 +160,9 @@ def build_dataset(
         for name, idx in split_idx.items()
     }
     result["meta"] = {
-        "system": {"class": type(system).__name__, "params": _spec_params(system)},
-        "regime": {"class": type(regime).__name__, "params": _spec_params(regime)},
-        "obs": _describe_obs(obs),
+        "system": system_spec,
+        "regime": regime_spec,
+        "obs": obs_spec,
         "dt": dt,
         "T": T,
         "n_episodes": n_episodes,

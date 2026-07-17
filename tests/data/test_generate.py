@@ -147,3 +147,63 @@ def test_smooth_mixing_meta_roundtrip():
     err = np.abs(mix(probe) - rebuilt(probe)).max()
     print(f"[roundtrip] SmoothMixing rebuild max abs err = {err:.3e}")
     assert err == 0.0
+
+
+def test_spec_params_injectivity_round5():
+    # int identity preserved (a float cast collides 2**53 with 2**53+1);
+    # large arrays carry dtype+shape, not just bytes; spec_params() hook wins
+    import numpy as np
+
+    from sld.data.generate import _spec_params
+
+    class S:
+        pass
+
+    a, b = S(), S()
+    a.gain = [2**53]
+    b.gain = [2**53 + 1]
+    pa, pb = _spec_params(a), _spec_params(b)
+    print(f"[spec] gains {pa['gain']} vs {pb['gain']}")
+    assert pa != pb
+
+    big = np.zeros(300, dtype=np.float64)
+    c, d = S(), S()
+    c.arr = big
+    d.arr = big.view(np.float32).reshape(150, 4)  # same bytes, different view
+    pc, pd = _spec_params(c), _spec_params(d)
+    assert pc["arr"]["sha1"] == pd["arr"]["sha1"]  # same bytes indeed
+    assert pc != pd  # but dtype/shape distinguish them
+
+    class WithHook:
+        def __init__(self):
+            self._hidden_gain = 3.0
+
+        def spec_params(self):
+            return {"hidden_gain": self._hidden_gain}
+
+    assert _spec_params(WithHook()) == {"hidden_gain": 3.0}
+
+
+def test_rejected_obs_fails_before_any_generation():
+    # round 5: spec validation must run BEFORE episodes are integrated
+    import pytest
+
+    from sld.data.generate import build_dataset
+    from sld.systems.damped_pendulum import DampedPendulum
+
+    class SpyRegime:
+        def __init__(self):
+            self.calls = 0
+
+        def sample_episode(self, system, T, dt, rng):
+            self.calls += 1
+            raise AssertionError("generation ran before spec validation")
+
+    spy = SpyRegime()
+    with pytest.raises(ValueError, match="canonical identity"):
+        build_dataset(
+            system=DampedPendulum(), regime=spy, obs=lambda z: z,
+            n_episodes=4, T=10, dt=0.02, seed=0,
+        )
+    print(f"[order] regime calls after rejection = {spy.calls}")
+    assert spy.calls == 0

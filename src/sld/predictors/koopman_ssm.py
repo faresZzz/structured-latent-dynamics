@@ -127,7 +127,10 @@ class KoopmanSSMPredictor(PredictorModule):
                 )
             # the ordering must SURVIVE the construction dtype: a python-float
             # interval can underflow/overflow to a dead gate once cast (e.g.
-            # delta=1e-50 in float32 collapses to 0) -- round 4
+            # delta=1e-50 in float32 collapses to 0) -- round 4. The bounds
+            # are validated at CONSTRUCTION dtype only: narrowing afterwards
+            # (.float()/.half()) is explicitly unsupported for this regime;
+            # widening (.double()) is safe -- round 5
             cast = torch.tensor(
                 [self.delta_min, self.delta, self.delta_max], dtype=dtype
             )

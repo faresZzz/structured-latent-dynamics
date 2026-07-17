@@ -330,3 +330,41 @@ def test_derived_policy_keys_and_bad_epochs_rejected(tmp_path):
     for bad in ({"epochs": 0}, {"batch_episodes": 0}, {"h_fr": 0}, {"epochs": 2.5}):
         with pytest.raises(ValueError):
             Trainer(_mlp_config(tmp_path, **bad))
+
+
+def test_family_defaults_canonicalized_into_identity(tmp_path):
+    # round 5: omitted default == explicit default, same identity; a
+    # non-default value is a different identity
+    base = _mlp_config(tmp_path, family="transformer")
+    explicit = _mlp_config(tmp_path, family="transformer", n_heads=2, max_len=512)
+    other = _mlp_config(tmp_path, family="transformer", n_heads=4)
+    h_base = Trainer(base).config_hash
+    h_explicit = Trainer(explicit).config_hash
+    h_other = Trainer(other).config_hash
+    print(f"[defaults] omitted={h_base} explicit={h_explicit} n_heads=4={h_other}")
+    assert h_base == h_explicit
+    assert h_other != h_base
+
+    # koopman: delta required at CONSTRUCTION (schema, not a fit-time error)
+    import pytest
+
+    with pytest.raises(ValueError, match="delta"):
+        Trainer(_mlp_config(tmp_path, family="koopman_ssm"))
+
+
+def test_float32_policy_enforced_under_ambient_float64(tmp_path):
+    # round 5: the declared CPU/float32 policy must not depend on the ambient
+    # global default dtype
+    data = _small_dataset(n_episodes=6, T=10)
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    try:
+        result = Trainer(
+            _mlp_config(tmp_path, exp_name="trainer_test_f32", epochs=1)
+        ).fit(data)
+    finally:
+        torch.set_default_dtype(prev)
+    for module in (result["model"]["encoder"], result["model"]["predictor"]):
+        for p in module.parameters():
+            assert p.dtype == torch.float32
+    print("[trainer] all params float32 under ambient float64")
