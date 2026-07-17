@@ -140,21 +140,21 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `frame_mlp.py` | `FrameMLPEncoder` | une observation → z | ⬜ |
-| `window_mlp.py` | `WindowMLPEncoder` | fenêtre $x_{t-k:t}$ aplatie (k=8) → z | ⬜ |
+| `frame_mlp.py` | `FrameMLPEncoder` | une observation → z | ✅ |
+| `window_mlp.py` | `WindowMLPEncoder` | fenêtre $x_{t-k:t}$ aplatie (k=8) → z | ✅ |
 | `pretrain.py` | `pretrain_frozen_encoder` | encodeur gelé par régime (JEPA+VICReg puis freeze) — stand-in LeJEPA déclaré | ⬜ |
 
 ### 4.4 `predictors/` — les 4 familles
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `base.py` | `Predictor` (protocol), `PredictorState` | Contrat : `step(h,u,state)`, `rollout(h0,u_seq)`, `local_operator(h,u,state) → (A,B) \| None`. Docstring de sémantique : rollout itère dans H, π read-only, `local_operator` = LECTURE seulement, jamais l'objet de stabilité | ⬜ |
+| `base.py` | `Predictor` (protocol), `PredictorState`, `PredictorModule` | Contrat : `step(h,u,state)`, `rollout(h0,u_seq)`, `local_operator(h,u,state) → (A,B) \| None`. Docstring de sémantique : rollout itère dans H, π read-only, `local_operator` = LECTURE seulement, jamais l'objet de stabilité | ✅ |
 | `blocks2x2.py` | `RotationScalingBlocks`, `discretize_zoh` | Paramétrisation $(\alpha_i, \omega_i)$ → blocs réels 2×2 ; ZOH exacte en forme fermée ; cellule ON : $\alpha_i = -e^{\nu_i}$ ; garde $(\alpha,\omega) \neq (0,0)$ | ✅ |
-| `mlp.py` | `MLPPredictor` | $\hat h_{t+1} = \mathrm{MLP}([h;u])$ + résiduel ; `local_operator` → None | ⬜ |
-| `transformer.py` | `CausalTransformerPredictor` | 2 blocs d'attention causale sur la fenêtre du rollout ; famille générique + baseline O(H²) de la facture | ⬜ |
-| `min_ssm.py` | `SelectiveSSMPredictor` | $\bar A(c_t)$ diagonal réel, $\Delta(c_t)$, $\bar B(c_t)$ ; scan séquentiel ; régime LPV, jamais « Koopman » | ⬜ |
-| `koopman_ssm.py` | `KoopmanSSMPredictor` | lifting ψ + transition sur l'échelle `regime='constant'\|'bilinear'\|'selective'` + projection π ; **cellule core = bilinear** ($\bar A h + \sum_j u_j \bar B_j h + \bar B_0 u$) ; `selective` = ablation LPV | ⬜ |
-| `registry.py` | `get_predictor` | famille + config → instance appariée au budget | ⬜ |
+| `mlp.py` | `MLPPredictor` | $\hat h_{t+1} = \mathrm{MLP}([h;u])$ + résiduel ; `local_operator` → None | ✅ |
+| `transformer.py` | `CausalTransformerPredictor` | 2 blocs d'attention causale sur la fenêtre du rollout ; famille générique + baseline O(H²) de la facture | ✅ |
+| `min_ssm.py` | `SelectiveSSMPredictor` | $\bar A(c_t)$ diagonal réel, $\Delta(c_t)$, $\bar B(c_t)$ ; scan séquentiel ; régime LPV, jamais « Koopman » | ✅ |
+| `koopman_ssm.py` | `KoopmanSSMPredictor` | lifting ψ + transition sur l'échelle `regime='constant'\|'bilinear'\|'selective'` + projection π ; **cellule core = bilinear** ($\bar A h + \sum_j u_j \bar B_j h + \bar B_0 u$) ; `selective` = ablation LPV | ✅ |
+| `registry.py` | `get_predictor` | famille + config → instance appariée au budget | ✅ |
 
 ### 4.5 `objectives/`
 
@@ -169,9 +169,9 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `trainer.py` | `Trainer` | config-driven : AdamW, schedule, mix TF/FR, logging CSV/JSON, artefacts `<exp>/<hash>/` | ⬜ |
-| `budget.py` | `match_budget`, `count_flops_per_step`, `count_flops_per_trajectory` | appariement params ±5 % par famille ; FLOPs analytiques ; transformer en f(H) | ⬜ |
-| `seeding.py` | `set_seed` | reproductibilité torch/numpy | ⬜ |
+| `trainer.py` | `Trainer` | config-driven : AdamW, schedule, mix TF/FR, logging CSV/JSON, artefacts `<exp>/<hash>/` | ✅ |
+| `budget.py` | `match_budget`, `count_flops_per_step`, `count_flops_per_trajectory` | appariement params ±5 % par famille ; FLOPs analytiques ; transformer en f(H) | ✅ |
+| `seeding.py` | `set_seed` | reproductibilité torch/numpy | ✅ |
 
 ### 4.7 `audit/` — l'instrument
 
