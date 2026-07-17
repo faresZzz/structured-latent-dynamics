@@ -4,8 +4,9 @@ Latent convention (see repo charter): an observation x is encoded to an
 embedding z by an online encoder; a target encoder (an EMA copy of the
 online one) produces the regression targets; predictors operate on a latent
 state h (h = psi(z) for lifted families with a learned lifting psi, h = z
-for plain families). Wave 2 ships the loss against tensors and optional
-callables only -- concrete encoder/predictor classes arrive in Wave 3.
+for plain families). The loss operates against tensors and optional
+callables only -- it has no knowledge of concrete encoder/predictor classes,
+which the Trainer wires in.
 """
 
 from __future__ import annotations
@@ -88,20 +89,26 @@ class JEPALoss(nn.Module):
     """JEPA prediction loss, horizon-agnostic.
 
     Scoping decision: the teacher-forcing / free-running rollout horizon
-    schedule is the Trainer's job (Wave 3). This loss consumes a single,
-    already-rolled-out batch of (h_hat, z_target) pairs at matching time
-    indices and has no notion of a schedule or a horizon itself.
+    schedule is the Trainer's job. This loss consumes a single,
+    already-rolled-out batch of tensors at matching time indices and has no
+    notion of a schedule or a horizon itself.
 
-    Design decision (Wave 2, lifted families): with a lifting ``psi`` but no
-    read-only projection ``pi`` back to z-space yet (pi arrives in Wave 3),
-    the only loss we can honestly write is "h_hat ~ sg[psi(z)]" -- the
-    predictor must match the *stopped* lift of the target embedding. That
-    single quantity is computed once as ``pred``; ``consistency`` is left at
-    zero and ``total == pred``. ``lambda_c`` is stored but inert at Wave 2:
-    once pi exists, ``pred`` moves to projection space and the lifted term
-    becomes the lambda_c-weighted consistency regularizer. This is a
-    deliberate scoping choice, not an oversight -- Wave 3 attaches to
-    ``lambda_c`` and to the ``consistency`` key.
+    Wave 3 semantics: ``pred`` lives in PROJECTION space -- it compares the
+    predictor's read-out ``pred_z = pi(h_hat)`` (identity for plain, z-space
+    families with no lifting) against the stopped target embedding
+    ``sg[target_z]``. ``consistency`` is the ``lambda_c``-weighted LIFTED-space
+    regularizer ``h_hat ~ sg[psi(z_target)]``: the predictor's raw H-space
+    state must match the lift of the (stopped) target embedding.
+    ``consistency`` is computed only when BOTH ``h_hat`` and ``lift`` are
+    given; passing exactly one of them raises ``ValueError`` -- the classic
+    silent half-wired JEPA bug. ``total = pred + lambda_c * consistency``.
+
+    Stop-grad discipline: ``target_z`` is ALWAYS detached before either term
+    is formed, regardless of what the caller already did to it -- but
+    ``lift`` itself is not detached from. When ``lift`` is a family's own
+    learned lifting ``psi`` (as wired by the Trainer), its parameters DO
+    receive gradient through ``consistency`` -- psi trains through this
+    term. Only the target embedding ``target_z`` is stopped.
     """
 
     def __init__(self, lambda_c: float = 0.0) -> None:
@@ -110,28 +117,39 @@ class JEPALoss(nn.Module):
 
     def forward(
         self,
-        h_hat: torch.Tensor,
-        z_target: torch.Tensor,
+        pred_z: torch.Tensor,
+        target_z: torch.Tensor,
+        h_hat: torch.Tensor | None = None,
         lift: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         # stop-grad on the target regardless of what the caller already did
-        z_sg = z_target.detach()
+        z_sg = target_z.detach()
 
-        if lift is None:
-            target_tensor = z_sg
-        else:
-            # both the target embedding and its lift are stopped: this term
-            # shapes only the predictor path (h_hat), never psi.
-            target_tensor = lift(z_sg).detach()
         # exact shape match enforced: F.mse_loss would silently broadcast
         # mismatched time/batch dims into a wrong comparison
-        if h_hat.shape != target_tensor.shape:
+        if pred_z.shape != z_sg.shape:
             raise ValueError(
-                f"h_hat {tuple(h_hat.shape)} and its regression target "
-                f"{tuple(target_tensor.shape)} must match exactly"
+                f"pred_z {tuple(pred_z.shape)} and target_z {tuple(z_sg.shape)} "
+                "must match exactly"
             )
-        pred = nn.functional.mse_loss(h_hat, target_tensor)
+        pred = nn.functional.mse_loss(pred_z, z_sg)
 
-        consistency = torch.zeros((), dtype=pred.dtype, device=pred.device)
-        total = pred
+        # silent half-wiring lock: h_hat/lift must be given together or not at all
+        if (h_hat is None) != (lift is None):
+            raise ValueError("h_hat and lift must both be given, or both omitted")
+
+        if h_hat is None:
+            consistency = torch.zeros((), dtype=pred.dtype, device=pred.device)
+        else:
+            # lift is NOT detached from: its params (psi) train through this
+            # term. Only the target embedding z_sg is already stopped above.
+            lifted_target = lift(z_sg)
+            if h_hat.shape != lifted_target.shape:
+                raise ValueError(
+                    f"h_hat {tuple(h_hat.shape)} and its lifted regression target "
+                    f"{tuple(lifted_target.shape)} must match exactly"
+                )
+            consistency = nn.functional.mse_loss(h_hat, lifted_target)
+
+        total = pred + self.lambda_c * consistency
         return {"total": total, "pred": pred, "consistency": consistency}
