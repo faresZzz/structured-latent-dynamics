@@ -177,8 +177,8 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `spectral.py` | `operator_spectrum`, `local_spectra_field`, `operator_norm`, `pseudospectrum_grid` | ce qu'on AFFICHE : spectre (régimes i/ii) ou champ de spectres locaux (iii/génériques) ; pseudospectre sur grille SVD (n ≤ 64) | ⬜ |
-| `jacobian.py` | `total_jacobian`, `jacobian_products`, `fr_lyapunov_exponents`, `conditional_jacobian`, `lipschitz_pi` | ce qu'on AUDITE : $J^q$ sur l'état augmenté (h,m), produits Φ, Lyapunov FR (méthode QR), Lip(π) reportée partout | ⬜ |
+| `spectral.py` | `operator_spectrum`, `local_spectra_field`, `operator_norm`, `pseudospectrum_grid`, `edmd_fit` | ce qu'on AFFICHE : spectre (régimes i/ii) ou champ de spectres locaux (iii/génériques) ; pseudospectre sur grille SVD (n ≤ 64) ; baseline EDMD (gold multi-pas) | ✅ |
+| `jacobian.py` | `total_jacobian`, `jacobian_products`, `fr_lyapunov_exponents`, `conditional_jacobian`, `lipschitz_pi`, `fr_drift_curve` | ce qu'on AUDITE : $J^q$ sur l'état augmenté (h,m), produits Φ, Lyapunov FR (méthode QR), Lip(π) reportée partout ; drift FR normalisé (Fig 1) | ✅ |
 | `gramians.py` | `reachability_gramian`, `observability_gramian`, `free_evolution_displacement` | $W_c$ LTV avec $R_u$ déclaré ; $C_k := J_\pi(h_k)$ ; gramien conditionnel vs système complet ; Δh relatif à l'évolution libre | ⬜ |
 | `alignment.py` | `r_ctrl`, `e_ctrl`, `pushforward_gramian`, `cost_gradient_pullback` | formes invariantes : $r_{\mathrm{ctrl}} = \frac{g^\top W_c g}{g^\top \Sigma_h g}$ ; $E_{\mathrm{ctrl}} = g^\top \Sigma_h (W_c + \lambda\Sigma_h)^{-1} \Sigma_h g$ ; $W_c^z = J_\pi W_c J_\pi^\top$ | ⬜ |
 | `identifiability.py` | `linear_recovery_r2`, `procrustes_error`, `orthogonality_error`, `covariance_anisotropy` | panel LeJEPA contre l'état vrai | ⬜ |
