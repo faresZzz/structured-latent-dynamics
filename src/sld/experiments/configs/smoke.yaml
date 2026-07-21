@@ -1,0 +1,29 @@
+# Smoke config: 1 dataset x 2 arms x 1 seed = 2 runs, must finish in << 5 min
+# (Makefile `smoke` target). Exercises the two cheapest-to-verify cells: mlp
+# off and koopman_ssm on (the two ends of the family/constraint axes).
+exp_name: smoke
+datasets:
+  ou:
+    system: {name: DampedPendulum, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 8
+    T: 20
+    dt: 0.02
+    seed: 0
+base:
+  d_x: 2
+  d_z: 4
+  d_u: 1
+  epochs: 3
+  batch_episodes: 4
+  target_params: 2000
+  lr: 0.001
+arms:
+  - family: mlp
+    constraint: "off"
+    overrides: {mu_j: 0.0}
+  - family: koopman_ssm
+    constraint: "on"
+    overrides: {mu_j: 0.01, constrained: true, delta: 0.05, n_pairs: 2}
+seeds: [0]

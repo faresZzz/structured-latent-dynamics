@@ -1,0 +1,68 @@
+# Grille D1 pre-enregistree (PROTOCOL.md): 2 datasets x 8 arms (4 families x
+# off/on) x 5 seeds (PROTOCOL.md section 3) = 80 runs.
+# Core cells retain `exp_name: pendulum_core`; selection/calibration uses the
+# separate `calibration.yaml` namespace `pendulum_core_selection`, so seed-0
+# selection artifacts cannot collide with this core grid.
+#
+# mu_j on-cells are `null` here on purpose: PROTOCOL.md section 5's
+# calibration procedure retains one mu_j per family (post-hoc margin sweep,
+# not run by this config) -- `sld-factorial` refuses to train a null
+# override (value must be filled by calibration first) but `--dry-run`
+# still lists the grid with the nulls shown.
+#
+# lr: set to `null` by arm (like mu_j on on-cells), filled by PROTOCOL.md
+# section 2's sweep (calibration.yaml) -- the sweep selects 1 LR from
+# {1e-4, 3e-4, 1e-3} via FR val loss on 1 seed, then runs 5 seeds at the
+# retained LR.
+exp_name: pendulum_core
+datasets:
+  ou:
+    system: {name: DampedPendulum, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 64
+    T: 100
+    dt: 0.02
+    seed: 0
+  action_conditioned:
+    system: {name: DampedPendulum, params: {}}
+    # K_gain = [[0.8, 0.4]]: the gain tested in
+    # tests/data/test_regimes.py::test_action_conditioned_correlation, which
+    # produces max |corr(u, x)| > 0.3 (a real action-state correlation).
+    regime: {name: ActionConditionedRegime, params: {K_gain: [[0.8, 0.4]], sigma: 0.3}}
+    obs: null
+    n_episodes: 64
+    T: 100
+    dt: 0.02
+    seed: 0
+base:
+  d_x: 2
+  d_z: 4
+  d_u: 1
+  target_params: 10000
+arms:
+  - family: mlp
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: null}
+  - family: mlp
+    constraint: "on"
+    overrides: {mu_j: null, lr: null}
+  - family: transformer
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: null}
+  - family: transformer
+    constraint: "on"
+    overrides: {mu_j: null, lr: null}
+  - family: min_ssm
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: null}
+  - family: min_ssm
+    constraint: "on"
+    overrides: {mu_j: null, lr: null}
+  - family: koopman_ssm
+    constraint: "off"
+    overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: null}
+  - family: koopman_ssm
+    constraint: "on"
+    overrides: {mu_j: null, constrained: true, delta: 0.02, lr: null}
+seeds: [0, 1, 2, 3, 4]

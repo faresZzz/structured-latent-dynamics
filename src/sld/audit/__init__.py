@@ -14,6 +14,8 @@ estimator of ``objectives.jac_reg``.
 """
 
 from sld.audit.jacobian import (
+    ExcludedAugmentedJacobian,
+    augmented_jacobian_excluding_identity,
     conditional_jacobian,
     fr_drift_curve,
     fr_lyapunov_exponents,
@@ -30,6 +32,8 @@ from sld.audit.spectral import (
 )
 
 __all__ = [
+    "ExcludedAugmentedJacobian",
+    "augmented_jacobian_excluding_identity",
     "conditional_jacobian",
     "edmd_fit",
     "fr_drift_curve",

@@ -25,13 +25,59 @@ Two numerical rules apply everywhere below:
 
 from __future__ import annotations
 
-from typing import Callable, Iterable
+import math
+from typing import Callable, Iterable, NamedTuple
 
 import numpy as np
 import torch
 from torch import Tensor
 
 from sld.audit._common import as_float64_array, require_cpu_float64_tensor
+
+# A row of d(m_next)/d(m) counts as an identity passthrough when it is a
+# canonical basis vector to this absolute tolerance. A genuine verbatim copy
+# (torch.cat of the old cache -- the ACTUAL transformer's KV-cache update) is
+# EXACT under autograd: the VJP of a cat/slice copy is a pure gather with no
+# floating-point arithmetic, so it differentiates to EXACTLY 1.0/0.0 at any
+# d. This tolerance instead guards a hypothetical family that routes the same
+# copy through an identity matmul, which accumulates ~d * eps float64
+# rounding. At the largest d this audit has actually measured -- the
+# registered transformer's augmented input dimension of 7,924 (PROTOCOL
+# section 5 calibration, t=99) -- that worst-case noise floor is
+# 7924 * 2.22e-16 ~= 1.8e-12, ABOVE the previous 1e-12 default (corrected
+# here; the earlier "d <= 10^3" justification is what the real transformer
+# falsifies). 1e-6 sits ~6 decades above that worst-case noise floor and ~6
+# decades below the smallest structurally different coefficient a real,
+# trained non-copy map could produce by coincidence (an entry landing within
+# 1e-6 of exactly 1.0 while every OTHER entry in the same row lands within
+# 1e-6 of exactly 0.0 is not a configuration a trained network produces by
+# chance), so the classification has no grey zone even at this dimension.
+_IDENTITY_ROW_ATOL = 1e-6
+
+# identity_atol must stay inside this range: above it, a genuinely learned
+# (non-copy) coefficient risks being misclassified as an identity passthrough
+# and silently deleted -- the adversarial reviewer's poison-pill probe,
+# identity_atol=0.1, would misclassify a 0.95*m derivative as a verbatim
+# copy. At or below zero, or non-finite, the classification is undefined.
+#
+# The bound is sandwiched between two measured quantities, not chosen freely:
+# - FLOOR: the rounding noise expected for the largest d this audit has
+#   actually registered -- the transformer's augmented input dimension of
+#   7,924 (PROTOCOL section 5 calibration, t=99) -- is O(d * eps) ~=
+#   7924 * 2.22e-16 ~= 1.8e-12. The bound must stay above that.
+# - CEILING: the smallest "learned" (non-copy) deviation this audit must
+#   never delete. ``m_next = cat([0.9995 * m, new])`` differs from a
+#   verbatim copy by 5e-4 per entry -- a plausible trained coefficient, not
+#   a copy -- so the bound must stay below that.
+# 1e-4 satisfies both, honestly quantified: log10(1e-4 / 1.8e-12) ~= 7.7, so
+# the bound sits ~7.7 decades above the noise floor -- comfortable margin on
+# that side. log10(5e-4 / 1e-4) ~= 0.7, i.e. only a factor of 5 below the
+# smallest learned deviation the bound must not delete -- tight, but on the
+# right side (the previous 1e-3 bound failed this: 5e-4 < 1e-3 would have
+# deleted it). The default, ``_IDENTITY_ROW_ATOL = 1e-6``, sits far more
+# conservatively on the ceiling side: log10(5e-4 / 1e-6) ~= 2.7 decades of
+# margin below that same deviation.
+_IDENTITY_ATOL_MAX = 1e-4
 
 
 def total_jacobian(step_fn: Callable[[Tensor, Tensor], Tensor], q: Tensor, u: Tensor) -> np.ndarray:
@@ -84,6 +130,309 @@ def total_jacobian(step_fn: Callable[[Tensor, Tensor], Tensor], q: Tensor, u: Te
     if not np.isfinite(J).all():
         raise ValueError("J contains non-finite values; derivative of invalid function")
     return J
+
+
+class ExcludedAugmentedJacobian(NamedTuple):
+    """What ``augmented_jacobian_excluding_identity`` reports.
+
+    Attributes:
+        jacobian: dense excluded Jacobian, ``(d_out - n_identity_rows,
+            d_in)`` float64. Input coordinates are ``vec(h)`` then
+            ``vec(m)`` (row-major over each tensor AS GIVEN -- this module
+            never interprets ``m``'s axes); output coordinates are
+            ``vec(h_next)`` then the NON-copied coordinates of
+            ``vec(m_next)``, in their original order.
+        sigma_max: largest singular value of ``jacobian`` -- the quantity
+            the calibration takes the median of (PROTOCOL section 5 step 2).
+        frobenius_sq: ``||jacobian||_F^2``. Reported because it is the exact
+            counterpart of what ``objectives.jac_reg`` estimates at training
+            time; the calibration band is on ``sigma_max``, and the gap
+            between the two is honesty declaration (a) of PROTOCOL section 5.
+        n_identity_rows: number of excluded rows. Equals ``m.numel()``
+            whenever the exclusion applied, ``0`` when it did not.
+        d_in: ``h.numel() + m.numel()``, the augmented input dimension.
+    """
+
+    jacobian: np.ndarray
+    sigma_max: float
+    frobenius_sq: float
+    n_identity_rows: int
+    d_in: int
+
+
+def augmented_jacobian_excluding_identity(
+    step_fn: Callable[[Tensor, Tensor | None, Tensor], tuple[Tensor, Tensor | None]],
+    h: Tensor,
+    m: Tensor | None,
+    u: Tensor,
+    *,
+    identity_atol: float = _IDENTITY_ROW_ATOL,
+) -> ExcludedAugmentedJacobian:
+    """Dense ``J^q`` of a growing augmented state, minus the identity passthrough.
+
+    The measurement counterpart of the training-time exclusion declared in
+    ``objectives.jac_reg.TotalJacobianPenalty.on_state_steps``: same object,
+    computed exactly (dense ``torch.func.jacrev``, CPU float64,
+    deterministic) instead of by Hutchinson probes. This is what the
+    calibration of PROTOCOL section 5 measures.
+
+    Why this function exists. ``total_jacobian`` requires ``q_next`` to have
+    the SAME shape as ``q`` -- a square map is what ``jacobian_products``
+    and ``fr_lyapunov_exponents`` need downstream. A growing-memory family
+    (the transformer, whose KV cache gains one entry per step) violates that
+    from ``t >= 1`` onward, so ``total_jacobian`` raises for it rather than
+    returning a rectangular object its callers would misuse. This function
+    is the separate rectangular entry point; ``total_jacobian``'s contract
+    is unchanged.
+
+    WHAT IS EXCLUDED, AND WHY. Under pure append, ``m_next`` reproduces
+    every entry of ``m`` verbatim, so ``d(m_next)/d(m)`` contains an exact
+    identity block. It forces ``||J^q||_F^2 >= m.numel()`` and
+    ``sigma_max(J^q) >= 1`` -- structurally, for any parameters -- which
+    would put the declared margin band ``[0.90, 1.00]`` out of reach for
+    that family by construction. The block is excluded, and the exclusion is
+    declared rather than hidden: it is a copy, not a learned map, its
+    derivative with respect to the parameters is identically zero, and no
+    penalty weight could ever move it. Removing it removes a constant, not a
+    constraint.
+
+    HOW, and why ROW DELETION rather than a singular-value correction. The
+    identity rows are found NUMERICALLY -- rows of the ``m_next`` block that
+    are canonical basis vectors pointing into the ``m`` input block, to
+    ``identity_atol`` -- never from knowledge of ``m``'s layout, which stays
+    family-private (``predictors.base``; Liskov: the audit must not learn a
+    family's cache layout). Those rows are then deleted. Writing ``R`` for
+    that row set, and using that its rows are the basis vectors ``e_j`` with
+    ``j`` ranging over the ``m``-input block exactly once (a partial
+    permutation, hence norm-preserving), for every tangent ``v = (v_h,
+    v_m)``::
+
+        ||J v||^2 = ||J_excl v||^2 + ||v_m||^2
+
+    equivalently, in Gram form and exactly::
+
+        J_excl^T J_excl = J^T J - diag(0_{n_h}, I_{n_m})
+
+    which is the identity the training estimator uses at probe level (it
+    subtracts ``||v_m||^2``); the two therefore penalize and measure the
+    SAME object. It also shows why a singular-value-level shortcut is NOT
+    available: the two Gram matrices differ by a PSD rank-``n_m``
+    projection, so Weyl gives only ``sigma_max(J_excl)^2 >=
+    sigma_max(J)^2 - 1``, with equality iff the top right-singular vector of
+    ``J_excl`` lies entirely inside the ``m`` block. Measured on the real
+    transformer at ``t = 1``: ``sigma_max(J) = 2.0303``,
+    ``sigma_max(J_excl) = 2.0196``, while ``sqrt(sigma_max(J)^2 - 1) =
+    1.767``. The excluded operator norm is not recoverable from the full
+    spectrum -- the rows must be identified and removed.
+
+    VERIFIED, NOT ASSUMED. When the state grows, the identity rows must form
+    a bijection onto ALL of ``m``'s coordinates; anything else means the
+    family does not append purely and the identity above is false for it, so
+    this raises instead of silently reporting a wrong number.
+
+    Args:
+        step_fn: pure map ``(h, m, u) -> (h_next, m_next)``, ``m``/``m_next``
+            a tensor or ``None``. Same signature as the ``step_fn`` of
+            ``objectives.jac_reg.on_state_steps``, so a caller can feed the
+            identical closure to the penalty and to this audit.
+        h: latent state, any shape, CPU float64. The batch axis is the
+            caller's business: pass ONE sample for a per-state margin (the
+            batched map's Jacobian is block-diagonal, and mixing samples
+            into a single ``sigma_max`` would report the batch max, not a
+            per-state quantity).
+        m: threaded memory, any shape (opaque here) or ``None`` for a fresh
+            state, CPU float64.
+        u: control, any shape, CPU float64. Frozen: the differentiated
+            object is ``J^q``, not a mixed Jacobian (same doctrine as
+            ``total_jacobian``).
+        identity_atol: absolute tolerance classifying a row as a canonical
+            basis vector (see ``_IDENTITY_ROW_ATOL`` for why the default has
+            no grey zone). Must be finite and in ``(0, _IDENTITY_ATOL_MAX]``
+            -- validated up front, since a looser value (e.g. ``0.1``) would
+            silently reclassify a genuine learned coefficient as a verbatim
+            copy and delete it.
+
+    Returns:
+        ``ExcludedAugmentedJacobian``. When ``m is None`` (fresh state) or
+        ``m_next.numel() == m.numel()`` (fixed-size recurrent state such as
+        ``min_ssm``, where ``m_next`` is a transformation of ``m`` and not a
+        copy of it), NOTHING is excluded and the full dense Jacobian is
+        returned with ``n_identity_rows == 0``.
+
+    Raises:
+        ValueError: ``identity_atol`` non-finite or outside ``(0,
+            _IDENTITY_ATOL_MAX]``; non-CPU/non-float64/non-finite inputs or
+            outputs; ``step_fn`` not returning a 2-tuple; a SHRINKING memory
+            (outside the declared taxonomy); for a growing memory, identity
+            rows that do not form a bijection onto ``m``'s coordinates
+            (falsifies the pure-append hypothesis for that family); or
+            ``sigma_max``/``frobenius_sq`` overflowing float64 despite a
+            finite ``J`` (M8: a loud, named error, never a silent ``inf``).
+    """
+    if not (math.isfinite(identity_atol) and 0.0 < identity_atol <= _IDENTITY_ATOL_MAX):
+        raise ValueError(
+            f"identity_atol must be finite and in (0, {_IDENTITY_ATOL_MAX!r}], got "
+            f"{identity_atol!r} -- a looser tolerance risks misclassifying a "
+            "genuine learned coefficient as a verbatim identity copy and "
+            "silently deleting it"
+        )
+    require_cpu_float64_tensor(h, "h")
+    require_cpu_float64_tensor(u, "u")
+    if not torch.isfinite(h).all():
+        raise ValueError("h contains non-finite values")
+    if not torch.isfinite(u).all():
+        raise ValueError("u contains non-finite values")
+    if m is not None:
+        require_cpu_float64_tensor(m, "m")
+        if not torch.isfinite(m).all():
+            raise ValueError("m contains non-finite values")
+
+    n_h = h.numel()
+    n_m = 0 if m is None else m.numel()
+
+    with torch.no_grad():
+        primal = step_fn(h, m, u)
+    if not (isinstance(primal, tuple) and len(primal) == 2):
+        raise ValueError(
+            "step_fn must return a 2-tuple (h_next, m_next); got "
+            f"{type(primal).__name__} of length "
+            f"{len(primal) if isinstance(primal, tuple) else 'n/a'}"
+        )
+    h_next, m_next = primal
+    require_cpu_float64_tensor(h_next, "step_fn h_next output")
+    if not torch.isfinite(h_next).all():
+        raise ValueError("step_fn h_next output contains non-finite values")
+    n_h_next = h_next.numel()
+    if m_next is None:
+        n_m_next = 0
+    else:
+        require_cpu_float64_tensor(m_next, "step_fn m_next output")
+        if not torch.isfinite(m_next).all():
+            raise ValueError("step_fn m_next output contains non-finite values")
+        n_m_next = m_next.numel()
+
+    if n_m > 0 and n_m_next < n_m:
+        raise ValueError(
+            f"m_next has {n_m_next} elements, fewer than m's {n_m}; a shrinking "
+            "recurrent memory is outside the declared taxonomy (fixed-size state "
+            "or pure append) and the identity-passthrough exclusion is undefined "
+            "for it"
+        )
+
+    h_shape, m_shape = h.shape, None if m is None else m.shape
+
+    # One flat coordinate system for the whole augmented state: vec(h) then
+    # vec(m), each row-major over the tensor AS GIVEN. Flattening is the only
+    # thing done to m -- its axes are never interpreted (family-private).
+    def flat_map(q_flat: Tensor) -> Tensor:
+        h_arg = q_flat[:n_h].reshape(h_shape)
+        m_arg = None if m_shape is None else q_flat[n_h:].reshape(m_shape)
+        out_h, out_m = step_fn(h_arg, m_arg, u)
+        parts = [out_h.reshape(-1)]
+        if out_m is not None:
+            parts.append(out_m.reshape(-1))
+        return torch.cat(parts)
+
+    q_flat = h.reshape(-1) if m is None else torch.cat([h.reshape(-1), m.reshape(-1)])
+    J = as_float64_array(torch.func.jacrev(flat_map)(q_flat))
+    if not np.isfinite(J).all():
+        raise ValueError("J contains non-finite values; derivative of invalid function")
+
+    d_in = n_h + n_m
+    excluded_rows: np.ndarray = np.empty(0, dtype=np.intp)
+    if n_m > 0 and n_m_next > n_m:
+        # Layout-agnostic detection: a row of the m_next block realizes the
+        # passthrough iff it is a canonical basis vector pointing into the
+        # m-input block. Nothing here knows WHICH slots were appended.
+        block = J[n_h_next:, :]
+        near_one = np.abs(block - 1.0) <= identity_atol
+        n_nonzero = (np.abs(block) > identity_atol).sum(axis=1)
+        is_identity = (near_one.sum(axis=1) == 1) & (n_nonzero == 1)
+        col = np.argmax(near_one, axis=1)
+        local_rows = np.nonzero(is_identity & (col >= n_h))[0]
+        matched = np.unique(col[local_rows])
+        expected = np.arange(n_h, n_h + n_m)
+        if local_rows.size != n_m or not np.array_equal(matched, expected):
+            raise ValueError(
+                f"pure-append hypothesis violated: found {local_rows.size} identity "
+                f"passthrough rows covering {matched.size} distinct m coordinates, "
+                f"expected {n_m} rows in bijection with m's {n_m} coordinates "
+                f"(m: {n_m} -> {n_m_next} elements). This family does NOT copy its "
+                "old memory entries verbatim into m_next, so the declared "
+                "identity-passthrough exclusion does not apply to it (REGLES "
+                "section 5: a violated hypothesis is a bug to chase upstream, "
+                "never a number to report anyway)"
+            )
+        excluded_rows = local_rows + n_h_next
+
+    J_excl = np.delete(J, excluded_rows, axis=0) if excluded_rows.size else J
+
+    # M8 (adversarial review round 2): a FINITE J can still overflow float64
+    # in its DERIVED norms -- e.g. step_fn(h) = 1e200*h is finite, sigma_max
+    # (1e200) is a legitimate finite report, but naive sum(J**2) hits 1e400
+    # and silently returns inf. Divide by max|J| BEFORE squaring (REGLES
+    # section 5: same discipline as fr_drift_curve's "divide before
+    # subtracting") so (J_excl/scale) has |entries| <= 1 and its
+    # sum-of-squares is always representable; take the sqrt BEFORE squaring
+    # back up so the only remaining place overflow can occur is the FINAL
+    # squaring of a value on the same order as `scale` itself (already
+    # confirmed finite by np.linalg.svd's own internal scaling). If even
+    # THAT overflows, the true frobenius_sq genuinely exceeds float64 range,
+    # and an explicit named error is the correct report -- never a silent inf.
+    if J_excl.size == 0:
+        sigma_max = 0.0
+        frobenius_sq = 0.0
+    else:
+        sigma_max = float(np.linalg.svd(J_excl, compute_uv=False)[0])
+        if not math.isfinite(sigma_max):
+            raise ValueError(
+                f"sigma_max overflowed float64 ({sigma_max!r}) despite a finite "
+                "J_excl; the spectral norm itself is not representable here"
+            )
+        scale = float(np.abs(J_excl).max())
+        if scale == 0.0:
+            frobenius_sq = 0.0
+        else:
+            norm_sq_scaled = float(((J_excl / scale) ** 2).sum())  # in [0, size], always finite
+            frob = scale * math.sqrt(norm_sq_scaled)  # same order as scale -- finite
+            # guard BEFORE squaring: Python float ** raises a bare
+            # OverflowError past float64 max instead of returning inf, so
+            # the finite-postcheck below would never run (M8: the error must
+            # be the loud, NAMED one). frob*frob (multiplication) yields inf
+            # instead of raising, letting the named check fire.
+            frobenius_sq = frob * frob
+            if not math.isfinite(frobenius_sq):
+                raise ValueError(
+                    f"frobenius_sq overflowed float64: ||J_excl||_F ~= {frob:.6g} "
+                    "exceeds sqrt(float64 max) ~= 1.34e154 -- sigma_max "
+                    f"({sigma_max:.6g}) is still a legitimate, representable report; "
+                    "only the squared Frobenius norm is out of range here (REGLES "
+                    "section 5: an unrepresentable value is a loud error, never a "
+                    "silent inf)"
+                )
+            # Symmetric guard on the OTHER side (m9, adversarial review round
+            # 3): a positive frob this small still squares to exactly 0.0 --
+            # float64's smallest positive (subnormal) value is ~4.94e-324, so
+            # any frob < sqrt(float64 min normal) ~= 1.49e-154 underflows
+            # silently to zero on squaring even though frob itself, and
+            # sigma_max, remain exact finite reports. Never let that silent
+            # zero pass as a legitimate frobenius_sq.
+            if frob > 0.0 and frobenius_sq == 0.0:
+                raise ValueError(
+                    f"frobenius_sq underflowed float64: ||J_excl||_F ~= {frob:.6g} "
+                    "< sqrt(float64 min normal) ~= 1.49e-154 -- the squared norm is "
+                    f"not representable; sigma_max ({sigma_max:.6g}) remains an "
+                    "exact, legitimate report (REGLES section 5: an unrepresentable "
+                    "value is a loud error, never a silent zero)"
+                )
+
+    return ExcludedAugmentedJacobian(
+        jacobian=J_excl,
+        sigma_max=sigma_max,
+        frobenius_sq=frobenius_sq,
+        n_identity_rows=int(excluded_rows.size),
+        d_in=d_in,
+    )
 
 
 def jacobian_products(jacobians: Iterable[np.ndarray | Tensor]) -> tuple[np.ndarray, np.ndarray]:

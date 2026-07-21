@@ -79,7 +79,8 @@ def test_trainer_contract_mlp_family(tmp_path):
             assert np.isfinite(value), f"{key}={value} is not finite"
 
     paths = result["paths"]
-    assert set(paths.keys()) == {"config", "metrics_csv", "audit", "ckpt", "figs"}
+    # F9: "complete" (the run_complete.json sentinel) extends the contract
+    assert set(paths.keys()) == {"config", "metrics_csv", "audit", "ckpt", "figs", "complete"}
     for key, p in paths.items():
         print(f"[trainer] artifact {key} -> {p}")
         assert Path(p).exists()
@@ -307,13 +308,87 @@ def test_failed_rerun_leaves_no_stale_success_artifacts(tmp_path, monkeypatch):
     result = Trainer(cfg).fit(data)
     ckpt = Path(result["paths"]["ckpt"])
     audit = Path(result["paths"]["audit"])
-    assert ckpt.exists() and audit.exists()
+    complete = Path(result["paths"]["complete"])
+    assert ckpt.exists() and audit.exists() and complete.exists()  # F9: sentinel too
 
     monkeypatch.setattr(trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan")))
     with pytest.raises(RuntimeError, match="nonfinite"):
         Trainer(dict(cfg)).fit(data)
-    print(f"[trainer] after failed rerun: ckpt={ckpt.exists()}, audit={audit.exists()}")
-    assert not ckpt.exists() and not audit.exists()
+    print(
+        f"[trainer] after failed rerun: ckpt={ckpt.exists()}, audit={audit.exists()}, "
+        f"complete={complete.exists()}"
+    )
+    assert not ckpt.exists() and not audit.exists() and not complete.exists()  # F9
+
+
+def test_directory_named_stale_artifacts_are_cleaned_up_and_rerun_succeeds(tmp_path):
+    # Every artifact fit writes must recover when a corrupt prior artifact is
+    # a directory, including the ordinary write targets config.yaml and
+    # metrics.csv and the figs/ directory itself.
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_dir_artifacts", epochs=1)
+    result = Trainer(cfg).fit(data)
+    run_dir = Path(result["paths"]["ckpt"]).parent
+
+    for name in ("config.yaml", "metrics.csv", "ckpt.pt", "audit.json", "run_complete.json", "figs"):
+        path = run_dir / name
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink()
+        path.mkdir()
+        (path / "junk").write_text("not the real artifact")  # non-empty directory
+
+    result2 = Trainer(dict(cfg)).fit(data)  # must not raise IsADirectoryError
+    for key in ("config", "metrics_csv", "ckpt", "audit", "complete"):
+        p = Path(result2["paths"][key])
+        assert p.is_file(), f"{key} artifact was not recreated as a regular file"
+    assert Path(result2["paths"]["figs"]).is_dir()
+    print("[trainer] directory-named stale artifacts cleaned up, rerun succeeded")
+
+
+def test_run_complete_sentinel_written_last_and_atomically(tmp_path):
+    # F9: the sentinel is the ONLY trustworthy completion signal -- present
+    # after a successful fit, absent for a run that never reached that
+    # point, and its content matches the returned contract exactly (no
+    # separate re-derivation of config_hash/data_hash/final losses).
+    # M3 (round 3): ckpt_sha1/metrics_rows bind the sentinel to the actual
+    # artifacts -- checked here against an INDEPENDENT recomputation
+    # (hashlib directly on ckpt.pt's bytes), not by re-calling the
+    # trainer's own helper, so this test would catch a mismatched digest.
+    import hashlib
+    import json
+
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_sentinel", epochs=2)
+    trainer = Trainer(cfg)
+    result = trainer.fit(data)
+
+    complete_path = Path(result["paths"]["complete"])
+    assert complete_path.name == "run_complete.json"
+    assert complete_path.exists()
+    # no leftover .tmp from the atomic-write step
+    assert not complete_path.with_name(complete_path.name + ".tmp").exists()
+
+    payload = json.loads(complete_path.read_text())
+    print(f"[trainer] run_complete.json = {payload}")
+    ckpt_bytes = Path(result["paths"]["ckpt"]).read_bytes()
+    assert payload == {
+        "config_hash": trainer.config_hash,
+        "data_hash": trainer.data_hash,
+        "epochs_completed": 2,
+        "final_train_loss": result["history"]["train_loss"][-1],
+        "final_val_loss": result["history"]["val_loss"][-1],
+        "ckpt_sha1": hashlib.sha1(ckpt_bytes).hexdigest(),
+        "metrics_rows": 2,
+    }
+
+    # written LAST: strictly not older than ckpt.pt/audit.json (F9 ordering)
+    ckpt_mtime = Path(result["paths"]["ckpt"]).stat().st_mtime_ns
+    audit_mtime = Path(result["paths"]["audit"]).stat().st_mtime_ns
+    complete_mtime = complete_path.stat().st_mtime_ns
+    assert complete_mtime >= ckpt_mtime
+    assert complete_mtime >= audit_mtime
 
 
 def test_derived_policy_keys_and_bad_epochs_rejected(tmp_path):
@@ -449,3 +524,134 @@ def test_disabled_branch_zero_does_not_leak_ambient_dtype(tmp_path):
     csv_b = Path(result_b["paths"]["metrics_csv"]).read_text()
     assert csv_a == csv_b
     print("[trainer] disabled-branch run bit-identical across ambient dtypes")
+
+
+# -- mu_j: the total-Jacobian constraint factor ------------------------------
+
+
+def test_mu_j_zero_metrics_csv_has_jac_pen_column_all_zero(tmp_path):
+    # mu_j defaults to 0.0: the jac_pen column is ALWAYS present (never
+    # omitted), but the branch is entirely skipped so every value is 0.0
+    data = _small_dataset(n_episodes=6, T=10)
+    result = Trainer(_mlp_config(tmp_path, exp_name="trainer_test_mu_j_off")).fit(data)
+    with open(result["paths"]["metrics_csv"]) as f:
+        rows = list(csv.DictReader(f))
+    print(f"[trainer] mu_j=0 header = {list(rows[0].keys())}")
+    assert "jac_pen" in rows[0]
+    assert all(float(row["jac_pen"]) == 0.0 for row in rows)
+
+
+def test_mu_j_positive_mlp_tensor_path(tmp_path):
+    # mlp never populates PredictorState.m -- the tensor path in
+    # _jac_state_penalty must be the one exercised, and jac_pen must be
+    # nonzero on at least one epoch (a Bernoulli-subsampled diagnostic can
+    # legitimately be exactly 0.0 on some epochs via an empty draw)
+    data = _small_dataset(n_episodes=6, T=10)
+    config = _mlp_config(tmp_path, exp_name="trainer_test_mu_j_mlp", mu_j=0.05, epochs=3)
+    result = Trainer(config).fit(data)
+    assert all(np.isfinite(v) for v in result["history"]["train_loss"])
+    assert all(np.isfinite(v) for v in result["history"]["val_loss"])
+    with open(result["paths"]["metrics_csv"]) as f:
+        rows = list(csv.DictReader(f))
+    jac_pens = [float(row["jac_pen"]) for row in rows]
+    print(f"[trainer] mlp mu_j>0 jac_pen column = {jac_pens}")
+    assert any(v > 0.0 for v in jac_pens)
+    # public contract intact
+    assert set(result.keys()) == {"model", "history", "metrics", "paths"}
+
+
+def test_mu_j_positive_min_ssm_pytree_path(tmp_path):
+    # min_ssm threads a tensor PredictorState.m from the second TF step
+    # onward -- the pytree path (on_state_steps) must be the one exercised
+    data = _small_dataset(n_episodes=6, T=10)
+    config = _mlp_config(
+        tmp_path, exp_name="trainer_test_mu_j_min_ssm", family="min_ssm", mu_j=0.05, epochs=3
+    )
+    result = Trainer(config).fit(data)
+    assert all(np.isfinite(v) for v in result["history"]["train_loss"])
+    assert all(np.isfinite(v) for v in result["history"]["val_loss"])
+    with open(result["paths"]["metrics_csv"]) as f:
+        rows = list(csv.DictReader(f))
+    jac_pens = [float(row["jac_pen"]) for row in rows]
+    print(f"[trainer] min_ssm mu_j>0 jac_pen column = {jac_pens}")
+    assert any(v > 0.0 for v in jac_pens)
+    assert set(result.keys()) == {"model", "history", "metrics", "paths"}
+
+
+def test_mu_j_validation_errors(tmp_path):
+    import pytest
+
+    # mu_j > 0 needs the TF-threaded state -- w_tf=0 has nothing to evaluate
+    with pytest.raises(ValueError, match="w_tf"):
+        Trainer(_mlp_config(tmp_path, mu_j=0.1, w_tf=0.0, w_fr=1.0))
+    for bad in (float("nan"), float("inf"), -1.0):
+        with pytest.raises(ValueError, match="mu_j"):
+            Trainer(_mlp_config(tmp_path, mu_j=bad))
+
+
+def test_resolve_run_dir_matches_fit_and_writes_nothing(tmp_path):
+    # extracted for the factorial runner's resume detection: same path fit()
+    # would use, computed with NO side effects (no directory, no files)
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_resolve")
+    trainer_a = Trainer(dict(cfg))
+    resolved = trainer_a.resolve_run_dir(data)
+    assert trainer_a.run_dir == resolved
+    assert not resolved.exists()
+
+    result = Trainer(dict(cfg)).fit(data)
+    assert Path(result["paths"]["ckpt"]).parent == resolved
+    print(f"[trainer] resolve_run_dir -> {resolved}, matches fit()'s run_dir, pre-fit unwritten")
+
+
+def test_mu_j_lowers_dense_jacobian_norm(tmp_path):
+    # package-level behavioral contract: a toy MLP predictor trained with
+    # mu_j > 0 must land with a STRICTLY lower dense total-Jacobian norm
+    # (sld.audit.jacobian.total_jacobian -- the EXACT offline measurement,
+    # never jac_reg's own stochastic estimator, per REGLES section 5: the
+    # audit measures, jac_reg only regularizes) than the same
+    # config/seed/data trained with mu_j = 0. mu_j is picked for a
+    # comfortable margin (>= 1.05x, not tuned to the edge) and checked
+    # across 2 seeds for stability, not just one lucky draw.
+    import copy
+
+    from sld.audit.jacobian import total_jacobian
+    from sld.predictors.base import PredictorState
+
+    def median_jacobian_norm(predictor, n_probes=10, probe_seed=123):
+        predictor_d = copy.deepcopy(predictor).double()  # audit doctrine: CPU float64
+        g = torch.Generator().manual_seed(probe_seed)
+        q_test = torch.randn(n_probes, _D_Z, dtype=torch.float64, generator=g)
+        u_test = torch.randn(n_probes, _D_U, dtype=torch.float64, generator=g)
+        norms = []
+        for q, u in zip(q_test, u_test):
+            def step_fn(qq, uu, _p=predictor_d):
+                h_next, _ = _p.step(qq.unsqueeze(0), uu.unsqueeze(0), PredictorState())
+                return h_next.squeeze(0)
+
+            J = total_jacobian(step_fn, q, u)
+            norms.append(float((J**2).sum() ** 0.5))
+        norms.sort()
+        return norms[len(norms) // 2]
+
+    data = _small_dataset(n_episodes=8, T=12, seed=0)
+    for seed in (0, 1):
+        cfg_off = _mlp_config(
+            tmp_path,
+            exp_name=f"trainer_test_jacnorm_off_{seed}",
+            seed=seed,
+            mu_j=0.0,
+            epochs=20,
+            batch_episodes=6,
+            lr=3e-2,
+            target_params=1_500,
+        )
+        cfg_on = dict(cfg_off, exp_name=f"trainer_test_jacnorm_on_{seed}", mu_j=2.0)
+
+        predictor_off = Trainer(cfg_off).fit(data)["model"]["predictor"]
+        predictor_on = Trainer(cfg_on).fit(data)["model"]["predictor"]
+
+        norm_off = median_jacobian_norm(predictor_off)
+        norm_on = median_jacobian_norm(predictor_on)
+        print(f"[trainer] seed={seed} median||J||_F without={norm_off:.4f} with={norm_on:.4f}")
+        assert norm_on < norm_off / 1.05  # >= 1.05x margin -- not a flaky sliver

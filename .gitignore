@@ -79,6 +79,10 @@ AGENT.md
 CLAUDE.md
 GEMINI.md
 
+# --- Run artifacts (never committed; assets/ holds the final figures) ---
+/results/
+*.npz
+
 # --- Private planning / candidacy context (never publish) ---
 _private/
 RESUME_SESSION.md

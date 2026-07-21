@@ -13,6 +13,8 @@ import csv
 import hashlib
 import json
 import math
+import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +23,7 @@ import yaml
 from torch import nn
 
 from sld.encoders.frame_mlp import FrameMLPEncoder
+from sld.objectives.jac_reg import TotalJacobianPenalty
 from sld.objectives.jepa import EMATarget, JEPALoss
 from sld.objectives.vicreg import covariance_loss, variance_loss
 from sld.predictors.base import PredictorState
@@ -41,6 +44,7 @@ _DEFAULTS = {
     "h_fr": 5,
     "w_var": 1.0,
     "w_cov": 1.0,
+    "mu_j": 0.0,
     "encoder_hidden": [64, 64],
     "target_params": 10_000,
     "results_root": "results",
@@ -89,6 +93,44 @@ _DERIVED_OR_POLICY_KEYS = frozenset({"d_h", "dtype"})
 _WEIGHT_KEYS = ("w_tf", "w_fr", "w_var", "w_cov")
 
 _HISTORY_DIAGNOSTIC_KEYS = ("jac_margin", "r_ctrl", "lip_pi", "vpt")
+
+# the ONLY trustworthy completion signal for a run (adversarial review F9):
+# ckpt.pt is written directly to its final path mid-``fit``, so a kill
+# between that write and the end of ``fit`` leaves a plausible-looking but
+# incomplete artifact set. This file is written LAST, atomically (temp file
+# + os.replace in the same directory -- atomic on POSIX), strictly after
+# ckpt.pt and audit.json. Its presence -- not ckpt.pt's -- is what resume
+# detection and the factorial index's "complete" status key on.
+RUN_COMPLETE_FILENAME = "run_complete.json"
+
+# metrics.csv's exact header, written by fit() below and re-checked (schema,
+# not just column presence) by the factorial validator's sentinel-binding
+# check (M3, round 4) -- one shared constant so the two can never drift apart
+METRICS_HEADER = (
+    "epoch",
+    "train_loss",
+    "val_loss",
+    "lr",
+    "pred",
+    "consistency",
+    "var",
+    "cov",
+    "jac_pen",
+)
+
+
+def _sha1_file(path: Path) -> str:
+    """Streamed SHA1 hex digest of ``path``'s bytes (M3, adversarial review
+    round 3): the completion sentinel binds ``ckpt.pt`` by this digest, not
+    by its mere existence, so a substituted checkpoint of the same shape is
+    rejected by the factorial validator. Read in chunks -- ``torch.load``
+    is never used here, in the trainer or the validator, just to fingerprint
+    a file (REGLES section 5: no cheap check may become an expensive one)."""
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _time_major(split: dict, idx: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
@@ -215,6 +257,22 @@ class Trainer:
                 raise ValueError(f"{key} must be finite and >= 0, got {w!r}")
         if self.config["w_tf"] <= 0 and self.config["w_fr"] <= 0:
             raise ValueError("at least one prediction objective (w_tf or w_fr) must be > 0")
+        # mu_j: the total-Jacobian constraint factor shared by every family
+        # in the factorial (objectives/jac_reg.py). Finite/>=0 like the other
+        # thresholds (the finite-metrics law: a NaN threshold silently
+        # disabling the penalty is a bug, not "off"). v0 scope (declared): the
+        # penalty is evaluated on the TF-threaded states only, so it needs a
+        # full-length TF thread to have anything to evaluate -- rejected at
+        # construction rather than silently computing on an empty thread.
+        mu_j = self.config["mu_j"]
+        if not (isinstance(mu_j, (int, float)) and math.isfinite(mu_j) and mu_j >= 0):
+            raise ValueError(f"mu_j must be finite and >= 0, got {mu_j!r}")
+        if mu_j > 0 and self.config["w_tf"] <= 0:
+            raise ValueError("mu_j > 0 requires w_tf > 0 -- the penalty needs the TF-threaded state")
+        # RNG for the penalty is the GLOBAL one (generator=None): determinism
+        # comes from set_seed(cfg["seed"]) like everywhere else in fit(); mu_j
+        # itself is already part of the hashed config, so no cross-run leakage
+        self._jac_penalty = TotalJacobianPenalty()
 
         # canonical config string: sort_keys=True makes it a pure function of
         # the resolved dict's content, not of insertion order; this EXACT
@@ -229,6 +287,7 @@ class Trainer:
         # (adversarial review round 2): run_dir is resolved in fit(), once
         # the data -- and hence its fingerprint -- is known
         self.run_dir: Path | None = None
+        self.data_hash: str | None = None
 
     def _composite_loss(
         self,
@@ -262,7 +321,13 @@ class Trainer:
             h_true = lift_fn(z[:T])  # (T, B, d_h)
             state = PredictorState()
             h_hats = []
+            # jac_steps captures the INPUT (h_t, m_t, u_t) of every step BEFORE
+            # it runs, entirely skipped when mu_j == 0 (doctrine: a disabled
+            # branch is not evaluated, l.258 zero placeholder)
+            jac_steps = [] if cfg["mu_j"] > 0 else None
             for t in range(T):
+                if jac_steps is not None:
+                    jac_steps.append((h_true[t], state.m, u_bt[t]))
                 h_next, state = predictor.step(h_true[t], u_bt[t], state)
                 h_hats.append(h_next)
             h_hat_tf = torch.stack(h_hats, dim=0)  # (T, B, d_h)
@@ -273,8 +338,12 @@ class Trainer:
                 h_hat=h_hat_tf if lifted else None,
                 lift=lift_fn if lifted else None,
             )
+            jac_pen = (
+                self._jac_state_penalty(predictor, jac_steps) if jac_steps is not None else zero
+            )
         else:
             tf_out = {"total": zero, "pred": zero, "consistency": zero}
+            jac_pen = zero
 
         if cfg["w_fr"] > 0:
             # -- free-running term: rollout h_fr <= T steps from h0 = lift(z_0) --
@@ -303,16 +372,75 @@ class Trainer:
             + cfg["w_fr"] * fr_out["total"]
             + cfg["w_var"] * var
             + cfg["w_cov"] * cov
+            + cfg["mu_j"] * jac_pen
         )
         # diagnostic breakdown for metrics.csv: TF+FR pred/consistency summed
-        # unweighted, var/cov are the raw VICReg values (weights live in config.yaml)
+        # unweighted, var/cov/jac_pen are the raw values (weights live in config.yaml)
         diag = {
             "pred": tf_out["pred"].item() + fr_out["pred"].item(),
             "consistency": tf_out["consistency"].item() + fr_out["consistency"].item(),
             "var": var.item(),
             "cov": cov.item(),
+            "jac_pen": jac_pen.item(),
         }
         return total, diag
+
+    def _jac_state_penalty(
+        self, predictor, jac_steps: list[tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]]
+    ) -> torch.Tensor:
+        """Dispatch the mu_j penalty by presence of a threaded state ``m``.
+
+        Family-agnostic (``predictors.base`` doctrine): reads what each
+        captured step ACTUALLY carries, never the family name. Every
+        ``m_t is None`` across the thread -- true for ``mlp``/``koopman_ssm``,
+        which never populate ``PredictorState.m`` -- uses the tensor-state
+        path (``TotalJacobianPenalty.__call__``); any tensor ``m_t`` -- true
+        for ``min_ssm``/``transformer`` past their first step -- uses the
+        pytree path (``on_state_steps``). Accepted corner case: a T=1 TF
+        thread on a state-threading family captures only the initial
+        ``m=None`` and falls to the tensor path, missing the m-Jacobian
+        entries for that single step -- a consequence of dispatching on the
+        captured value rather than the family, not a bug.
+        """
+        if all(m is None for _, m, _ in jac_steps):
+            q_seq = torch.stack([h for h, _, _ in jac_steps], dim=0)
+            u_seq = torch.stack([u for _, _, u in jac_steps], dim=0)
+            step_fn = lambda q, u: predictor.step(q, u, PredictorState())[0]  # noqa: E731
+            return self._jac_penalty(step_fn, q_seq, u_seq)
+
+        def step_fn(h, m, u):
+            h_next, state = predictor.step(h, u, PredictorState(m=m))
+            return h_next, state.m
+
+        return self._jac_penalty.on_state_steps(step_fn, jac_steps)
+
+    def resolve_run_dir(self, data: dict) -> Path:
+        """Resolve (never create) ``self.run_dir`` from ``data``, and return it.
+
+        Pulled out of ``fit`` so callers -- namely the ``sld-factorial``
+        runner -- can compute the SAME run directory ``fit`` would use
+        WITHOUT training anything, purely to check whether a matching run
+        already exists on disk (resume detection). Writes nothing: no
+        directory, no files. ``data`` without a ``meta`` block is rejected,
+        exactly as ``fit`` rejects it (the dataset generation spec is part
+        of the run identity -- REGLES section 6, adversarial review round 2).
+        """
+        if "meta" not in data:
+            raise ValueError(
+                "data must carry its build_dataset 'meta' block: the dataset "
+                "generation spec is part of the run identity"
+            )
+        meta = {k: v for k, v in data["meta"].items() if k != "paths"}  # paths = infra
+        data_hash = hashlib.sha1(
+            json.dumps(meta, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:8]
+        self.data_hash = data_hash
+        self.run_dir = (
+            Path(self.config["results_root"])
+            / self.config["exp_name"]
+            / f"{self.config_hash}-{data_hash}"
+        )
+        return self.run_dir
 
     def fit(self, data: dict) -> dict:
         """Build the models FROM the config, then train on ``data``.
@@ -343,22 +471,31 @@ class Trainer:
         ``audit.json`` (placeholder ``{}``, filled by the Wave 4 audit
         offline), ``figs/`` (empty). Any nonfinite train/val loss ABORTS
         the run with ``RuntimeError`` (finite-metrics law: NaN is a bug,
-        never a result).
+        never a result) -- no artifact is written for an aborted run.
+
+        Contract extension (adversarial review F9): ``paths["complete"]``
+        points to ``run_dir / "run_complete.json"``, the run's completion
+        sentinel -- ``{"config_hash", "data_hash", "epochs_completed",
+        "final_train_loss", "final_val_loss", "ckpt_sha1", "metrics_rows"}``
+        (M3, round 3: the last two BIND the sentinel to the artifacts it
+        certifies -- ``ckpt_sha1`` is a streamed digest of ``ckpt.pt``
+        (``_sha1_file``, never ``torch.load``), ``metrics_rows`` is the
+        number of data rows written to ``metrics.csv`` -- so the factorial
+        validator can recompute both from disk and refuse a substituted or
+        truncated artifact instead of trusting names/existence alone). It is
+        written LAST, after ``ckpt.pt`` and ``audit.json``, atomically (temp
+        file + ``os.replace`` in the same directory). ``ckpt.pt``'s mere
+        existence is NOT a completion signal -- it is written directly to
+        its final path mid-``fit``, so a process kill between that write and
+        the sentinel leaves a plausible but incomplete artifact set. Callers
+        resuming or indexing a run (``sld-factorial``) must check the
+        sentinel, never ``ckpt.pt`` alone. Any stale sentinel from a
+        PREVIOUS run at this identity is removed up front, alongside
+        ``ckpt.pt``/``audit.json``.
         """
         cfg = self.config
         # dataset spec enters the run identity BEFORE anything is written
-        if "meta" not in data:
-            raise ValueError(
-                "data must carry its build_dataset 'meta' block: the dataset "
-                "generation spec is part of the run identity"
-            )
-        meta = {k: v for k, v in data["meta"].items() if k != "paths"}  # paths = infra
-        data_hash = hashlib.sha1(
-            json.dumps(meta, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:8]
-        self.run_dir = (
-            Path(cfg["results_root"]) / cfg["exp_name"] / f"{self.config_hash}-{data_hash}"
-        )
+        self.resolve_run_dir(data)
 
         set_seed(cfg["seed"])  # seed BEFORE model construction (run identity)
 
@@ -400,13 +537,27 @@ class Trainer:
         val_idx = np.arange(val_split["x"].shape[0])
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        (self.run_dir / "figs").mkdir(exist_ok=True)
-        # success-only artifacts from a PREVIOUS run of this identity are
-        # removed up front: an aborted rerun must not leave a stale ckpt/audit
-        # beside fresh truncated metrics, masquerading as a complete run
-        # (adversarial review round 3)
-        for stale in ("ckpt.pt", "audit.json"):
-            (self.run_dir / stale).unlink(missing_ok=True)
+        # Every artifact this fit writes is cleared up front.  Besides
+        # preventing stale success artifacts from certifying an aborted
+        # rerun, this makes a validator-requested retrain recover if a
+        # corrupt artifact is a directory: writing config.yaml/metrics.csv
+        # would otherwise raise IsADirectoryError, as would recreating figs/
+        # if it had become a regular file.  Remove each stale path however it
+        # exists: shutil.rmtree for a directory, unlink otherwise.
+        for stale in (
+            "config.yaml",
+            "metrics.csv",
+            "ckpt.pt",
+            "audit.json",
+            RUN_COMPLETE_FILENAME,
+            "figs",
+        ):
+            stale_path = self.run_dir / stale
+            if stale_path.is_dir():
+                shutil.rmtree(stale_path)
+            else:
+                stale_path.unlink(missing_ok=True)
+        (self.run_dir / "figs").mkdir()
         config_path = self.run_dir / "config.yaml"
         config_path.write_text(self._canonical_yaml)
 
@@ -414,9 +565,7 @@ class Trainer:
         metrics_path = self.run_dir / "metrics.csv"
         with open(metrics_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(
-                ["epoch", "train_loss", "val_loss", "lr", "pred", "consistency", "var", "cov"]
-            )
+            writer.writerow(list(METRICS_HEADER))
 
             for epoch in range(cfg["epochs"]):
                 # one sampled train batch per epoch (v0 scale, declared above)
@@ -465,6 +614,7 @@ class Trainer:
                         diag["consistency"],
                         diag["var"],
                         diag["cov"],
+                        diag["jac_pen"],
                     ]
                 )
 
@@ -483,12 +633,38 @@ class Trainer:
         # placeholder: filled by the Wave 4 offline audit, never computed here
         audit_path.write_text(json.dumps({}))
 
+        # completion sentinel (F9): written LAST, strictly after ckpt.pt and
+        # audit.json above -- its presence, not ckpt.pt's, is the public
+        # "this run finished" signal. Atomic write: a temp file in the SAME
+        # directory (same filesystem -- os.replace is then atomic on POSIX)
+        # renamed onto the final name, so a kill mid-write never leaves a
+        # half-written sentinel that reads as complete.
+        complete_path = self.run_dir / RUN_COMPLETE_FILENAME
+        completion = {
+            "config_hash": self.config_hash,
+            "data_hash": self.data_hash,
+            "epochs_completed": len(history["epoch"]),
+            "final_train_loss": history["train_loss"][-1],
+            "final_val_loss": history["val_loss"][-1],
+            # M3 (round 3): binds the sentinel to the artifacts it certifies
+            # -- ckpt_sha1 streams ckpt.pt (just written above) through
+            # SHA1, metrics_rows counts exactly one row per epoch (this loop
+            # writes exactly that). Both are recomputed from disk, not
+            # trusted, by the factorial validator.
+            "ckpt_sha1": _sha1_file(ckpt_path),
+            "metrics_rows": len(history["epoch"]),
+        }
+        tmp_path = complete_path.with_name(complete_path.name + ".tmp")
+        tmp_path.write_text(json.dumps(completion))
+        os.replace(tmp_path, complete_path)
+
         paths = {
             "config": str(config_path.resolve()),
             "metrics_csv": str(metrics_path.resolve()),
             "audit": str(audit_path.resolve()),
             "ckpt": str(ckpt_path.resolve()),
             "figs": str((self.run_dir / "figs").resolve()),
+            "complete": str(complete_path.resolve()),
         }
         metrics = {
             "final_train_loss": history["train_loss"][-1],

@@ -1,0 +1,58 @@
+# Pre-registered seed-0 selection/calibration manifest (PROTOCOL.md §§2, 5).
+# This is deliberately a separate run namespace from pendulum_core.yaml:
+# every resolved selection or calibration candidate MUST retain
+# `exp_name: pendulum_core_selection`, even when it uses the core 50-epoch
+# budget.  Thus it cannot occupy the retained core seed-0 run directory.
+#
+# The procedure resolves candidate `lr` and ON-arm `mu_j` values before a
+# concrete invocation; nulls keep this manifest honest until then.  Use
+# `sld-factorial --dry-run` to inspect the pre-resolution cells.
+exp_name: pendulum_core_selection
+datasets:
+  ou:
+    system: {name: DampedPendulum, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 64
+    T: 100
+    dt: 0.02
+    seed: 0
+  action_conditioned:
+    system: {name: DampedPendulum, params: {}}
+    regime: {name: ActionConditionedRegime, params: {K_gain: [[0.8, 0.4]], sigma: 0.3}}
+    obs: null
+    n_episodes: 64
+    T: 100
+    dt: 0.02
+    seed: 0
+base:
+  d_x: 2
+  d_z: 4
+  d_u: 1
+  target_params: 10000
+arms:
+  - family: mlp
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: null}
+  - family: mlp
+    constraint: "on"
+    overrides: {mu_j: null, lr: null}
+  - family: transformer
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: null}
+  - family: transformer
+    constraint: "on"
+    overrides: {mu_j: null, lr: null}
+  - family: min_ssm
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: null}
+  - family: min_ssm
+    constraint: "on"
+    overrides: {mu_j: null, lr: null}
+  - family: koopman_ssm
+    constraint: "off"
+    overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: null}
+  - family: koopman_ssm
+    constraint: "on"
+    overrides: {mu_j: null, constrained: true, delta: 0.02, lr: null}
+seeds: [0]

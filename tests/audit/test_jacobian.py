@@ -1,8 +1,11 @@
+import math
+
 import numpy as np
 import pytest
 import torch
 
 from sld.audit.jacobian import (
+    augmented_jacobian_excluding_identity,
     conditional_jacobian,
     fr_drift_curve,
     fr_lyapunov_exponents,
@@ -295,6 +298,98 @@ def test_fr_lyapunov_exponents_noncommuting_chain_gold():
     err = np.abs(exps - expected).max()
     print(f"[LE noncommuting chain] exps={exps} expected={expected} err={err:.3e}")
     assert err < 1e-12
+
+
+# -- augmented_jacobian_excluding_identity: M8 (overflow-safe norms) and
+# -- m11 (identity_atol validation) -------------------------------------
+
+
+def test_augmented_jacobian_frobenius_overflow_from_finite_J_raises_not_silent_inf():
+    # M8, adversarial review round 2 probe: step_fn(h) = 1e200*h is FINITE
+    # (sigma_max=1e200 is a legitimate finite report), but naive
+    # sum(J**2) ~ 1e400 overflows float64 (max ~1.8e308) -- must never
+    # silently return inf.
+    def step_fn(h, m, u):
+        return 1e200 * h, None
+
+    h = torch.zeros(2, dtype=torch.float64)
+    u = torch.zeros(1, dtype=torch.float64)
+    with pytest.raises(ValueError, match="frobenius_sq") as excinfo:
+        augmented_jacobian_excluding_identity(step_fn, h, None, u)
+    print(f"[augmented_jacobian M8] 1e200*h probe -> {excinfo.value}")
+    assert "1e+200" in str(excinfo.value)  # sigma_max WAS computed and is legitimate
+
+
+def test_augmented_jacobian_large_but_representable_frobenius_computes_correctly():
+    # non-regression companion: a large but REPRESENTABLE case must still
+    # compute the correct finite value, not be swept into the overflow guard
+    def step_fn(h, m, u):
+        return 1e100 * h, None
+
+    h = torch.zeros(3, dtype=torch.float64)
+    u = torch.zeros(1, dtype=torch.float64)
+    result = augmented_jacobian_excluding_identity(step_fn, h, None, u)
+    print(
+        f"[augmented_jacobian M8] 1e100*h -> sigma_max={result.sigma_max:.6g} "
+        f"frobenius_sq={result.frobenius_sq:.6g}"
+    )
+    assert math.isfinite(result.sigma_max) and math.isfinite(result.frobenius_sq)
+    assert result.sigma_max == pytest.approx(1e100, rel=1e-9)
+    assert result.frobenius_sq == pytest.approx(3 * (1e100) ** 2, rel=1e-9)
+
+
+def test_augmented_jacobian_frobenius_underflow_from_finite_J_raises_not_silent_zero():
+    # m9, adversarial review round 3 probe: step_fn(h) = 1e-170*h is FINITE
+    # (sigma_max=1e-170 is a legitimate finite report), but frob ~=
+    # 1e-170*sqrt(d) is far below sqrt(float64 min normal) ~= 1.49e-154, so
+    # naive frob*frob underflows SILENTLY to 0.0 -- must never report a zero
+    # frobenius_sq for a genuinely nonzero (if tiny) Jacobian.
+    def step_fn(h, m, u):
+        return 1e-170 * h, None
+
+    h = torch.zeros(2, dtype=torch.float64)
+    u = torch.zeros(1, dtype=torch.float64)
+    with pytest.raises(ValueError, match="frobenius_sq") as excinfo:
+        augmented_jacobian_excluding_identity(step_fn, h, None, u)
+    print(f"[augmented_jacobian m9] 1e-170*h probe -> {excinfo.value}")
+    assert "1e-170" in str(excinfo.value)  # sigma_max WAS computed and is legitimate
+
+
+def test_augmented_jacobian_identity_atol_validated_finite_and_ranged():
+    # m11: identity_atol was exposed with NO validation -- a value like the
+    # reviewer's poison-pill 0.1 would misclassify a genuine 0.95*m
+    # derivative as a verbatim identity copy and silently delete it
+    def step_fn(h, m, u):
+        return h, torch.cat([m, h.unsqueeze(0)], dim=0)
+
+    h = torch.randn(3, dtype=torch.float64)
+    m = torch.randn(1, 3, dtype=torch.float64)
+    u = torch.zeros(1, dtype=torch.float64)
+    for bad_atol in (float("nan"), float("inf"), 0.0, -1e-9, 0.1, 1.0):
+        with pytest.raises(ValueError, match="identity_atol"):
+            augmented_jacobian_excluding_identity(step_fn, h, m, u, identity_atol=bad_atol)
+
+
+def test_augmented_jacobian_atol_ceiling_tightened_learned_map_not_deleted():
+    # m13, adversarial review round 3: the OLD ceiling (1e-3) let
+    # m_next = cat([0.9995 * m, new]) -- a plausible LEARNED coefficient, not
+    # a verbatim copy -- be misclassified as an identity passthrough and
+    # silently deleted (|0.9995 - 1.0| = 5e-4 <= 1e-3). The ceiling is now
+    # 1e-4: 1e-3 itself is out of range, and at the new max permitted value
+    # this map is correctly rejected as NOT a pure-append identity (loudly,
+    # never silently excluded).
+    def step_fn(h, m, u):
+        return h, torch.cat([0.9995 * m, h.unsqueeze(0)], dim=0)
+
+    h = torch.randn(3, dtype=torch.float64)
+    m = torch.randn(2, 3, dtype=torch.float64)
+    u = torch.zeros(1, dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="identity_atol"):
+        augmented_jacobian_excluding_identity(step_fn, h, m, u, identity_atol=1e-3)
+
+    with pytest.raises(ValueError, match="pure-append hypothesis violated"):
+        augmented_jacobian_excluding_identity(step_fn, h, m, u, identity_atol=1e-4)
 
 
 # -- (f) conditional_jacobian ---------------------------------------------
