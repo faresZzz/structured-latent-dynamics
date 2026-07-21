@@ -187,14 +187,19 @@ pre-registered here, in four ordered phases:
 
    **Core-budget achieved-margin audit.** Once phase 4 has settled a
    selection-retained `(LR_on, mu_j)` pair, the declared achieved margin is
-   audited on that ON arm's retained **50-epoch core checkpoint**, seed 0.
+   audited on that ON arm's retained **OU-regime 50-epoch core checkpoint**,
+   seed 0. The action-conditioned regime's retained 50-epoch core checkpoint,
+   also seed 0, is audited and reported alongside it as an informational
+   margin, but cannot affect the band verdict: the OU result alone defines
+   that verdict. This pins the criterion to the same OU distributional slice
+   used by the calibration proxy.
    The 10-epoch calibration/re-measurement medians above are explicitly
    unverified **selection proxies**: they choose `mu_j` candidates only and
    are never entered as achieved margins. If the offline audit of the core
-   checkpoint falls outside `[0.90, 1.00]`, report **"band not reached at
-   core budget"** verbatim in section 5's table and journal the outcome as
-   a dated protocol amendment; no further selection or calibration loop is
-   run. The procedure is bounded.
+   **OU checkpoint** falls outside `[0.90, 1.00]`, report **"band not
+   reached at core budget"** verbatim in section 5's table and journal the
+   outcome as a dated protocol amendment; no further selection or calibration
+   loop is run. The procedure is bounded.
 
 **Sweep procedure** (applies identically to phase OFF and phase ON above —
 the same six rules, run once per phase per family):
@@ -287,11 +292,12 @@ prior worst-case total:
   for that family immediately, so the realized number is almost
   certainly far smaller.
 
-The four seed-0 achieved-margin audits are offline measurements on already
-retained 50-epoch core checkpoints, not additional `Trainer.fit` runs or
-selection runs. They therefore add zero to the 168-run ceiling; their
-results, including any "band not reached at core budget" outcome, are
-reported in section 5's table.
+The four seed-0 OU achieved-margin **band audits** plus four seed-0
+action-conditioned **informational audits** are eight offline measurements on
+already retained 50-epoch core checkpoints, not additional `Trainer.fit` runs
+or selection runs. They therefore add zero to the 168-run ceiling; both
+regimes' results, including any OU "band not reached at core budget" outcome,
+are reported in section 5's table.
 
 ---
 
@@ -419,8 +425,10 @@ cycle's re-swept LR for the second, if a second cycle is entered). Either
 way the LR is fixed by its sweep before this calibration runs, never the
 reverse — this is what closes the LR/μ_J circularity. Every median in this
 procedure is a 10-epoch **selection proxy**, not a declared achieved margin:
-the latter is audited only on the retained ON arm's 50-epoch core checkpoint
-as specified in section 2 phase 4.
+the latter's band verdict is audited only on the retained ON arm's
+OU-regime 50-epoch core checkpoint as specified in section 2 phase 4; the
+action-conditioned seed-0 checkpoint is measured and reported alongside it
+for information only.
 
 1. **Sweep**: `mu_j in {1e-3, 1e-2, 1e-1, 1}`, **selection seed = 0**, the
    pendulum OU regime (`OURegime` on `DampedPendulum`), trained at the
@@ -484,31 +492,34 @@ as specified in section 2 phase 4.
    not a choice made inside this procedure: it requires a new, dated,
    committed decision before that family's ON cell can enter the core grid.
 
-Achieved margins (to be filled by the **50-epoch core-budget audit**, not by
-the 10-epoch calibration). A family may instead read **"band not reached"**
-(section 5 step 6's selection terminal state), **"selection not converged"**
-(section 2 phase 4's terminal state), or **"band not reached at core
-budget"** (the retained ON seed-0 checkpoint's offline audit) in place of a
-numeric `mu_j`/median pair — each is reported verbatim, never papered over
-with a nearest value:
+Achieved margins (to be filled by the **50-epoch core-budget audits**, not by
+the 10-epoch calibration). The OU-regime seed-0 margin is the sole band
+criterion; the action-conditioned seed-0 margin is always measured and
+reported alongside it, informational only. A family may instead read
+**"band not reached"** (section 5 step 6's selection terminal state),
+**"selection not converged"** (section 2 phase 4's terminal state), or
+**"band not reached at core budget"** (the retained ON **OU-regime** seed-0
+checkpoint's offline audit) in place of its numeric `mu_j`/OU-median pair —
+each is reported verbatim, never papered over with a nearest value:
 
-| family | mu_j selection-retained | median achieved, core seed-0 (50 epochs) |
-|---|---|---|
-| mlp | to be filled by selection | to be filled by core-budget audit |
-| transformer | to be filled by selection | to be filled by core-budget audit |
-| min_ssm | to be filled by selection | to be filled by core-budget audit |
-| koopman_ssm | to be filled by selection | to be filled by core-budget audit |
+| family | mu_j selection-retained | median achieved, OU core seed-0 (50 epochs; band criterion) | median achieved, action-conditioned core seed-0 (50 epochs; informational) |
+|---|---|---|---|
+| mlp | to be filled by selection | to be filled by core-budget audit | to be filled by informational audit |
+| transformer | to be filled by selection | to be filled by core-budget audit | to be filled by informational audit |
+| min_ssm | to be filled by selection | to be filled by core-budget audit | to be filled by informational audit |
+| koopman_ssm | to be filled by selection | to be filled by core-budget audit | to be filled by informational audit |
 
 If section 2 phase 4's bounded iteration triggers one or two
 recalibrations for a family, the `mu_j` reported above is the value from the
-**last** selection cycle; its median is always the subsequent core-budget
-audit, never an intermediate proxy. Superseded intermediate calibrations
+**last** selection cycle; its OU median is always the subsequent core-budget
+band audit, never an intermediate proxy, and its action-conditioned median is
+reported alongside it informationally. Superseded intermediate calibrations
 (at `LR_off(family)`, or at an earlier cycle's LR) remain
 **pre-registered selection & calibration runs** (header taxonomy), published
 alongside the core grid with their trace, never journaled in section 9, which
-is reserved for runs outside this declared procedure. A core-budget audit
-outside the band is instead journaled as the protocol amendment prescribed in
-section 2 phase 4; it does not reopen the bounded loop.
+is reserved for runs outside this declared procedure. An **OU** core-budget
+band audit outside the band is instead journaled as the protocol amendment
+prescribed in section 2 phase 4; it does not reopen the bounded loop.
 
 ### Honesty declarations
 

@@ -759,6 +759,33 @@ def test_directory_named_required_file_recovers_via_full_rerun(tmp_path, artifac
     assert _validate_completion_sentinel(run_dir) is not None
 
 
+@pytest.mark.parametrize("corruption", ("missing", "regular_file"))
+def test_missing_or_regular_file_figs_recovers_via_full_rerun(tmp_path, corruption):
+    # REGLES section 6 promises figs/ as a directory. It therefore participates
+    # in the completion contract: either corruption must invalidate resume,
+    # rerun successfully, and restore the directory.
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / f"mini_figs_{corruption}.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    assert main(["--config", str(config_path)]) == 0
+    run_dir = Path(list(csv.DictReader((results_root / "mini" / "index.csv").open()))[0]["run_dir"])
+
+    figs_path = run_dir / "figs"
+    ckpt_mtime_before = (run_dir / "ckpt.pt").stat().st_mtime_ns
+    figs_path.rmdir()
+    if corruption == "regular_file":
+        figs_path.write_text("not a figures directory")
+    assert _validate_completion_sentinel(run_dir) is None
+
+    rc = main(["--config", str(config_path)])
+    print(f"[factorial] M6 {corruption} figs/ -> rerun rc={rc}")
+    assert rc == 0
+    assert (run_dir / "ckpt.pt").stat().st_mtime_ns != ckpt_mtime_before
+    assert figs_path.is_dir()
+    assert _validate_completion_sentinel(run_dir) is not None
+
+
 # -- F17: index resilience to interrupted/corrupted runs ---------------------
 
 

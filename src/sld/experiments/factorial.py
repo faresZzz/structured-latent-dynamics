@@ -362,6 +362,9 @@ _SENTINEL_KEYS = frozenset(
 # every artifact the public contract (REGLES section 6) promises for a
 # genuinely complete run
 _REQUIRED_ARTIFACTS = ("ckpt.pt", "metrics.csv", "config.yaml", "audit.json")
+# ``figs/`` is part of that same public contract, but unlike the artifacts
+# above it must be a directory rather than a regular non-empty file.
+_REQUIRED_DIRECTORIES = ("figs",)
 
 
 def _artifact_ok(path: Path) -> bool:
@@ -415,9 +418,10 @@ def _validate_completion_sentinel(run_dir: Path) -> dict | None:
       ``run_dir``'s OWN name -- every run dir is named
       ``f"{config_hash}-{data_hash}"`` (``Trainer.resolve_run_dir``, both 8
       hex chars, never containing ``-``);
-    - every required artifact (``ckpt.pt``, ``metrics.csv``, ``config.yaml``,
-      ``audit.json``) is a regular, non-empty, readable FILE (``_artifact_ok``)
-      -- not merely "exists";
+    - every required file artifact (``ckpt.pt``, ``metrics.csv``,
+      ``config.yaml``, ``audit.json``) is a regular, non-empty, readable FILE
+      (``_artifact_ok``), and ``figs/`` exists as a DIRECTORY -- not merely
+      "exists";
     - the config hash is RECOMPUTED from ``config.yaml``'s own bytes and
       matches the folder name -- ``Trainer`` writes ``config.yaml`` as
       EXACTLY ``self._canonical_yaml`` (the sorted, ``results_root``-excluded
@@ -477,6 +481,8 @@ def _validate_completion_sentinel(run_dir: Path) -> dict | None:
         return None
 
     if any(not _artifact_ok(run_dir / artifact) for artifact in _REQUIRED_ARTIFACTS):
+        return None
+    if any(not (run_dir / directory).is_dir() for directory in _REQUIRED_DIRECTORIES):
         return None
 
     # M3: recompute, don't just compare strings -- config.yaml's raw bytes
