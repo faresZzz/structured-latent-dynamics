@@ -30,7 +30,7 @@ Full core grid: ~550 runs, ~30-55 CPU-hours on a laptop — frugal by design.
 
 Committed and tagged `pre-registration` before any run of the core grid or of the pre-registered LR/μ_J selection and calibration sweeps; both start counting from the tag (`PROTOCOL.md`'s three-category taxonomy: core grid, pre-registered selection & calibration runs, exploratory). Exploratory runs, before or after the tag, are logged in `PROTOCOL.md` section 9, never in either of the other two counts.
 
-- **P1 (directional, decomposed by the factorial)** — (a) *constraint effect*: within each family, the ON cell produces more stable free-running (FR) rollouts than the OFF cell (drift at a fixed horizon, measured in true-state coordinates through a per-run fitted linear readout — the gauge-invariant endpoint declared in `PROTOCOL.md`; VPT on Lorenz arrives at D2); (b) *architecture effect*: at fixed constraint, the explicit spectral parametrization beats the generic families. Killed if (a) fails everywhere, or if (a) holds and (b) falls — the property was sufficient, the architecture was incidental — depth 2 without depth 1, a result in itself.
+- **P1 (directional, decomposed by the factorial)** — (a) *constraint effect*: within each family, the ON cell produces more stable free-running (FR) rollouts than the OFF cell (drift at a fixed horizon, measured in true-state coordinates through a per-run fitted linear readout — the gauge-invariant endpoint declared in `PROTOCOL.md`; VPT on Lorenz arrives at D2). For `koopman_ssm`, ON is declared as a *package* — penalty **and** stable parametrization change together — so its contrast is not attributable to the penalty alone. ~~(b) *architecture effect*: at fixed constraint, the explicit spectral parametrization beats the generic families.~~ **P1(b) is withdrawn** — see "What didn't work" below and `PROTOCOL.md` section 11. It is withdrawn, not falsified: the constraint level it compares families *at* was never achieved across families, so no measurement of it exists.
 - **P2 (sufficient state, falsifiable)** — the state deficit measured **before** moving to the contextual encoder (R²/Procrustes recovery against the true state) predicts **the order** of the contextual encoder's gains, announced in advance, on the available system × regime pairs (~8 at flagship scale — limited power, declared; the dozen pairs is the PhD-scale target). Killed if this order prediction does not beat the val-loss baseline.
 - **P3 (directional co-adaptation)** — co-trained with the constrained predictor, the encoder produces latents with better recovery (R², Procrustes, modal separation) than with the generic family at the same budget. The direction is predicted, not just a change.
 - **P4 (interventional)** — task pairs on the same environment and the same model, costs oriented toward well- vs. poorly-controllable directions, **constant oracle difficulty** (a CEM on the true RK4 dynamics succeeds equally on both orientations); prediction: the success gap is ordered by $r_{\mathrm{ctrl}}$ and $E_{\mathrm{ctrl}}$ (invariant forms, declared $R_u$ metric). Killed if the intervention does not produce the predicted order. The post-hoc correlational scatter can illustrate, never prove (endogenous).
@@ -58,17 +58,35 @@ Causal language, when it appears, is earned by the P4 intervention and by the fa
 | Seeds | 5 |
 | **Total** | **1 × 2 × 4 × 2 × 5 = 80 runs (D1)** |
 
+Status: the 40 OFF cells are trained (39 complete, 1 divergence). The 40 ON cells are held pending `PROTOCOL.md` section 11.6 — the constraint level they were to be run at was never calibrated across families.
+
 This is the **core grid** count only (`PROTOCOL.md`'s taxonomy). The pre-registered LR sweeps (OFF and ON cells) and μ_J calibration runs (`PROTOCOL.md` sections 2 and 5) are separate, published alongside these results, and not counted in the 80.
 
 The full core grid (~550 runs, plan §3.9) arrives at D2. Models are ~10k predictor params, budget-matched ±5% (`PROTOCOL.md`).
 
 ## Results
 
-D1 grid results and Figures 1-2 land here once the grid completes; nothing is reported before it does.
+**OFF half of the D1 grid: complete.** 4 families × 2 regimes × 5 seeds at the amended 200-update budget (`PROTOCOL.md` section 10.2), 39 cells trained, 1 divergence. `action_conditioned` / `min_ssm` / seed 4 produced a non-finite training loss at update 46 and aborted without success artifacts; it is reported as a divergence, not re-seeded and not dropped (`PROTOCOL.md` section 11.7).
+
+**ON half: not run.** It waits on the dose-response study declared in `PROTOCOL.md` section 11.6. The four ON runs currently on disk are protocol-violation traces, kept and marked, never core evidence (section 11.5).
+
+Figures 1-2 land here once the replacement study completes; nothing is reported before it does.
 
 ## What didn't work
 
-To be filled by D2.
+**The matched-margin calibration — and it is the most informative thing this repo has produced so far.**
+
+The design crosses architecture with a constraint that had to be *comparable* across families. That comparability was operationalized as a common band `[0.90, 1.00]` on a calibrated stability margin. It failed, in three stages, each of which the instrument caught itself:
+
+1. **The first calibration measured almost nothing.** The trainer takes one optimizer step per epoch, so a "10-epoch" calibration budget was 10 updates — entirely inside the transient, where AdamW's partial loss-scale invariance makes the penalty weight inert. Measured: `cos(grad(μ_J=1), grad(μ_J=10))` = 0.9985, and a weight displacement of 0.3–0.8 % across four decades of μ_J.
+2. **The first metric was not a measurement.** `σ_max` was read in undeclared coordinates. The same dense Jacobians give 1.0439 raw and 22.94 whitened for `min_ssm` — a factor-23 swing in the verdict under an equally defensible choice of basis. `REGLES.md` requires a diagnostic that fails the reparameterization stress test to be repaired or withdrawn; it was repaired, and a metric was declared (`PROTOCOL.md` section 10.3).
+3. **With budget and metric repaired, the band was still reached by one family at one seed.** `mlp` selected μ_J = 0.01; `transformer` sat at 5.8–7.2, `min_ssm` at 1.06–1.33, `koopman_ssm` at 1.0326–1.0348 with a 0.2 % non-monotone response.
+
+**Why it failed, as best we can support it.** The band asked four families to agree on one number while each family's margin is normalized by scales estimated on its *own* representation — an operational convention that was never established as physical comparability. Compounding it, the penalty minimizes a Frobenius-type norm while acceptance reads the top singular value, and reducing the former can redistribute the spectrum *upward* in the latter — consistent with `koopman_ssm`'s numbers, not proven on them. For the transformer, the audited quantity is a new-write sensitivity rather than contraction of the complete augmented state, so the same numeric band is not the same constraint.
+
+**Consequence.** P1(b) compares architectures *at a fixed constraint*; no fixed constraint was ever achieved, so P1(b) is **withdrawn as unidentified** rather than declared false. What replaces it is a dose-response study that reports the achieved margin as a measured covariate instead of a controlled quantity (`PROTOCOL.md` section 11.6). What is *not* done, and why, is written out in section 11.4 — including the one mechanism that could have made the band reachable (a dual controller on the audited quantity) and the reason it is out of scope here rather than merely hard.
+
+A gate was allowed to fail. The runs, the superseded verdicts and the reasoning stay published.
 
 ## Scope and limitations
 

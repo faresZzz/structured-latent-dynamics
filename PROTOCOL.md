@@ -656,3 +656,343 @@ is not a second, different rule.
 | date | what ran | why | outcome |
 |---|---|---|---|
 | | | | |
+
+---
+
+## 10. Amendment 1 — repaired μ_J calibration (dated 2026-07-30)
+
+This is the "new, dated, committed decision" that section 5 step 6 and section 2
+phase 4 both prescribe as the ONLY way to resolve a terminal calibration state. It
+amends the **compute constants** of the calibration procedure and **declares the
+metric** in which its margin is measured. It does not rewrite section 5: the μ_J
+grid, the selection-retention rule, the four refinement branches, the band
+`[0.90, 1.00]`, the three-category run taxonomy, the P1-P5 predictions and the P1a
+endpoint all stand **verbatim**. Every clause of section 5 not explicitly superseded
+below remains in force.
+
+### 10.1 Why (measured, before this amendment was written)
+
+The pre-amendment calibration produced "band not reached" for 3 of 4 families. The
+cause was diagnosed by offline probes on the retained checkpoints, and reviewed
+adversarially (2 rounds, verdict SAME-PAGE: YES). The findings that force this
+amendment:
+
+1. **The calibration trained 10 optimizer steps per candidate.** The trainer takes
+   one sampled batch and one `optimizer.step()` per epoch, so a 10-epoch budget is
+   10 updates and the 50-epoch core budget is 50. Measured weight displacement over
+   a 10-update calibration run: 0.3-0.8 % of the parameter norm.
+2. **At 10 updates the sweep is entirely inside the transient**, where AdamW's
+   partial loss-scale invariance makes `mu_j` inert: measured
+   `cos(grad_total(mu_j=1), grad_total(mu_j=10))` = 0.9985 (mlp), 0.999996
+   (min_ssm); `||theta(mu_j=10) - theta(mu_j=1e-3)|| / ||theta||` = 0.78 % (mlp),
+   0.038 % (min_ssm). At a converged stationary point the dependence returns
+   (`grad L_pred + mu_j * grad P = 0`, and `dP/dmu_j = -grad P^T H^-1 grad P <= 0`
+   at a strict local minimum), so the fix is an adequate optimization budget, not a
+   new mechanism.
+3. **`step_subsample = 0.25` discards three quarters of the steps** and is the
+   dominant variance source of the training-time estimator.
+4. **`sigma_max(J^q)` was measured in undeclared coordinates.** Same dense
+   Jacobians, read in the raw latent basis vs a whitened one: mlp 1.0309 / 1.0879,
+   min_ssm 1.0439 / 22.94, koopman_ssm 0.9952 / 5.047, with
+   `cond(Sigma)` = 62.7 / 1.5e7 / 1.3e5. The augmented state concatenates `h`
+   (variance ~5e-2) with `m` (variance down to 2e-8). A margin whose verdict moves
+   by a factor 23 under an equally defensible coordinate choice is not a measurement.
+   `REGLES.md` section 4 already forbids publishing a diagnostic that fails the
+   reparameterization stress test ("réparé ou retiré"); contraction theory
+   (Lohmiller & Slotine, *Automatica* 1998, and the control/neural contraction-metric
+   literature that follows) makes declaring a metric a theoretical obligation, since
+   contraction is defined relative to a metric and not by the Jacobian alone.
+
+### 10.2 Superseded compute constants
+
+Section 5's calibration procedure keeps its steps 1-6 verbatim, with these three
+constants replaced:
+
+- **Budget.** Section 5 step 2's "calibration budget = 10 epochs" is superseded by
+  **200 optimizer updates per candidate**, and the same 200-update budget applies to
+  the LR sweeps of section 2 and to the retained/core achieved-margin runs, so that
+  every arm still receives an identical tuning budget (the per-arm fairness law,
+  `REGLES.md` section 4, is preserved). Budgets are henceforth expressed in
+  **optimizer updates**, not epochs, and the LR scheduler's horizon is expressed in
+  updates. 200 is the smallest horizon at which contraction was *measured* to be
+  materially controllable for both `mlp` and `min_ssm`; 10 demonstrably is not, and
+  50 has no family-wide supporting evidence. This is declared as a minimum
+  diagnostic budget, not a claim of convergence.
+- **`step_subsample`: 0.25 -> 1.0.** Every teacher-forced step is kept, which makes
+  the Bernoulli step-mask deterministic and removes the dominant variance floor.
+- **`k_probes`: unchanged at 2.** Measured, not assumed: at `step_subsample = 1.0`,
+  with parameters and batch held fixed, the estimator's coefficient of variation
+  over 256 independent draws is 0.075 % (mlp) and 0.139 % (min_ssm) — two orders of
+  magnitude inside the 2.5 % requirement. Raising `k_probes` buys no measured
+  variance reduction while multiplying the threaded-state path's cost by up to ~50x.
+
+Both constants are now config keys (`k_probes`, `step_subsample`) and participate in
+the run identity hash whenever `mu_j > 0`; when `mu_j == 0` they are canonicalized to
+their defaults before hashing, because the penalty branch is not evaluated at all.
+
+Measured cost of the amended calibration track: **2.71 CPU-hours** at
+(`k_probes = 2`, `step_subsample = 1.0`, 200 updates). This category is published
+alongside the core grid and never counted in it (header taxonomy), so `README.md`'s
+core-grid budget is unaffected.
+
+The μ_J penalty is no longer evaluated on the validation split. It was recomputed
+there every epoch, unused, at 23-38 % of epoch wall-clock, and it advanced the global
+RNG that the training-time probes draw from. Consequence, declared: `val_loss` in
+`metrics.csv` is now TF + FR + VICReg only and never includes `mu_j * jac_pen`.
+
+### 10.3 Declared metric (new)
+
+The calibration margin is the median of the **metric-normalized** operator norm of
+the dense one-step Jacobian on the **complete** augmented state `q = (h, m)`:
+
+    sigma_max( S_out^-1 . J_t^{q,excl} . S_in )
+
+applied **identically at training time and at audit time**. `J^{q,excl}` is the
+Jacobian with the previously declared immutable identity carry-forward rows excluded
+(section 5, "Identity-block exclusion"), and nothing else: every memory input column
+and every transformed or newly written memory output row stays constrained.
+Constraining a sub-block of the Jacobian remains forbidden (`REGLES.md` section 7 and
+the Wave 4a gold counter-examples), as does using the spectral radius as a
+certificate.
+
+**Reference scales.** `S` is a **frozen** diagonal matrix of centered per-coordinate
+standard deviations, estimated in float64 on the retained phase-OFF, seed-0,
+OU-regime teacher-forced validation trajectories, **before** the μ_J sweep runs, and
+held fixed for the whole sweep. It is never re-estimated from a penalized run.
+
+**Growing memory.** For a family whose memory grows across the rollout, `S` is a
+position-indexed family `{S_t}`, not one constant-length vector. Cache coordinates
+are labelled structurally (layer, K/V, head, absolute position, feature); a
+coordinate's scale is estimated across reference episodes at the step that creates
+it, and reused unchanged while that coordinate persists. A coordinate that does not
+yet exist needs no scale. The frozen reference rollout must cover every position that
+is trained or audited.
+
+**Indeterminacy, not repair.** A position beyond the reference rollout, a zero
+reference variance, or a non-finite one yields the verdict **"metric indeterminate"**,
+reported verbatim. No epsilon floor is substituted and no scale is extrapolated —
+the same discipline the repo already applies to a non-determinable readout.
+
+**Declared gauge domain.** Under `q' = D q` for any finite invertible diagonal `D`
+preserving persistent coordinate identity, `S' = |D| S`, so the normalized Jacobian
+changes only by left/right sign matrices and its singular values are unchanged. The
+declared invariance is therefore over **all finite invertible diagonal
+reparameterizations**, verified under signed and extreme rescalings — the same
+invariance class, and the same declared limitation (not invariant under shears or
+rotations), already adopted for the section 5 P1a endpoint. Full covariance whitening
+is not adopted: it is singular or impractical for a growing cache. A true-state
+pullback is not adopted: it is undefined on `m` and so cannot certify the complete
+augmented state.
+
+### 10.4 Pre-registered acceptance test (new)
+
+The question this amendment leaves open is whether an ordinary monotone penalty with
+a swept weight suffices once the budget, the estimator and the metric are repaired,
+or whether a mechanism with a fixed point at the target (a hinge, or a dual/Lagrangian
+controller) is required. That question is decided by the following test, **fixed here
+before the amended calibration runs**, so that it cannot be chosen after seeing the
+numbers.
+
+Per family, **no controller is required only if all three hold**:
+
+1. the four primary-grid dense medians are **non-increasing** in `mu_j` (equality
+   allowed);
+2. section 5's selection rule plus its single deterministic refinement returns an
+   in-band candidate;
+3. that retained candidate's 200-update OU-regime achieved-margin audit is also in
+   `[0.90, 1.00]`.
+
+A flat curve already inside the band passes. A flat curve outside it fails criterion
+2. No post-hoc widening of the grid, the band, or the tolerance is permitted. Any
+family failing any criterion enters the "controller required" state, whose resolution
+is itself a further dated amendment — never a choice made inside the procedure.
+
+### 10.5 Status of the runs already executed
+
+The 24 selection and calibration runs executed under the pre-amendment constants keep
+their category — **pre-registered selection & calibration runs** — and are published
+with their trace, marked as executed under the superseded constants of section 5, as
+that section already prescribes for superseded intermediate calibrations. They are
+not retroactively reclassified as exploratory, and their "band not reached" verdicts
+are not silently deleted: they are the measurement that produced this amendment.
+
+---
+
+## 11. Amendment 2 — withdrawal of P1(b) (dated 2026-07-31)
+
+This amendment **withdraws prediction P1(b)** — "at fixed constraint, the explicit
+spectral parametrization beats the generic families" — from the flagship's claim set.
+P1(a), P2, P3, P4 and P5 stand unchanged. Nothing already measured is deleted; the
+runs, the verdicts and the reasoning that led here stay published.
+
+It is written and committed **before** the study that replaces it runs (section 11.6),
+as sections 5 and 10.4 require of any resolution of a terminal calibration state.
+
+### 11.1 Withdrawn, not falsified — and why the distinction is the whole point
+
+P1(b) compares architectures **at a fixed constraint level**. That clause is
+load-bearing: without a constraint level held common across families, "the spectral
+parametrization wins" has no defined comparison. The band `[0.90, 1.00]` on the
+calibrated margin was the operationalization of "fixed" (section 5, honesty
+declaration (c)).
+
+Three of four families never reached that band. There is therefore **no level at which
+the comparison was ever made** — no measurement exists that could confirm P1(b) or
+refute it. The prediction is **unidentified by the design as executed**.
+
+Declaring P1(b) false would be a stronger claim than the data supports, and a
+dishonest one: we did not observe generic families matching or beating the structured
+one at a common constraint. We observed that a common constraint was never achieved.
+Withdrawal is the accurate verdict.
+
+### 11.2 What was actually tested
+
+1. **Pre-registered calibration, 24 runs** (section 5, original constants): "band not
+   reached" for 3 of 4 families; medians nearly insensitive to μ_J across four decades.
+2. **Diagnosis by offline probes** on the retained checkpoints (section 10.1): the
+   calibration trained **10 optimizer updates** per candidate (the trainer takes one
+   `optimizer.step()` per epoch); `step_subsample = 0.25` discarded three quarters of
+   the steps; and `sigma_max` was read **in undeclared coordinates** — the same dense
+   Jacobians give 1.0439 raw and 22.94 whitened for `min_ssm`, a factor-23 swing in the
+   verdict under an equally defensible coordinate choice.
+3. **Amendment 1** (section 10): 200 optimizer updates, `step_subsample = 1.0`, and a
+   declared metric `sigma_max(S_out^-1 J^{q,excl} S_in)` with `S` frozen on the
+   phase-OFF, seed-0, OU arm.
+4. **Repaired sweep**, the only campaign valid for this decision:
+
+   | family | μ_J=1e-3 | 1e-2 | 1e-1 | 1 | 10 | verdict |
+   |---|---|---|---|---|---|---|
+   | `mlp` | 1.0301 | **0.9995** | 0.9049 | 0.8755 | — | selected (μ_J = 0.01) |
+   | `transformer` | 7.2022 | 6.3212 | 5.9156 | 5.8217 | 5.8315 | band not reached |
+   | `min_ssm` | 1.3299 | 1.1551 | 1.0767 | 1.0644 | 1.0639 | band not reached |
+   | `koopman_ssm` | 1.0326 | 1.0340 | 1.0348 | 1.0348 | 1.0347 | band not reached |
+
+   **One family, at one seed, reached the band.** The μ_J axis is alive — three
+   families produce a genuine decreasing response where 10 updates gave medians
+   identical to six digits — but aliveness of the axis is not reachability of a common
+   target.
+
+**Declared defect of this campaign.** The repaired sweep ran under an amendment
+(section 10) that was written but **not yet committed** at run time. It is therefore
+**not pre-registered evidence**. It is reclassified here as a **post-hoc repair study**
+and published as such. Committing section 10 now does not cure this retroactively, and
+this amendment does not pretend otherwise.
+
+### 11.3 Why we think it did not work
+
+Ordered by strength of evidence, with the evidential status stated.
+
+1. **The band asked four non-comparable measurements to agree on one number**
+   (ESTABLISHED). Each family's metric is normalized by scales estimated on **its own**
+   OFF representation. Section 5's honesty declaration (c) called this "the same
+   measured contraction target"; that was an **operational convention, never
+   established physical comparability**. A common numeric target across four
+   heterogeneous state spaces was not a well-posed goal to begin with.
+2. **Estimator/measurement gap, able to invert the response** (CONSISTENT, NOT PROVEN).
+   Training minimizes a normalized Frobenius-squared estimate; acceptance reads the top
+   singular value. Reducing the Frobenius norm can **redistribute** the spectrum
+   upward in `sigma_1` — derived counterexample: singular values (1,1) → (1.1, 0)
+   reduce `||.||_F^2` from 2 to 1.21 while raising `sigma_1` from 1 to 1.1. Consistent
+   with `koopman_ssm`: its logged training penalty decreases (7.8923 → 7.8842) while
+   its audited `sigma_1` rises. Not proof — the training statistic is a batch mean and
+   the audited one a validation median, so the distributions are not matched.
+   Section 5's honesty declaration (a) already conceded this gap; what was never
+   declared is that the gap can **reverse the sign of the response**.
+3. **For the transformer, the band constrains a different object** (STRUCTURAL). The
+   full augmented Jacobian has `sigma_max >= 1` by construction — the KV cache's
+   identity carry-forward rows. Section 5 excludes those rows, so the transformer's
+   measured quantity is a **new-write sensitivity**, not contraction of the complete
+   augmented state. Putting the same numeric band on it is not the same constraint.
+4. **For `koopman_ssm`, ON is a bundled intervention** (STRUCTURAL). Only this family
+   changes two things at once between OFF and ON: `mu_j > 0` **and** the parametrization
+   (`alpha` free → `alpha = -exp(nu)`). Any ON/OFF contrast for this family is a
+   package effect. Deliberate confounding is still confounding.
+
+**Explicitly refuted, so it is not re-dug:** the hypothesis that freezing `S` on the
+OFF arm breaks the declared invariance, or mechanically drives the margin upward. The
+algebra is closed — under `q' = D q` the normalized Jacobian is conjugated by sign
+matrices, so singular values are preserved — and a fixed `S` carries **no monotone
+sign**, hence cannot force a direction. What survives of that objection is item 1
+above: comparability, not invariance.
+
+### 11.4 What would make P1(b) pass, and why none of it is done here
+
+- **(i) A dual/Lagrangian controller on the audited quantity.** The only candidate that
+  could genuinely work. It must control the **median of `sigma_max`** — what acceptance
+  reads — not the mean Frobenius norm the current penalty minimizes; a naive two-sided
+  hinge is already refuted (for stochastic `X`,
+  `grad E[(L-X)+ + (X-U)+] = E[(-1{X<L} + 1{X>U}) grad X]`: both tails fire even when
+  the true value is in band, because a zero gradient **per sample** is not a zero
+  gradient **in expectation**). It therefore needs differentiable top-singular
+  estimation, a median surrogate, multiplier schedules and feasibility handling.
+  **Not done:** this is a mechanism change, with its own calibration, its own
+  pre-registration and its own failure modes. It cannot be built, calibrated and
+  validated inside the D1 window, and building it under deadline is precisely how one
+  ships a result whose flaw is visible on the first page.
+- **(ii) A per-family band.** Reaching a per-family target abandons the cross-family
+  common level — which is the one thing P1(b) requires. **Not done:** it does not
+  rescue the prediction, it removes its subject.
+- **(iii) Widening the band until all four families fit.** **Not done — prohibited.**
+  Section 10.4 forbids post-hoc widening of the grid, the band or the tolerance, and
+  it is dishonest by construction.
+- **(iv) A metric comparable across families by construction.** The candidate examined
+  was a true-state pullback through the per-run linear readout already used by the P1a
+  endpoint. **Rejected on the merits, not on cost:** the readout is non-injective, it
+  ignores its own kernel, it ignores `m` entirely and the `h`↔`m` couplings; a
+  "physical block plus memory term" that repaired those omissions would reconstruct the
+  full augmented Jacobian anyway. The repo's own counter-example
+  (`tests/audit/test_doctrine.py`) applies directly.
+
+The deeper reason for stopping: every further run spent chasing the band is spent on
+the **instrument** rather than on the **phenomenon**. The replacement study measures
+the phenomenon.
+
+### 11.5 What survives, and what is reclassified
+
+**Survives.**
+- **P1(a)** as a within-family treatment contrast, with the declaration that for
+  `koopman_ssm` it measures an ON *package* (penalty + parametrization), not the
+  penalty alone.
+- **P2, P3, P4, P5** — untouched by this amendment.
+- **The OFF grid**: 4 families × 2 regimes × 5 seeds at the amended 200-update budget,
+  a complete and valid measurement of the unconstrained baseline. One cell diverged
+  (`action_conditioned` / `min_ssm` / seed 4, non-finite training loss at update 46);
+  it is reported as a divergence, never silently dropped or re-seeded — see 11.7.
+
+**Reclassified.**
+- The repaired μ_J sweep → **post-hoc repair study** (11.2), published with its trace.
+- The four core ON runs already on disk (`mlp` μ_J = 0.01 and `koopman_ssm`
+  μ_J = 0.1, seed 0, both regimes) → **protocol-violation traces, never core
+  evidence**. Two independent reasons: they were trained against the **raw** penalty
+  because the factorial runner never supplied the frozen gauge, and `koopman_ssm`'s
+  μ_J = 0.1 was written into the manifest from a **terminal "band not reached"**
+  verdict by a patcher that ignored the verdict. Both defects are fixed in the same
+  commit as this amendment. The runs are kept and marked, not deleted.
+
+### 11.6 What replaces P1(b) — a dose-response study (declared, not yet run)
+
+A **secondary** study, committed before it runs, and explicitly **not** a rescue of
+P1(b):
+
+- fresh seeds (5-9), disjoint from the calibration seeds;
+- `mu_j = 0` plus the full declared dose grid, identical LR sweep and update budget per
+  arm;
+- jointly reported outcomes per cell: achieved margin, true-state FR drift, validation
+  loss — the margin is a **measured covariate**, never a controlled quantity;
+- a `koopman_ssm` structural-only arm (`constrained: true`, `mu_j = 0`) so the
+  parametrization can be separated from the penalty;
+- the transformer's excluded-identity quantity reported under its accurate name,
+  **new-write sensitivity**, never as contraction of the complete augmented state;
+- **no cross-family superiority claim outside overlapping achieved-margin support**,
+  and no interpolation between dose points. Five doses describe a response shape; they
+  do not license a frontier comparison. The words "Pareto frontier" are not used.
+
+### 11.7 Divergence policy for core cells (new)
+
+Section 5 had no policy for a core cell whose training diverges. Declared here, before
+the figures are read: a cell whose loss becomes non-finite **aborts without success
+artifacts** (already the trainer's behaviour) and is reported as a **divergence** — a
+result about that (family, regime, seed, LR), on the same footing as a "readout
+indeterminate" verdict. It is never re-seeded, never re-run at a different LR to make
+it complete, and never silently excluded from a figure: strict-mode rendering names it.
+Because it is deterministic under the run's seed, re-running reproduces it.
