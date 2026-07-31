@@ -1,0 +1,56 @@
+# Staged execution of the PRE-REGISTERED core grid -- OFF cells only.
+#
+# This is NOT a new run category (PROTOCOL.md section 9 taxonomy): every cell
+# here is a `pendulum_core` cell, byte-identical to its counterpart in
+# `pendulum_core.yaml`. `expand()` resolves a cell's identity from
+# `base + {exp_name, seed, family} + overrides` alone (factorial.py:256), so
+# `exp_name`, `base`, `datasets` and `seeds` are copied VERBATIM below and the
+# resulting run_dirs are the same ones the full 80-run grid will claim. When the
+# ON cells become runnable, `pendulum_core.yaml` resumes these 40 by sentinel
+# instead of retraining them.
+#
+# Why a separate file: `expand()` raises on ANY null override before building
+# anything (factorial.py:249), so the two un-calibrated ON arms (transformer,
+# min_ssm) currently block the whole grid, OFF cells included. Dropping the four
+# ON arms here is the only change.
+#
+# 2 datasets x 4 arms (4 families, constraint=off) x 5 seeds = 40 runs.
+exp_name: pendulum_core
+datasets:
+  ou:
+    system: {name: DampedPendulum, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 64
+    T: 100
+    dt: 0.02
+    seed: 0
+  action_conditioned:
+    system: {name: DampedPendulum, params: {}}
+    regime: {name: ActionConditionedRegime, params: {K_gain: [[0.8, 0.4]], sigma: 0.3}}
+    obs: null
+    n_episodes: 64
+    T: 100
+    dt: 0.02
+    seed: 0
+base:
+  d_x: 2
+  d_z: 4
+  d_u: 1
+  target_params: 10000
+  epochs: 200
+  step_subsample: 1.0
+arms:
+  - family: mlp
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: 1.0e-4}
+  - family: transformer
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: 1.0e-4}
+  - family: min_ssm
+    constraint: "off"
+    overrides: {mu_j: 0.0, lr: 3.0e-4}
+  - family: koopman_ssm
+    constraint: "off"
+    overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: 3.0e-4}
+seeds: [0, 1, 2, 3, 4]

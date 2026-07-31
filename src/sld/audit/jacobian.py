@@ -33,6 +33,19 @@ import torch
 from torch import Tensor
 
 from sld.audit._common import as_float64_array, require_cpu_float64_tensor
+from sld.audit.spectral import operator_norm
+
+# Wave 5 round 6 amendment (PROTOCOL.md section 10.3): the declared-metric
+# gauge transform is owned by objectives.jac_reg, not reimplemented here --
+# TotalJacobianPenalty applies the IDENTICAL S_out^-1 . (.) . S_in transform
+# elementwise to JVP probes at training time; this module applies it to the
+# dense excluded Jacobian for the offline audit. The dependency runs THIS
+# WAY (audit -> objectives) and not the reverse: REGLES.md section 2 places
+# objectives/ in the "modele appris (encoder, predictor, loss)" layer and
+# audit/ in the downstream "mesure un modele appris sans le modifier" layer
+# -- the same directionality REGLES section 10 already uses for
+# calibration/ depending on audit/ and training/, never the inverse.
+from sld.objectives.jac_reg import Gauge, normalize_jacobian
 
 # A row of d(m_next)/d(m) counts as an identity passthrough when it is a
 # canonical basis vector to this absolute tolerance. A genuine verbatim copy
@@ -151,6 +164,15 @@ class ExcludedAugmentedJacobian(NamedTuple):
         n_identity_rows: number of excluded rows. Equals ``m.numel()``
             whenever the exclusion applied, ``0`` when it did not.
         d_in: ``h.numel() + m.numel()``, the augmented input dimension.
+        excluded_row_indices: absolute row indices (into the FULL,
+            un-excluded ``vec(h_next) ++ vec(m_next)`` output, before
+            deletion) that were removed to produce ``jacobian``. Exposed
+            (Wave 5 round 6 amendment, PROTOCOL section 10.3) so a caller
+            applying the declared gauge normalization can align its own
+            full-length ``S_out`` reference-scale vector to ``jacobian``'s
+            actual (post-deletion) rows via ``np.delete(s_out_full,
+            excluded_row_indices)`` -- never by recomputing the identity-row
+            detection a second time.
     """
 
     jacobian: np.ndarray
@@ -158,6 +180,7 @@ class ExcludedAugmentedJacobian(NamedTuple):
     frobenius_sq: float
     n_identity_rows: int
     d_in: int
+    excluded_row_indices: np.ndarray
 
 
 def augmented_jacobian_excluding_identity(
@@ -432,7 +455,78 @@ def augmented_jacobian_excluding_identity(
         frobenius_sq=frobenius_sq,
         n_identity_rows=int(excluded_rows.size),
         d_in=d_in,
+        excluded_row_indices=excluded_rows,
     )
+
+
+def augmented_sigma_max_normalized(
+    step_fn: Callable[[Tensor, Tensor | None, Tensor], tuple[Tensor, Tensor | None]],
+    h: Tensor,
+    m: Tensor | None,
+    u: Tensor,
+    gauge: Gauge,
+    *,
+    identity_atol: float = _IDENTITY_ROW_ATOL,
+) -> float:
+    """PROTOCOL.md section 10.3's declared metric:
+    ``sigma_max(S_out^-1 . J_t^{q,excl} . S_in)``.
+
+    The SAME excluded object ``augmented_jacobian_excluding_identity``
+    computes raw, now normalized by the frozen reference scale ``gauge``
+    via ``objectives.jac_reg.normalize_jacobian`` -- the single shared
+    definition of the gauge transform (its module docstring proves this is
+    the SAME normalized operator ``TotalJacobianPenalty`` targets at
+    training time via elementwise JVP scaling, never a dense Jacobian
+    there).
+
+    Why identity-row DETECTION still runs on the RAW Jacobian, never a
+    normalized one: ``h`` and ``m`` can differ in reference scale by many
+    orders of magnitude -- min_ssm's ``cond(Sigma) ~= 1.5e7`` is the whole
+    motivation for this amendment -- so normalizing FIRST would rescale
+    the ``~1e-12`` float64 rounding noise ``_IDENTITY_ROW_ATOL`` is tuned
+    against by that same huge factor, risking a false "not a copy"
+    classification on a genuine verbatim-copy row. Reusing the RAW
+    exclusion here is still exactly correct for the NORMALIZED object
+    because of ``Gauge.s_m_positions``'s declared property: a persisting
+    cache coordinate's ``S_out`` equals its ``S_in`` EXACTLY (the same
+    frozen per-position slice, reused), so the normalized Jacobian's copy
+    rows are STILL an exact identity block onto the same input columns --
+    the row set excluded on the raw matrix is exactly the row set that
+    would be excluded on the normalized one.
+
+    Args:
+        step_fn, h, m, u, identity_atol: as
+            ``augmented_jacobian_excluding_identity``.
+        gauge: the frozen reference scale (``experiments.selection``
+            estimates it -- PROTOCOL section 10.3's "Reference scales").
+
+    Returns:
+        ``sigma_max`` of the gauge-normalized excluded Jacobian.
+
+    Raises:
+        MetricIndeterminate (``objectives.jac_reg``): any coordinate
+            ``gauge`` needs is zero, non-finite, or (growing memory)
+            beyond the frozen reference rollout's coverage -- the caller
+            reports "metric indeterminate" verbatim, no epsilon
+            substituted (PROTOCOL section 10.3).
+        ValueError: same conditions as
+            ``augmented_jacobian_excluding_identity``.
+    """
+    with torch.no_grad():
+        _, m_next = step_fn(h, m, u)
+    result = augmented_jacobian_excluding_identity(step_fn, h, m, u, identity_atol=identity_atol)
+
+    s_in_h = as_float64_array(gauge.h_scale()).reshape(-1)
+    s_in_m = as_float64_array(gauge.m_scale(m)).reshape(-1) if m is not None else np.empty(0)
+    s_in = np.concatenate([s_in_h, s_in_m])
+
+    s_out_h = as_float64_array(gauge.h_scale()).reshape(-1)
+    s_out_m = as_float64_array(gauge.m_scale(m_next)).reshape(-1) if m_next is not None else np.empty(0)
+    s_out_full = np.concatenate([s_out_h, s_out_m])
+    s_out = np.delete(s_out_full, result.excluded_row_indices)
+
+    M = normalize_jacobian(result.jacobian, s_in, s_out)
+    return operator_norm(M)
 
 
 def jacobian_products(jacobians: Iterable[np.ndarray | Tensor]) -> tuple[np.ndarray, np.ndarray]:

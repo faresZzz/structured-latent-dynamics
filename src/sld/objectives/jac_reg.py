@@ -36,13 +36,278 @@ including the Wave 5 declaration that, for growing-memory families, the
 penalized object EXCLUDES the identity embedding of ``m`` into ``m_next``
 (the same excluded object the calibration measures through
 ``audit.jacobian.augmented_jacobian_excluding_identity``).
+
+Amendment 1 (PROTOCOL.md section 10.3): the declared metric is
+``sigma_max(S_out^-1 . J_t^{q,excl} . S_in)``, never the raw-coordinate
+Jacobian -- the same dense Jacobians read raw vs. whitened moved the
+measured margin by up to a factor of 23 (mlp 1.0309/1.0879, min_ssm
+1.0439/22.94, koopman_ssm 0.9952/5.047), which is not a measurement.
+``Gauge``, ``normalize_jacobian`` and ``MetricIndeterminate`` below are the
+SINGLE, shared definition of that transform: ``TotalJacobianPenalty``
+applies it elementwise to JVP probes (never forming a dense Jacobian, per
+the estimator's own cost doctrine); ``audit.jacobian`` applies the
+IDENTICAL transform to the dense Jacobian it forms for the offline audit
+(``normalize_jacobian``, imported from here rather than reimplemented --
+see that module for why the dependency runs audit -> objectives and not
+the reverse). Both call sites are exercised by
+``tests/objectives/test_jac_reg.py``'s training/audit consistency lock.
+
+A ``Gauge`` is a bundle of tensors, so it can never be a config value; it
+reaches ``Trainer`` out-of-band and enters the RUN IDENTITY through
+``gauge_digest`` below. See that function for why identity separation is
+mandatory here.
 """
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
 from typing import Callable, Sequence
 
+import numpy as np
 import torch
+
+
+class MetricIndeterminate(ValueError):
+    """PROTOCOL.md section 10.3, "Indeterminacy, not repair": a reference
+    scale coordinate is zero, non-finite, or lies outside the frozen
+    reference rollout's coverage (a growing-memory position never visited
+    while ``S`` was estimated). Raised, never silently floored or
+    extrapolated -- REGLES.md section 5's "loi du fini partout" applies to
+    the GUARD itself: a non-finite scale must not silently disable the
+    check by comparing false. Callers that aggregate many steps into one
+    verdict (e.g. a calibration median) catch this and report "metric
+    indeterminate" verbatim, the same discipline this repo already applies
+    to the fig1 readout's "indeterminate" classification -- never an
+    epsilon substituted, never a scale extrapolated.
+    """
+
+
+def _validated_scale(scale: torch.Tensor, name: str) -> torch.Tensor:
+    """Raise ``MetricIndeterminate`` unless every entry of ``scale`` is
+    finite and strictly positive; otherwise return it unchanged."""
+    if not torch.isfinite(scale).all():
+        raise MetricIndeterminate(
+            f"{name} reference scale contains a non-finite coordinate -- "
+            "metric indeterminate (PROTOCOL.md section 10.3)"
+        )
+    if not (scale > 0).all():
+        raise MetricIndeterminate(
+            f"{name} reference scale contains a zero or negative coordinate -- "
+            "metric indeterminate (PROTOCOL.md section 10.3); no epsilon floor "
+            "is substituted"
+        )
+    return scale
+
+
+@dataclass(frozen=True)
+class Gauge:
+    """Frozen per-coordinate reference scale ``S`` for the declared metric
+    (PROTOCOL.md section 10.3): ``sigma_max(S_out^-1 . J_t^{q,excl} . S_in)``.
+
+    Estimation (the family-aware part: which reference rollout, which
+    trained checkpoint, how ``m``'s axes map to cache positions) lives in
+    ``experiments.selection`` -- this class only STORES and APPLIES the
+    frozen result, generically, without ever inspecting which family it
+    came from (mirrors the audit's own "no special path per predictor"
+    doctrine, REGLES.md section 2).
+
+    Every tensor stored here is broadcastable against the leaf it scales:
+    the coordinate axes match that leaf's own shape, every other axis --
+    including the batch axis, whichever position it occupies for a given
+    family -- is size 1, so ordinary tensor broadcasting applies the SAME
+    per-coordinate scale to every batch row without this class (or its
+    callers in ``objectives``/``audit``) ever having to know which axis is
+    the batch axis.
+
+    Attributes:
+        s_h: reference scale for ``h``. ``h`` never grows, so one frozen
+            vector serves as both ``S_in`` and ``S_out`` for it at every
+            step.
+        s_m: reference scale for a FIXED-SIZE recurrent ``m`` (e.g.
+            ``min_ssm``'s ``(B, d_state)``) -- same non-growing
+            convention as ``s_h``. ``None`` for families with no ``m``
+            (``mlp``, ``koopman_ssm``) or a GROWING one (``transformer``,
+            which uses ``s_m_positions`` instead); mutually exclusive
+            with it (``__post_init__``).
+        s_m_positions: reference scale for a GROWING ``m`` (PROTOCOL
+            section 10.3's "Growing memory"): one frozen block per
+            absolute cache position, concatenated along
+            ``position_axis`` up to the reference rollout's coverage. A
+            coordinate's scale is fixed at the step that CREATES it and
+            reused unchanged afterward, so slicing this tensor to the
+            first ``t`` positions gives ``S_in`` for an ``m`` of length
+            ``t``, and slicing to ``t + 1`` positions gives ``S_out`` for
+            the corresponding ``m_next`` -- the two slices agree EXACTLY
+            on every position they share. That equality is what keeps the
+            identity-passthrough exclusion's ``||v_m||^2`` subtraction
+            valid under this gauge (see
+            ``TotalJacobianPenalty.on_state_steps``): the copied block's
+            input and output scale cancel exactly, so the normalized
+            copy-row output is bit-identical to the standardized input
+            probe, precisely as the RAW (unnormalized) estimator already
+            relied on.
+        position_axis: which axis of ``m`` indexes cache position, for
+            slicing ``s_m_positions``. Set once by the (family-aware)
+            estimation code; read generically here and by every consumer.
+    """
+
+    s_h: torch.Tensor
+    s_m: torch.Tensor | None = None
+    s_m_positions: torch.Tensor | None = None
+    position_axis: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.s_m_positions is None) != (self.position_axis is None):
+            raise ValueError(
+                "s_m_positions and position_axis must be set together (both or "
+                f"neither); got s_m_positions "
+                f"{'set' if self.s_m_positions is not None else 'unset'}, "
+                f"position_axis={self.position_axis!r}"
+            )
+        if self.s_m is not None and self.s_m_positions is not None:
+            raise ValueError(
+                "a Gauge is either FIXED-SIZE (s_m) or GROWING (s_m_positions), "
+                "never both"
+            )
+
+    def h_scale(self) -> torch.Tensor:
+        """Reference scale for ``h``, broadcastable against any ``h``
+        tensor. Raises ``MetricIndeterminate`` per ``_validated_scale``."""
+        return _validated_scale(self.s_h, "h")
+
+    def m_scale(self, m: torch.Tensor) -> torch.Tensor:
+        """Reference scale broadcastable against ``m`` (or ``m_next``) at
+        its CURRENT shape -- covers both the fixed-size and the growing
+        case transparently; the caller never needs to know which one it
+        has.
+
+        Raises:
+            ValueError: this gauge has no ``m`` scale at all, or (fixed-
+                size case) ``m``'s shape is incompatible with the frozen
+                scale's -- a construction bug, not a data-dependent
+                indeterminacy.
+            MetricIndeterminate: (growing case) ``m``'s current length
+                along ``position_axis`` exceeds the frozen reference
+                rollout's coverage, or any covered coordinate is zero or
+                non-finite.
+        """
+        if self.s_m is not None:
+            try:
+                scale = self.s_m.expand(m.shape)
+            except RuntimeError as e:
+                raise ValueError(
+                    f"gauge m scale shape {tuple(self.s_m.shape)} is incompatible "
+                    f"with m's shape {tuple(m.shape)}: {e}"
+                ) from e
+            return _validated_scale(scale, "m")
+        if self.s_m_positions is None:
+            raise ValueError("this gauge has no m scale, but m is present")
+        axis = self.position_axis
+        pos_len = m.shape[axis]
+        available = self.s_m_positions.shape[axis]
+        if pos_len > available:
+            raise MetricIndeterminate(
+                f"m spans {pos_len} cache positions along axis {axis}, beyond the "
+                f"frozen reference rollout's coverage of {available} positions -- "
+                "PROTOCOL.md section 10.3: a position beyond the reference "
+                'rollout yields the verdict "metric indeterminate", verbatim; no '
+                "extrapolation"
+            )
+        idx = [slice(None)] * self.s_m_positions.dim()
+        idx[axis] = slice(0, pos_len)
+        return _validated_scale(self.s_m_positions[tuple(idx)], "m")
+
+
+def gauge_digest(gauge: Gauge) -> str:
+    """Deterministic SHA1 hex digest of a frozen ``Gauge``'s CONTENT.
+
+    Why this exists (run identity, REGLES section 6). A run is
+    ``sha1(canonical config YAML) + dataset spec``, and a ``Gauge`` is a
+    bundle of tensors: it cannot be a config value, and it must not be one
+    either -- a reference scale is not a knob a config declares, it is
+    measured from a checkpoint. But two runs trained under DIFFERENT frozen
+    gauges optimize DIFFERENT objectives, so they are different runs and
+    must never share a results directory. The resolution: the gauge travels
+    OUT-OF-BAND (``Trainer(config, gauge=...)``), and this digest -- a plain
+    string -- is what enters the hashed config, under the derived key
+    ``gauge_digest``. Identity separation without pretending a tensor bundle
+    is YAML.
+
+    Bit-stability across processes is a hard requirement (this repo
+    guarantees bit-identical reruns), so nothing here may depend on object
+    identity, iteration order, memory layout, or the ambient default dtype:
+    the three tensor fields are visited in a FIXED order, each converted to
+    a C-contiguous, explicitly little-endian float64 buffer (``<f8``), and
+    hashed together with its field name and shape. Shape is included
+    separately because ``tobytes()`` alone cannot distinguish a ``(1, 6)``
+    scale from a ``(2, 3)`` one.
+
+    Absent fields hash as a distinct marker rather than being skipped, so a
+    fixed-size gauge and a growing one can never collide by omission. The
+    FULL 40-hex digest is returned, never a prefix: a truncated digest is a
+    collision surface on exactly the property this function exists to
+    protect (two distinct gauges sharing one run identity).
+    """
+    h = hashlib.sha1()
+    for name in ("s_h", "s_m", "s_m_positions"):
+        tensor = getattr(gauge, name)
+        h.update(f"|{name}=".encode("utf-8"))
+        if tensor is None:
+            h.update(b"none")
+            continue
+        array = np.ascontiguousarray(tensor.detach().cpu().numpy()).astype("<f8", copy=False)
+        h.update(f"{tuple(array.shape)}:".encode("utf-8"))
+        h.update(array.tobytes())
+    h.update(f"|position_axis={gauge.position_axis}".encode("utf-8"))
+    return h.hexdigest()
+
+
+def normalize_jacobian(J: np.ndarray, s_in: np.ndarray, s_out: np.ndarray) -> np.ndarray:
+    """``S_out^-1 . J . S_in`` (PROTOCOL.md section 10.3's declared gauge
+    transform), applied to a DENSE Jacobian.
+
+    Pure column/row scaling -- the audit's dense counterpart of the
+    elementwise JVP scaling ``TotalJacobianPenalty`` applies at training
+    time (module docstring). Kept dtype/device-agnostic on purpose (plain
+    numpy elementwise ops): the audit calls this in CPU float64, and
+    nothing here assumes that -- the float64/CPU DISCIPLINE belongs to
+    ``audit`` (REGLES.md section 5), not to this shared piece of algebra.
+
+    Args:
+        J: ``(d_out, d_in)`` dense Jacobian.
+        s_in: ``(d_in,)`` reference scale, ``S_in``'s diagonal.
+        s_out: ``(d_out,)`` reference scale, ``S_out``'s diagonal.
+
+    Returns:
+        ``(d_out, d_in)`` array, ``S_out^-1 J S_in``.
+
+    Raises:
+        ValueError: shape mismatch, or ``s_in``/``s_out`` not finite and
+            strictly positive -- a defensive second check; the primary
+            indeterminacy path is ``Gauge`` raising ``MetricIndeterminate``
+            before a caller ever reaches this function.
+    """
+    J = np.asarray(J)
+    s_in = np.asarray(s_in)
+    s_out = np.asarray(s_out)
+    if J.ndim != 2:
+        raise ValueError(f"J must be 2-D, got shape {J.shape}")
+    if s_in.shape != (J.shape[1],):
+        raise ValueError(f"s_in must have shape ({J.shape[1]},), got {s_in.shape}")
+    if s_out.shape != (J.shape[0],):
+        raise ValueError(f"s_out must have shape ({J.shape[0]},), got {s_out.shape}")
+    if not (np.isfinite(s_in).all() and np.isfinite(s_out).all()):
+        raise ValueError(
+            "s_in/s_out must be finite -- MetricIndeterminate should have been "
+            "raised upstream by Gauge"
+        )
+    if not (np.all(s_in > 0) and np.all(s_out > 0)):
+        raise ValueError(
+            "s_in/s_out must be strictly positive -- MetricIndeterminate should "
+            "have been raised upstream by Gauge"
+        )
+    return (J * s_in[None, :]) / s_out[:, None]
 
 
 class TotalJacobianPenalty:
@@ -55,6 +320,18 @@ class TotalJacobianPenalty:
         generator: explicit torch.Generator for probe/subsampling draws —
             fresh probes every call (a fixed probe set would bias training
             toward shrinking J only along those directions).
+        gauge: the declared reference scale (PROTOCOL.md section 10.3),
+            or ``None`` for the RAW (un-normalized, pre-amendment)
+            estimator — the default, so existing callers/configs that
+            never pass a gauge reproduce the exact prior behavior
+            bit-for-bit. When set, every probe is applied as a PHYSICAL
+            tangent ``S_in . v`` instead of the standardized ``v``, and
+            every JVP output is divided by ``S_out`` before its squared
+            norm is accumulated — see the module docstring for why this
+            estimates ``||S_out^-1 J S_in||_F^2`` unbiasedly with the
+            SAME ``d``/Horvitz-Thompson machinery as the raw estimator
+            (``v`` is still drawn uniform on the unit sphere; only the
+            operator being probed changes).
     """
 
     def __init__(
@@ -62,6 +339,7 @@ class TotalJacobianPenalty:
         k_probes: int = 2,
         step_subsample: float = 0.25,
         generator: torch.Generator | None = None,
+        gauge: Gauge | None = None,
     ) -> None:
         if k_probes < 1:
             raise ValueError("k_probes must be >= 1")
@@ -70,6 +348,7 @@ class TotalJacobianPenalty:
         self.k_probes = k_probes
         self.step_subsample = step_subsample
         self.generator = generator
+        self.gauge = gauge
 
     def _sphere(self, n: int, d: int, dtype: torch.dtype, device) -> torch.Tensor:
         # uniform on S^{d-1}: normalized isotropic Gaussian, one row per probe
@@ -132,13 +411,27 @@ class TotalJacobianPenalty:
         q_rep = q_sel.repeat(self.k_probes, 1)
         v = self._sphere(q_rep.shape[0], d, q_seq.dtype, q_seq.device)
 
+        # PROTOCOL.md section 10.3: v stays the STANDARDIZED probe (the
+        # d/Horvitz-Thompson machinery below is defined on it); the gauge,
+        # when set, only changes what tangent is physically applied and
+        # what the JVP output is divided by before its squared norm is
+        # accumulated -- estimating ||S_out^-1 J S_in||_F^2 instead of
+        # ||J||_F^2 with no other change (module docstring).
+        if self.gauge is None:
+            tangent, out_scale = v, None
+        else:
+            out_scale = self.gauge.h_scale().to(dtype=q_seq.dtype, device=q_seq.device)
+            tangent = v * out_scale  # q == h here (no m in the tensor path): S_in == S_out == out_scale
+
         if u_seq is None:
             fn = step_fn
         else:
             u_rep = u_seq[idx].detach().reshape(len(idx) * B, -1).repeat(self.k_probes, 1)
             fn = lambda q: step_fn(q, u_rep)  # noqa: E731  u frozen: the object is J^q
 
-        _, jv = torch.func.jvp(fn, (q_rep,), (v,))
+        _, jv = torch.func.jvp(fn, (q_rep,), (tangent,))
+        if out_scale is not None:
+            jv = jv / out_scale
         # Horvitz-Thompson normalization: sum over the k*S*B rows divided by
         # k*B*T*p == sum over kept steps of the (d/k) batch-mean estimate,
         # divided by the EXPECTED kept count T*p — unbiased over the
@@ -160,6 +453,16 @@ class TotalJacobianPenalty:
         ]
         norm = torch.cat([p.reshape(-1) for p in parts]).norm()
         return tuple(p / norm for p in parts)
+
+    def _leaf_scale(self, leaf: torch.Tensor, *, is_h: bool) -> torch.Tensor:
+        """``self.gauge``'s reference scale for one pytree leaf (``h`` when
+        ``is_h``, else ``m``/``m_next``), cast to ``leaf``'s dtype/device --
+        the gauge is estimated once in float64 (PROTOCOL.md section 10.3),
+        training runs in float32. Raises ``MetricIndeterminate`` (via
+        ``Gauge.h_scale``/``Gauge.m_scale``) exactly as the audit does for
+        the same coordinate."""
+        scale = self.gauge.h_scale() if is_h else self.gauge.m_scale(leaf)
+        return scale.to(dtype=leaf.dtype, device=leaf.device)
 
     @staticmethod
     def _exclude_identity_passthrough(
@@ -390,7 +693,26 @@ class TotalJacobianPenalty:
             probe_sq = torch.zeros((), dtype=h0.dtype, device=h0.device)
             for _ in range(self.k_probes):
                 v = self._sphere_pytree(leaves)
-                out, jv = torch.func.jvp(fn, leaves, v)
+                # PROTOCOL.md section 10.3: v stays STANDARDIZED -- it is
+                # what _exclude_identity_passthrough subtracts below, in
+                # gauge-normalized units (valid because the copied block's
+                # input and output reference scale are EXACTLY equal, see
+                # Gauge.s_m_positions). Only the tangent fed to the JVP
+                # (physical, S_in . v) and the JVP output (divided by
+                # S_out before its squared norm is taken) change.
+                if self.gauge is None:
+                    tangent = v
+                else:
+                    tangent = tuple(
+                        v[i] * self._leaf_scale(leaves[i], is_h=(i == 0))
+                        for i in range(len(leaves))
+                    )
+                out, jv = torch.func.jvp(fn, leaves, tangent)
+                if self.gauge is not None:
+                    jv = tuple(
+                        jv[i] / self._leaf_scale(out[i], is_h=(i == 0))
+                        for i in range(len(jv))
+                    )
                 jv_sq = sum(leaf.pow(2).sum() for leaf in jv)
                 probe_sq = probe_sq + self._exclude_identity_passthrough(
                     jv_sq, v, m_t, out, t

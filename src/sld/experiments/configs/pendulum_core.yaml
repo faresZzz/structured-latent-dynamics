@@ -40,29 +40,47 @@ base:
   d_z: 4
   d_u: 1
   target_params: 10000
+  # PROTOCOL.md section 10.2 (amendment 1, 2026-07-30): budgets are expressed
+  # in OPTIMIZER UPDATES, and the amended 200-update budget applies to the core
+  # grid and its achieved-margin audits exactly as it does to the sweeps -- the
+  # per-arm fairness law requires one shared budget. The Trainer takes one
+  # optimizer step per epoch, so `epochs` IS the update count here.
+  epochs: 200
+  # PROTOCOL.md section 10.2: step_subsample 0.25 -> 1.0. Inert on off-cells
+  # (mu_j == 0 skips the penalty branch entirely; the Trainer canonicalizes it
+  # back to the default before hashing there, so off-cell identities are
+  # unaffected).
+  step_subsample: 1.0
+# lr/mu_j filled from the step E selection report
+# (_private/research/mu-j-calibration/step_e_report.json, 2026-07-31), run under
+# the amended constants. `transformer` and `min_ssm` ON cells keep `mu_j: null`:
+# their calibration terminated in PROTOCOL section 5 step 6's "band not reached"
+# state, so they cannot enter the core grid until the further dated amendment
+# that section 10.4 prescribes. The runner refuses a null override -- that
+# refusal is the protocol working, not a bug to route around.
 arms:
   - family: mlp
     constraint: "off"
-    overrides: {mu_j: 0.0, lr: null}
+    overrides: {mu_j: 0.0, lr: 1.0e-4}
   - family: mlp
     constraint: "on"
-    overrides: {mu_j: null, lr: null}
+    overrides: {mu_j: 0.01, lr: 1.0e-4}
   - family: transformer
     constraint: "off"
-    overrides: {mu_j: 0.0, lr: null}
+    overrides: {mu_j: 0.0, lr: 1.0e-4}
   - family: transformer
     constraint: "on"
     overrides: {mu_j: null, lr: null}
   - family: min_ssm
     constraint: "off"
-    overrides: {mu_j: 0.0, lr: null}
+    overrides: {mu_j: 0.0, lr: 3.0e-4}
   - family: min_ssm
     constraint: "on"
     overrides: {mu_j: null, lr: null}
   - family: koopman_ssm
     constraint: "off"
-    overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: null}
+    overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: 3.0e-4}
   - family: koopman_ssm
     constraint: "on"
-    overrides: {mu_j: null, constrained: true, delta: 0.02, lr: null}
+    overrides: {mu_j: 0.1, constrained: true, delta: 0.02, lr: 3.0e-4}
 seeds: [0, 1, 2, 3, 4]

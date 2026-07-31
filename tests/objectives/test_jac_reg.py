@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -737,3 +738,222 @@ def test_on_state_steps_matches_the_dense_audit_on_the_real_transformer():
         f"(full={full_frobenius_sq:.6g}, excluded={dense.frobenius_sq:.6g})"
     )
     assert abs(floor - m.numel()) / m.numel() < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# PROTOCOL.md section 10.3 amendment: the declared, gauge-normalized metric
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_jacobian_basic_and_shape_errors():
+    from sld.objectives.jac_reg import normalize_jacobian
+
+    J = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]).numpy()
+    s_in = torch.tensor([1.0, 10.0, 100.0]).numpy()
+    s_out = torch.tensor([2.0, 5.0]).numpy()
+    M = normalize_jacobian(J, s_in, s_out)
+    expected = (J * s_in[None, :]) / s_out[:, None]
+    assert (M == expected).all()
+
+    with pytest.raises(ValueError, match="s_in must have shape"):
+        normalize_jacobian(J, s_in[:-1], s_out)
+    with pytest.raises(ValueError, match="s_out must have shape"):
+        normalize_jacobian(J, s_in, s_out[:-1])
+    with pytest.raises(ValueError, match="finite"):
+        normalize_jacobian(J, s_in, [float("nan"), 1.0])
+    with pytest.raises(ValueError, match="positive"):
+        normalize_jacobian(J, s_in, [0.0, 1.0])
+
+
+def test_gauge_indeterminate_on_zero_or_nonfinite_or_missing_scale():
+    from sld.objectives.jac_reg import Gauge, MetricIndeterminate
+
+    good = Gauge(s_h=torch.ones(1, 3, dtype=torch.float64))
+    assert torch.equal(good.h_scale(), torch.ones(1, 3, dtype=torch.float64))
+
+    zero = Gauge(s_h=torch.tensor([[1.0, 0.0, 1.0]], dtype=torch.float64))
+    with pytest.raises(MetricIndeterminate, match="zero"):
+        zero.h_scale()
+
+    nonfinite = Gauge(s_h=torch.tensor([[1.0, float("nan"), 1.0]], dtype=torch.float64))
+    with pytest.raises(MetricIndeterminate, match="non-finite"):
+        nonfinite.h_scale()
+
+    negative = Gauge(s_h=torch.tensor([[1.0, -2.0, 1.0]], dtype=torch.float64))
+    with pytest.raises(MetricIndeterminate):
+        negative.h_scale()
+
+    # m present but the gauge was built with no m scale at all: a
+    # construction bug, not a data-dependent indeterminacy -> ValueError
+    no_m = Gauge(s_h=torch.ones(1, 2, dtype=torch.float64))
+    with pytest.raises(ValueError, match="no m scale"):
+        no_m.m_scale(torch.zeros(1, 3, dtype=torch.float64))
+
+    # s_m and s_m_positions are mutually exclusive
+    with pytest.raises(ValueError, match="never both"):
+        Gauge(
+            s_h=torch.ones(1, 2, dtype=torch.float64),
+            s_m=torch.ones(1, 2, dtype=torch.float64),
+            s_m_positions=torch.ones(2, 1, 2, dtype=torch.float64),
+            position_axis=0,
+        )
+    # position_axis and s_m_positions must be set together
+    with pytest.raises(ValueError, match="together"):
+        Gauge(s_h=torch.ones(1, 2, dtype=torch.float64), s_m_positions=torch.ones(2, 1, 2, dtype=torch.float64))
+
+
+def test_gauge_growing_position_coverage():
+    from sld.objectives.jac_reg import Gauge, MetricIndeterminate
+
+    # position axis 0 (mirrors _append_family's m layout (L, B, d_m)),
+    # reference rollout covers 5 positions, 2 features each
+    s_positions = torch.arange(1, 11, dtype=torch.float64).reshape(5, 1, 2)
+    gauge = Gauge(s_h=torch.ones(1, 3, dtype=torch.float64), s_m_positions=s_positions, position_axis=0)
+
+    m3 = torch.zeros(3, 1, 2, dtype=torch.float64)
+    scale3 = gauge.m_scale(m3)
+    assert torch.equal(scale3, s_positions[:3])
+
+    m5 = torch.zeros(5, 1, 2, dtype=torch.float64)
+    assert torch.equal(gauge.m_scale(m5), s_positions)
+
+    m6 = torch.zeros(6, 1, 2, dtype=torch.float64)  # beyond the 5-position reference coverage
+    with pytest.raises(MetricIndeterminate, match="beyond"):
+        gauge.m_scale(m6)
+
+
+def test_call_gauge_matches_normalized_dense_frobenius_gold():
+    # cross-check on the TENSOR path (mlp-like, q == h, no m): the
+    # gauge-normalized stochastic estimator must target
+    # ||normalize_jacobian(A, s, s)||_F^2 exactly, not ||A||_F^2 -- the
+    # declared metric applied identically to what training penalizes.
+    torch.manual_seed(0)
+    d = 5
+    A = torch.randn(d, d, dtype=torch.float64)
+    # deliberately span several orders of magnitude, like h vs m's variance
+    # gap this amendment exists to fix
+    s = torch.tensor([1e-3, 1.0, 1e2, 3.0, 1e-1], dtype=torch.float64).reshape(1, d)
+    from sld.objectives.jac_reg import Gauge, normalize_jacobian
+
+    truth = float((normalize_jacobian(A.numpy(), s.numpy().reshape(-1), s.numpy().reshape(-1)) ** 2).sum())
+    raw = float((A * A).sum())
+    assert abs(truth - raw) / raw > 0.5  # the gauge must actually CHANGE the quantity
+
+    gauge = Gauge(s_h=s)
+    g = torch.Generator().manual_seed(1)
+    pen = TotalJacobianPenalty(k_probes=8, step_subsample=1.0, generator=g, gauge=gauge)
+    q_seq = torch.randn(4, 8, d, dtype=torch.float64)
+    draws = [pen(_linear_step(A), q_seq).item() for _ in range(200)]
+    mean_est = sum(draws) / len(draws)
+    rel_err = abs(mean_est - truth) / truth
+    print(f"[gauge gold, tensor path] mean={mean_est:.4f} truth={truth:.4f} rel_err={rel_err:.3%}")
+    assert rel_err < 0.05
+
+
+def test_on_state_steps_gauge_matches_dense_normalized_audit_fixed_size_state():
+    # THE training/audit consistency lock, pytree path (min_ssm-like: fixed-
+    # size m, nothing excluded). What TotalJacobianPenalty penalizes and
+    # what audit.jacobian.augmented_sigma_max_normalized measures must be
+    # built from the SAME normalize_jacobian call on the SAME dense J --
+    # the exact incoherence an adversarial review already found one layer
+    # down (the un-normalized object) must not reappear here.
+    from sld.audit.jacobian import augmented_jacobian_excluding_identity
+    from sld.objectives.jac_reg import Gauge, normalize_jacobian
+
+    torch.manual_seed(0)
+    d_h, d_m, d_u, B = 4, 3, 2, 1
+    A = torch.randn(d_h, d_h, dtype=torch.float64)
+    C = torch.randn(d_h, d_m, dtype=torch.float64)
+    Wm = torch.randn(d_m, d_m, dtype=torch.float64)
+    Wh = torch.randn(d_m, d_h, dtype=torch.float64)
+
+    def step_fn(h, m, u):
+        h_next = h @ A.T + m @ C.T
+        m_next = m @ Wm.T + h @ Wh.T  # FIXED size: no growth, nothing excluded
+        return h_next, m_next
+
+    h_t = torch.randn(B, d_h, dtype=torch.float64)
+    m_t = torch.randn(B, d_m, dtype=torch.float64)
+    u_t = torch.randn(B, d_u, dtype=torch.float64)
+
+    s_h = torch.tensor([1e-2, 1.0, 5.0, 1e2], dtype=torch.float64).reshape(1, d_h)
+    s_m = torch.tensor([1e3, 1e-3, 2.0], dtype=torch.float64).reshape(1, d_m)
+    gauge = Gauge(s_h=s_h, s_m=s_m)
+
+    dense = augmented_jacobian_excluding_identity(step_fn, h_t, m_t, u_t)
+    assert dense.n_identity_rows == 0  # fixed-size state: nothing excluded
+    s_in = torch.cat([s_h.reshape(-1), s_m.reshape(-1)]).numpy()
+    s_out = s_in  # h and m are both fixed-size/non-growing here: S_out == S_in
+    M = normalize_jacobian(dense.jacobian, s_in, s_out)
+    truth_frobenius_sq = float((M**2).sum())
+
+    g = torch.Generator().manual_seed(23)
+    pen = TotalJacobianPenalty(k_probes=8, step_subsample=1.0, generator=g, gauge=gauge)
+    draws = [pen.on_state_steps(step_fn, [(h_t, m_t, u_t)]).item() for _ in range(400)]
+    mean_est = sum(draws) / len(draws)
+    rel_err = abs(mean_est - truth_frobenius_sq) / truth_frobenius_sq
+    print(
+        f"[consistency lock, pytree/fixed-size] stochastic={mean_est:.4f} "
+        f"dense_normalized={truth_frobenius_sq:.4f} rel_err={rel_err:.3%}"
+    )
+    assert rel_err < 0.05
+
+    # and the audit's own entry point agrees with the same truth's sigma_max
+    from sld.audit.jacobian import augmented_sigma_max_normalized
+    from sld.audit.spectral import operator_norm
+
+    audited = augmented_sigma_max_normalized(step_fn, h_t, m_t, u_t, gauge)
+    assert abs(audited - operator_norm(M)) <= 1e-10 * max(1.0, operator_norm(M))
+
+
+def test_on_state_steps_gauge_growing_memory_matches_dense_normalized_audit():
+    # THE training/audit consistency lock, GROWING pytree path
+    # (transformer-like): the identity-passthrough exclusion must survive
+    # the gauge exactly, because a persisting coordinate's S_out equals its
+    # S_in (Gauge.s_m_positions's declared property) -- verified here
+    # end-to-end rather than merely asserted in a docstring.
+    from sld.audit.jacobian import augmented_jacobian_excluding_identity, augmented_sigma_max_normalized
+    from sld.audit.spectral import operator_norm
+    from sld.objectives.jac_reg import Gauge, normalize_jacobian
+
+    torch.manual_seed(0)
+    d_h, d_m, d_u, B, L = 3, 2, 2, 1, 2  # L=2 old positions already in the cache
+    A = torch.randn(d_h, d_h, dtype=torch.float64)
+    C = torch.randn(d_h, d_m, dtype=torch.float64)
+    W = torch.randn(d_m, d_h, dtype=torch.float64)
+    step_fn = _append_family(A, C, W)
+
+    h_t = torch.randn(B, d_h, dtype=torch.float64)
+    m_t = torch.randn(L, B, d_m, dtype=torch.float64)
+    u_t = torch.randn(B, d_u, dtype=torch.float64)
+
+    s_h = torch.tensor([1e-2, 1.0, 1e2], dtype=torch.float64).reshape(1, d_h)
+    # one frozen (position, feature) scale per absolute position, reference
+    # rollout covers up to 4 positions (>= L + 1 needed here)
+    s_positions = (10.0 ** torch.arange(-2, 2, dtype=torch.float64)).reshape(4, 1, 1) * torch.tensor(
+        [1.0, 3.0], dtype=torch.float64
+    ).reshape(1, 1, 2)
+    gauge = Gauge(s_h=s_h, s_m_positions=s_positions, position_axis=0)
+
+    dense = augmented_jacobian_excluding_identity(step_fn, h_t, m_t, u_t)
+    assert dense.n_identity_rows == m_t.numel()  # growing memory: old L positions excluded
+
+    s_in = torch.cat([s_h.reshape(-1), s_positions[:L].reshape(-1)]).numpy()
+    s_out_full = torch.cat([s_h.reshape(-1), s_positions[: L + 1].reshape(-1)]).numpy()
+    s_out = np.delete(s_out_full, dense.excluded_row_indices)
+    M = normalize_jacobian(dense.jacobian, s_in, s_out)
+    truth_frobenius_sq = float((M**2).sum())
+
+    g = torch.Generator().manual_seed(23)
+    pen = TotalJacobianPenalty(k_probes=8, step_subsample=1.0, generator=g, gauge=gauge)
+    draws = [pen.on_state_steps(step_fn, [(h_t, m_t, u_t)]).item() for _ in range(400)]
+    mean_est = sum(draws) / len(draws)
+    rel_err = abs(mean_est - truth_frobenius_sq) / truth_frobenius_sq
+    print(
+        f"[consistency lock, pytree/growing] stochastic={mean_est:.4f} "
+        f"dense_normalized={truth_frobenius_sq:.4f} rel_err={rel_err:.3%}"
+    )
+    assert rel_err < 0.05
+
+    audited = augmented_sigma_max_normalized(step_fn, h_t, m_t, u_t, gauge)
+    assert abs(audited - operator_norm(M)) <= 1e-8 * max(1.0, operator_norm(M))

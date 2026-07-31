@@ -6,8 +6,12 @@ Charte du repo flagship. Compagnon de `REGLES.md` (conventions) et de
 lui-même gouverné par `these_principale.md` et la synthèse v4. En cas de conflit :
 these_principale > synthèse v4 > plan v2 > ce document.
 
-Statut : pré-implémentation (2026-07-12). Les colonnes « Statut » se remplissent
-pendant l'exécution.
+Statut : Wave 5 close, D1 non atteint (2026-07-21). Colonnes « Statut » vérifiées
+fichier par fichier contre le repo réel (existence, absence de stub, tests
+dédiés passants, usage réel) le 2026-07-21 — pas de statut déclaratif non
+vérifié. ✅ signifie « code + tests passants », pas « intégré dans le pipeline
+scientifique final » ni « figure/résultat produit » : voir notes en bas de
+chaque tableau pour les nuances.
 
 ---
 
@@ -128,6 +132,14 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 | `lorenz63.py` | `Lorenz63` | σ=10, ρ=28, β=8/3 ; autonome ; $\lambda_{\max} \approx 0.906$ en référence | ✅ |
 | `cartpole.py` | `CartPole` | équations complètes, force continue ; linéarisation à l'équilibre haut | ✅ |
 
+Vérifié 2026-07-21 : `pytest` — pendulum 6/6, oscillators 3/3, lorenz63 3/3,
+cartpole 4/4, tous verts. **Nuance** : `coupled_oscillators.py`, `lorenz63.py`,
+`cartpole.py` sont construits et testés isolément mais **ne sont référencés
+nulle part ailleurs dans `src/`** — aucune config `experiments/` ne les
+instancie encore (seul `damped_pendulum.py` est câblé dans `factorial.py`).
+Le ✅ couvre « le système existe et est correct », pas « le système est
+utilisé dans un run ». Câblage prévu Wave 6.
+
 ### 4.2 `data/` — régimes et observations
 
 | Fichier | Exports | Responsabilité | Statut |
@@ -143,6 +155,9 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 | `frame_mlp.py` | `FrameMLPEncoder` | une observation → z | ✅ |
 | `window_mlp.py` | `WindowMLPEncoder` | fenêtre $x_{t-k:t}$ aplatie (k=8) → z | ✅ |
 | `pretrain.py` | `pretrain_frozen_encoder` | encodeur gelé par régime (JEPA+VICReg puis freeze) — stand-in LeJEPA déclaré | ⬜ |
+
+Vérifié 2026-07-21 : `frame_mlp.py` 5/5, `window_mlp.py` 6/6, tests verts.
+`pretrain.py` confirmé absent (aucun fichier, aucun stub).
 
 ### 4.4 `predictors/` — les 4 familles
 
@@ -185,6 +200,12 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 | `invariance.py` | `stress_test` | reparamétrisations compensées aléatoires → chaque diagnostic bouge < tolérance déclarée ; **gate avant toute lecture scientifique** | ⬜ |
 | `dsa.py` | `dsa_similarity` | optionnel v1.5, jamais bloquant | ⬜ |
 
+Vérifié 2026-07-21 : `spectral.py` 40/40, `jacobian.py` 48/48, tous verts (le
+seul `NotImplementedError` de `jacobian.py` est une garde documentée sur un
+chemin de spectre partiel non supporté, pas un stub). `gramians.py`,
+`alignment.py`, `identifiability.py`, `invariance.py`, `dsa.py` confirmés
+absents — `audit/__init__.py` n'exporte que spectral/jacobian.
+
 ### 4.8 `calibration/`
 
 | Fichier | Exports | Responsabilité | Statut |
@@ -192,6 +213,9 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 | `defects.py` | `TruncatedStateDefect`, `RotatedActionDefect`, `OverContractionDefect`, `NegativeControl` | injecteurs à intensité déclarée, appliqués à la génération de données ou à l'entraînement | ⬜ |
 | `triage.py` | `TriagePanel` | règles de décision interprétables sur les sorties d'audit + abstention calibrée ; scoring en aveugle (labels cachés) ; baseline val-loss | ⬜ |
 | `protocol.py` | `build_calibration_matrix` | 3 défauts × 3 intensités × 5 seeds + contrôles négatifs ; held-out seeds/intensités | ⬜ |
+
+Vérifié 2026-07-21 : `src/sld/calibration/` **n'existe pas du tout** (pas
+seulement les fichiers — le dossier lui-même est absent).
 
 ### 4.9 `planning/`
 
@@ -203,23 +227,51 @@ Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
 | `tasks.py` | `PendulumSwingUp`, `CartPoleSwingUp` | critères de succès **absolus** fixés dans PROTOCOL.md avant les runs | ⬜ |
 | `bill.py` | `DecisionBill` | FLOPs planner par décision (échecs et replans inclus) ; `compute_per_successful_decision` — l'estimand du plan v2 §3.7 | ⬜ |
 
+Vérifié 2026-07-21 : `src/sld/planning/` **n'existe pas du tout**.
+
 ### 4.10 `experiments/`
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
-| `factorial.py` | CLI `sld-factorial` | expansion YAML → runs (config + seed → dossier déterministe) ; resume | ⬜ |
-| `configs/` | `pendulum_core.yaml`, `oscillators.yaml`, `lorenz.yaml`, `cartpole.yaml`, `encoder_axis.yaml`, `koopman_ablations.yaml`, `calibration.yaml`, `smoke.yaml` | la grille core du plan v2 §3.9, fermée | ⬜ |
+| `factorial.py` | CLI `sld-factorial` | expansion YAML → runs (config + seed → dossier déterministe) ; resume | ✅ |
+| `loading.py` | (non listé initialement, module réel) | chargement/résolution des artefacts de run | ✅ |
+| `configs/pendulum_core.yaml` | config core D1 | ✅ |
+| `configs/smoke.yaml` | config smoke test | ✅ |
+| `configs/calibration.yaml` | config sélection μ_J | ✅ |
+| `configs/oscillators.yaml` | — | ⬜ |
+| `configs/lorenz.yaml` | — | ⬜ |
+| `configs/cartpole.yaml` | — | ⬜ |
+| `configs/encoder_axis.yaml` | — | ⬜ |
+| `configs/koopman_ablations.yaml` | — | ⬜ |
+
+Vérifié 2026-07-21 : `factorial.py` 35/35 tests verts, non un stub. **Correction** :
+cette section était marquée ⬜ en bloc alors que `factorial.py` et 3 des 8
+configs existent et passent leurs tests — corrigé ici. Les 5 configs restantes
+(oscillators/lorenz/cartpole/encoder_axis/koopman_ablations) n'existent pas du
+tout, cohérent avec l'absence de câblage des systèmes correspondants notée en
+§4.1. **Aucune grille n'a encore tourné** avec `pendulum_core.yaml` — le ✅ ne
+couvre que « le runner et la config existent et sont testés », pas « la
+science a été produite ».
 
 ### 4.11 `viz/`
 
 | Fichier | Responsabilité | Statut |
 |---|---|---|
-| `style.py` | palette, bandes ±1 SE, tailles — cohérence des 5 figures | ⬜ |
-| `fig1_rollout.py` | Fig 1 (rollout + Lorenz VPT + démo contraction-améliore-MSE) | ⬜ |
-| `fig2_spectrum.py` | Fig 2 (spectre vs champ local, eigvals analytiques superposées) | ⬜ |
+| `style.py` | palette, bandes ±1 SE, tailles — cohérence des 5 figures | ✅ |
+| `fig1_rollout.py` | Fig 1 (rollout + Lorenz VPT + démo contraction-améliore-MSE) | 🟨 |
+| `fig2_spectrum.py` | Fig 2 (spectre vs champ local, eigvals analytiques superposées) | 🟨 |
 | `fig3_panel.py` | Fig 3 (panel factorial : drift FR, marge $J^q$, R², r_ctrl, Lip(π)) | ⬜ |
 | `fig4_bill.py` | Fig 4 (succès vs compute/décision, CEM vs gradient ; encadré FLOPs(H)) | ⬜ |
 | `fig5_instrument.py` | Fig 5 (confusion de triage + intervention P4) | ⬜ |
+
+Vérifié 2026-07-21 : `tests/viz/test_viz.py` — 32/32 verts pour style.py +
+fig1_rollout.py + fig2_spectrum.py. **fig1/fig2 marqués 🟨 (en cours) et pas
+✅** volontairement : le code passe ses tests unitaires sur données
+synthétiques, mais **aucune figure réelle n'a jamais été produite sur disque**
+— recherche de `*.png`/`*.svg` dans tout le repo (y compris
+`results/smoke/*/figs/` et `assets/`) : zéro fichier trouvé. `assets/`
+n'existe même pas encore. Distinction délibérée entre « code testé » et
+« artefact produit » — ce dernier reste à faire avant de clore D1.
 
 ---
 
@@ -244,6 +296,10 @@ cellule par cellule : PLAN_EXECUTION Wave 10.
 Ordre de rédaction : **après D1** (exception : théorie de 04 et 06 pendant les
 temps morts de runs). Interdiction de polir 00 avant que Fig 1 existe.
 
+Vérifié 2026-07-21 : `notebooks/` ne contient que `example.ipynb` (scaffold
+Wave 0). **Aucun des 10 notebooks 00-09 n'existe** — cohérent avec 0/10 ⬜,
+attendu puisque leur rédaction est explicitement postérieure à D1.
+
 ---
 
 ## 6. Tests — cartographie
@@ -264,6 +320,14 @@ Liste exacte par wave : PLAN_EXECUTION. Les gold tests non négociables :
 6. Contrôle négatif de calibration : le panel sait dire « rien ».
 7. Oracle CEM sur la dynamique vraie atteint les seuils de succès déclarés
    (faisabilité des tâches).
+
+Vérifié 2026-07-21 : `uv run pytest -q` → **376 passed, 0 failed, 0 skipped**
+sur l'ensemble du repo — cohérent avec le chiffre annoncé dans
+`RESUME_SESSION.md`, aucun écart constaté. Les gold tests 1, 2, 5 (EDMD,
+ZOH, contre-exemple des gates) sont réellement implémentés et verts ; les
+gold tests 3, 4, 6, 7 dépendent de modules encore absents
+(`audit/gramians.py`, `audit/invariance.py`, `calibration/`, `planning/`) et
+ne peuvent donc pas encore exister.
 
 ---
 

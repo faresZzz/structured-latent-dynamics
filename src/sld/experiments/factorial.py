@@ -252,6 +252,36 @@ def expand(config: dict, dry_run: bool = False) -> list[dict]:
                     f"overrides {null_keys} are null -- value to be filled by "
                     "calibration (PROTOCOL.md section 5)"
                 )
+            # PROTOCOL.md section 10.3: the declared metric is the
+            # GAUGE-NORMALIZED Jacobian norm, and training on it requires the
+            # frozen gauge to reach ``Trainer`` out-of-band (see
+            # ``sld.experiments.selection._fit_and_load``). This runner never
+            # constructs or threads one -- ``Trainer(cell["config"])`` in
+            # ``_preflight_resolve_and_check_collisions`` always passes
+            # ``gauge=None`` -- so any ON cell (``mu_j > 0``) trained through
+            # here would silently fall back to Trainer's undeclared RAW
+            # pre-amendment estimator instead of the declared one. Refused
+            # here, before any dataset is built, same convention as the
+            # null-override refusal above: ``--dry-run`` still lists the
+            # cell (the null is displayed there too), only the run path
+            # refuses.
+            resolved_mu_j = (
+                overrides["mu_j"] if "mu_j" in overrides
+                else base.get("mu_j", trainer_mod._DEFAULTS["mu_j"])
+            )
+            if (
+                not dry_run
+                and isinstance(resolved_mu_j, (int, float))
+                and resolved_mu_j > 0
+            ):
+                raise ValueError(
+                    f"arm family={arm['family']!r} constraint={arm['constraint']!r}: "
+                    f"mu_j={resolved_mu_j!r} > 0 -- ON cells require the frozen gauge "
+                    "declared in PROTOCOL.md section 10.3, sld-factorial cannot yet "
+                    "supply one to Trainer, and running this cell would silently train "
+                    "against the superseded raw Jacobian estimator instead of the "
+                    "declared metric"
+                )
             for seed in seeds:
                 run_config = {
                     **base,

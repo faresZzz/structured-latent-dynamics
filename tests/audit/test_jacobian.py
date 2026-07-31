@@ -6,6 +6,7 @@ import torch
 
 from sld.audit.jacobian import (
     augmented_jacobian_excluding_identity,
+    augmented_sigma_max_normalized,
     conditional_jacobian,
     fr_drift_curve,
     fr_lyapunov_exponents,
@@ -13,6 +14,7 @@ from sld.audit.jacobian import (
     lipschitz_pi,
     total_jacobian,
 )
+from sld.objectives.jac_reg import Gauge, MetricIndeterminate, normalize_jacobian
 
 
 def _t(arr) -> torch.Tensor:
@@ -606,3 +608,144 @@ def test_fr_lyapunov_exponents_rejects_diverged_rollout():
 def test_jacobian_products_empty_raises():
     with pytest.raises(ValueError):
         jacobian_products([])
+
+
+# ---------------------------------------------------------------------------
+# PROTOCOL.md section 10.3: augmented_sigma_max_normalized
+# ---------------------------------------------------------------------------
+
+
+def test_augmented_sigma_max_normalized_h_only_matches_hand_computation():
+    rng = np.random.default_rng(0)
+    d_h, d_u = 4, 2
+    A = _t(rng.standard_normal((d_h, d_h)))
+    B = _t(rng.standard_normal((d_h, d_u)))
+
+    def step_fn(h, m, u):
+        return h @ A.T + u @ B.T, None
+
+    h = _t(rng.standard_normal((1, d_h)))
+    u = _t(rng.standard_normal((1, d_u)))
+    s_h = _t([1e-2, 1.0, 5.0, 1e3]).reshape(1, d_h)
+    gauge = Gauge(s_h=s_h)
+
+    audited = augmented_sigma_max_normalized(step_fn, h, None, u, gauge)
+
+    dense = augmented_jacobian_excluding_identity(step_fn, h, None, u)
+    assert dense.n_identity_rows == 0
+    s_flat = s_h.reshape(-1).numpy()
+    M = normalize_jacobian(dense.jacobian, s_flat, s_flat)
+    expected = float(np.linalg.svd(M, compute_uv=False)[0])
+    assert abs(audited - expected) <= 1e-10 * max(1.0, expected)
+    # and the gauge must actually move the number relative to the raw one
+    assert abs(audited - dense.sigma_max) / dense.sigma_max > 0.1
+
+
+def test_augmented_sigma_max_normalized_fixed_size_m_matches_hand_computation():
+    rng = np.random.default_rng(1)
+    d_h, d_m, d_u = 3, 2, 1
+    A = _t(rng.standard_normal((d_h, d_h)))
+    C = _t(rng.standard_normal((d_h, d_m)))
+    Wm = _t(rng.standard_normal((d_m, d_m)))
+    Wh = _t(rng.standard_normal((d_m, d_h)))
+
+    def step_fn(h, m, u):
+        return h @ A.T + m @ C.T, m @ Wm.T + h @ Wh.T
+
+    h = _t(rng.standard_normal((1, d_h)))
+    m = _t(rng.standard_normal((1, d_m)))
+    u = _t(rng.standard_normal((1, d_u)))
+    s_h = _t([1e-2, 1.0, 1e2]).reshape(1, d_h)
+    s_m = _t([1e3, 1e-3]).reshape(1, d_m)
+    gauge = Gauge(s_h=s_h, s_m=s_m)
+
+    audited = augmented_sigma_max_normalized(step_fn, h, m, u, gauge)
+    dense = augmented_jacobian_excluding_identity(step_fn, h, m, u)
+    assert dense.n_identity_rows == 0
+    s_flat = torch.cat([s_h.reshape(-1), s_m.reshape(-1)]).numpy()
+    M = normalize_jacobian(dense.jacobian, s_flat, s_flat)
+    expected = float(np.linalg.svd(M, compute_uv=False)[0])
+    assert abs(audited - expected) <= 1e-9 * max(1.0, expected)
+
+
+def test_augmented_sigma_max_normalized_growing_memory_row_alignment():
+    # the excluded_row_indices field must align S_out to J_excl's actual
+    # (post-deletion) rows -- verified against an independently-built dense
+    # normalized matrix constructed WITHOUT that field (manual bookkeeping).
+    rng = np.random.default_rng(2)
+    d_h, d_m, d_u, L = 3, 2, 2, 2
+
+    A = _t(rng.standard_normal((d_h, d_h)))
+    C = _t(rng.standard_normal((d_h, d_m)))
+    W = _t(rng.standard_normal((d_m, d_h)))
+
+    def step_fn(h, m, u):
+        h_next = h @ A.T + m[-1] @ C.T
+        m_next = torch.cat([m, (h @ W.T).unsqueeze(0)], dim=0)
+        return h_next, m_next
+
+    h = _t(rng.standard_normal((1, d_h)))
+    m = _t(rng.standard_normal((L, 1, d_m)))
+    u = _t(rng.standard_normal((1, d_u)))
+
+    s_h = _t([1e-1, 1.0, 1e1]).reshape(1, d_h)
+    s_positions = _t(rng.uniform(1e-3, 1e3, size=(4, 1, d_m)))  # covers up to 4 positions
+    gauge = Gauge(s_h=s_h, s_m_positions=s_positions, position_axis=0)
+
+    audited = augmented_sigma_max_normalized(step_fn, h, m, u, gauge)
+
+    dense = augmented_jacobian_excluding_identity(step_fn, h, m, u)
+    assert dense.n_identity_rows == m.numel()
+    s_in = torch.cat([s_h.reshape(-1), s_positions[:L].reshape(-1)]).numpy()
+    s_out_full = torch.cat([s_h.reshape(-1), s_positions[: L + 1].reshape(-1)]).numpy()
+    s_out = np.delete(s_out_full, dense.excluded_row_indices)
+    assert s_out.shape[0] == dense.jacobian.shape[0]
+    M = normalize_jacobian(dense.jacobian, s_in, s_out)
+    expected = float(np.linalg.svd(M, compute_uv=False)[0])
+    assert abs(audited - expected) <= 1e-8 * max(1.0, expected)
+
+
+def test_augmented_sigma_max_normalized_propagates_metric_indeterminate():
+    rng = np.random.default_rng(3)
+    d_h, d_u = 2, 1
+    A = _t(rng.standard_normal((d_h, d_h)))
+
+    def step_fn(h, m, u):
+        return h @ A.T, None
+
+    h = _t(rng.standard_normal((1, d_h)))
+    u = _t(rng.standard_normal((1, d_u)))
+
+    zero_scale = Gauge(s_h=_t([1.0, 0.0]).reshape(1, d_h))
+    with pytest.raises(MetricIndeterminate):
+        augmented_sigma_max_normalized(step_fn, h, None, u, zero_scale)
+
+    nonfinite_scale = Gauge(s_h=_t([1.0, float("nan")]).reshape(1, d_h))
+    with pytest.raises(MetricIndeterminate):
+        augmented_sigma_max_normalized(step_fn, h, None, u, nonfinite_scale)
+
+
+def test_augmented_sigma_max_normalized_growing_memory_position_coverage_indeterminate():
+    rng = np.random.default_rng(4)
+    d_h, d_m, d_u, L = 2, 2, 1, 3  # 3 old positions already in the cache
+
+    A = _t(rng.standard_normal((d_h, d_h)))
+    C = _t(rng.standard_normal((d_h, d_m)))
+    W = _t(rng.standard_normal((d_m, d_h)))
+
+    def step_fn(h, m, u):
+        h_next = h @ A.T + m[-1] @ C.T
+        m_next = torch.cat([m, (h @ W.T).unsqueeze(0)], dim=0)
+        return h_next, m_next
+
+    h = _t(rng.standard_normal((1, d_h)))
+    m = _t(rng.standard_normal((L, 1, d_m)))
+    u = _t(rng.standard_normal((1, d_u)))
+
+    # reference rollout only covers 3 positions -- this step needs 4 (m_next)
+    s_h = _t([1.0, 1.0]).reshape(1, d_h)
+    s_positions = _t(rng.uniform(1e-2, 1e2, size=(3, 1, d_m)))
+    gauge = Gauge(s_h=s_h, s_m_positions=s_positions, position_axis=0)
+
+    with pytest.raises(MetricIndeterminate, match="beyond"):
+        augmented_sigma_max_normalized(step_fn, h, m, u, gauge)

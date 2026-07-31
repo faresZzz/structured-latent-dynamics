@@ -23,7 +23,7 @@ import yaml
 from torch import nn
 
 from sld.encoders.frame_mlp import FrameMLPEncoder
-from sld.objectives.jac_reg import TotalJacobianPenalty
+from sld.objectives.jac_reg import Gauge, TotalJacobianPenalty, gauge_digest
 from sld.objectives.jepa import EMATarget, JEPALoss
 from sld.objectives.vicreg import covariance_loss, variance_loss
 from sld.predictors.base import PredictorState
@@ -45,6 +45,8 @@ _DEFAULTS = {
     "w_var": 1.0,
     "w_cov": 1.0,
     "mu_j": 0.0,
+    "k_probes": 2,
+    "step_subsample": 0.25,
     "encoder_hidden": [64, 64],
     "target_params": 10_000,
     "results_root": "results",
@@ -84,8 +86,17 @@ _BUDGET_OWNED_KEYS = frozenset(
 #   forwarded: d_z, d_u (required keys) + _FAMILY_CONFIG_KEYS per family
 #   budget-owned (rejected): hidden, d_model, d_ff, n_layers, d_state,
 #     psi_hidden, pi_hidden
-#   derived/policy (rejected): d_h, dtype
-_DERIVED_OR_POLICY_KEYS = frozenset({"d_h", "dtype"})
+#   derived/policy (rejected): d_h, dtype, gauge_digest
+#
+# gauge_digest is DERIVED from the out-of-band ``gauge=`` constructor
+# argument (PROTOCOL.md section 10.3's frozen reference scale), never
+# declared by a caller: it is injected into the resolved config below, so a
+# config that also NAMED it would hash a value the Trainer is about to
+# overwrite. The schema stays closed at every level -- the factorial's
+# ``_trainer_allowed_keys`` derives its allow-list from ``_DEFAULTS``, which
+# deliberately does NOT carry ``gauge_digest``, so a YAML naming it is
+# rejected there too.
+_DERIVED_OR_POLICY_KEYS = frozenset({"d_h", "dtype", "gauge_digest"})
 
 # objective weights: must be finite and >= 0 (a negative weight silently
 # behaving as "disabled" was adversarial review round 2's finding), and at
@@ -106,6 +117,15 @@ RUN_COMPLETE_FILENAME = "run_complete.json"
 # metrics.csv's exact header, written by fit() below and re-checked (schema,
 # not just column presence) by the factorial validator's sentinel-binding
 # check (M3, round 4) -- one shared constant so the two can never drift apart
+#
+# CONTRACT NOTE: "jac_pen" is the TRAIN-side mu_j diagnostic only. "val_loss"
+# does NOT include mu_j * jac_pen -- the penalty is not evaluated on the val
+# split at all (Trainer._composite_loss(..., compute_jac_penalty=False)),
+# so val_loss is TF + FR + VICReg exclusively, even when mu_j > 0. This is a
+# deliberate contract change: the penalty is unused downstream of val
+# anywhere in this repo, evaluating it there cost 23-38% of epoch time, and
+# it silently advanced the GLOBAL RNG that the FOLLOWING epoch's training
+# probes draw from (TotalJacobianPenalty's generator is None by design).
 METRICS_HEADER = (
     "epoch",
     "train_loss",
@@ -170,7 +190,27 @@ class Trainer:
     v0 batching (declared, not a stand-in for something more elaborate
     later in this wave): one sampled batch of ``batch_episodes`` train
     episodes per epoch, no dataloader machinery. Val loss is evaluated on
-    the WHOLE val split every epoch under ``torch.no_grad()``.
+    the WHOLE val split every epoch under ``torch.no_grad()`` -- EXCLUDING
+    the mu_j penalty (contract change, see ``METRICS_HEADER`` and
+    ``_composite_loss``): ``val_loss`` in ``metrics.csv``/``history`` is
+    TF + FR + VICReg only, never TF + FR + VICReg + mu_j * jac_pen. The
+    penalty is not used off of the train split anywhere in this repo, and
+    evaluating it there cost 23-38% of epoch time and silently advanced the
+    GLOBAL RNG that the following epoch's training-time probes draw from.
+
+    mu_J gauge (PROTOCOL.md section 10.3). ``Trainer(config, gauge=...)``
+    takes the frozen diagonal reference scale OUT-OF-BAND, and applies it to
+    the penalty, so what training OPTIMIZES is the declared metric
+    ``sigma_max(S_out^-1 J^{q,excl} S_in)`` -- the identical object the
+    offline audit measures. It is a constructor argument rather than a
+    config key on purpose: a ``Gauge`` is tensors, not YAML, and it is
+    measured from a phase-OFF checkpoint rather than declared. Its CONTENT
+    still reaches the run identity, as the derived ``gauge_digest`` key
+    injected into the hashed config -- two runs under different gauges
+    optimize different objectives and can never share a run directory. On an
+    OFF cell (``mu_j == 0``) the penalty branch is never evaluated, so the
+    gauge is dropped and the key stays absent: inert for identity, exactly
+    like ``k_probes``/``step_subsample`` there.
 
     BatchNorm-free assumption: encoders in this repo are plain MLPs; the EMA
     target's buffer-copy policy is declared in ``EMATarget`` (jepa.py) and is
@@ -178,7 +218,7 @@ class Trainer:
     float64 numpy and is cast to float32 once, at ``_time_major``.
     """
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, gauge: Gauge | None = None) -> None:
         missing = [k for k in _REQUIRED_KEYS if k not in config]
         if missing:
             raise ValueError(f"config must include {missing}")
@@ -206,7 +246,8 @@ class Trainer:
         if derived:
             raise ValueError(
                 f"config keys {derived} are derived or policy-owned (d_h follows from "
-                "d_z/n_pairs; precision is the Trainer's declared CPU/float32 policy)"
+                "d_z/n_pairs; precision is the Trainer's declared CPU/float32 policy; "
+                "gauge_digest is derived from the out-of-band gauge= argument)"
             )
         # loop integers must be usable BEFORE any artifact is created: an
         # empty epoch loop would still write success-only artifacts and then
@@ -269,10 +310,67 @@ class Trainer:
             raise ValueError(f"mu_j must be finite and >= 0, got {mu_j!r}")
         if mu_j > 0 and self.config["w_tf"] <= 0:
             raise ValueError("mu_j > 0 requires w_tf > 0 -- the penalty needs the TF-threaded state")
+        # k_probes / step_subsample: pre-registered mu_j estimator constants
+        # (PROTOCOL.md section 5: k_probes=2, step_subsample=0.25), now
+        # config-pilotable instead of hardcoded at TotalJacobianPenalty() --
+        # defaults are UNCHANGED so a config that omits them reproduces the
+        # old behavior exactly. Type/finiteness are checked here; the RANGE
+        # bounds (k_probes >= 1, step_subsample in (0, 1]) are validated by
+        # TotalJacobianPenalty.__init__ itself (jac_reg.py:66-69) -- checked
+        # unconditionally of mu_j below, so a bad value is rejected at
+        # construction regardless of whether the penalty ever runs (round 4
+        # doctrine: schema errors caught before any artifact, not only on
+        # the path that would use them), never a double source of truth for
+        # the range check.
+        k_probes = self.config["k_probes"]
+        if not (isinstance(k_probes, int) and not isinstance(k_probes, bool)):
+            raise ValueError(f"k_probes must be an integer, got {k_probes!r}")
+        step_subsample = self.config["step_subsample"]
+        if not (isinstance(step_subsample, (int, float)) and math.isfinite(step_subsample)):
+            raise ValueError(f"step_subsample must be finite, got {step_subsample!r}")
+        # The frozen reference scale (PROTOCOL.md section 10.3) travels
+        # OUT-OF-BAND, as this constructor argument, never as a config value:
+        # it is a bundle of tensors, not YAML, and it is MEASURED from a
+        # checkpoint rather than declared. It is applied to the penalty here
+        # so the quantity training optimizes is the SAME metric-normalized
+        # object the audit measures (jac_reg module docstring; the
+        # elementwise-JVP and dense-Jacobian sides of that identity are
+        # locked by tests). Passing no gauge keeps the RAW pre-amendment
+        # estimator, bit-for-bit -- every existing caller and config is
+        # unaffected.
+        self.gauge = gauge if mu_j > 0 else None
         # RNG for the penalty is the GLOBAL one (generator=None): determinism
         # comes from set_seed(cfg["seed"]) like everywhere else in fit(); mu_j
         # itself is already part of the hashed config, so no cross-run leakage
-        self._jac_penalty = TotalJacobianPenalty()
+        self._jac_penalty = TotalJacobianPenalty(
+            k_probes=k_probes, step_subsample=step_subsample, gauge=self.gauge
+        )
+        if mu_j == 0:
+            # k_probes/step_subsample only reach anything through the mu_j
+            # penalty, which is entirely skipped when mu_j == 0 (l. 327
+            # disabled-branch doctrine) -- canonicalize them to the shared
+            # default so two mu_j=0 configs differing ONLY in these
+            # otherwise-inert knobs share one run identity. Same technique
+            # the family defaults use for an explicit None (l. 224): resolve
+            # into self.config BEFORE hashing, so config.yaml and the hash
+            # agree with each other and with what actually ran.
+            #
+            # The gauge is inert for EXACTLY the same reason, and is
+            # canonicalized the same way -- by staying ABSENT from the hashed
+            # config (``self.gauge`` is already None above, so it cannot
+            # reach the penalty either). Absence rather than a null value is
+            # the same convention _FAMILY_CONFIG_KEYS already uses for a key
+            # that does not apply to this run, and it keeps every OFF cell's
+            # identity bit-identical to what it was before the gauge existed.
+            self.config["k_probes"] = _DEFAULTS["k_probes"]
+            self.config["step_subsample"] = _DEFAULTS["step_subsample"]
+        elif self.gauge is not None:
+            # mu_j > 0 AND a gauge: the penalized object depends on this
+            # gauge's CONTENT, so two runs under different gauges are
+            # different runs and must not share a directory. The digest is
+            # bit-stable across processes (see gauge_digest) and is the only
+            # thing about the gauge that enters the identity.
+            self.config["gauge_digest"] = gauge_digest(self.gauge)
 
         # canonical config string: sort_keys=True makes it a pure function of
         # the resolved dict's content, not of insertion order; this EXACT
@@ -301,8 +399,19 @@ class Trainer:
         lift_fn,
         project_fn,
         h_fr: int,
+        compute_jac_penalty: bool = True,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """One composite loss evaluation: TF + FR + VICReg, on one episode batch."""
+        """One composite loss evaluation: TF + FR + VICReg, on one episode batch.
+
+        ``compute_jac_penalty=False`` (val split only, see ``fit``) treats
+        the mu_j branch exactly like a zero-weighted one -- not evaluated at
+        all, same doctrine as the ``w_fr == 0`` skip below -- regardless of
+        ``cfg["mu_j"]``. This is what keeps validation from spending 23-38%
+        of an epoch on a diagnostic used nowhere, and from consuming the
+        GLOBAL RNG (``TotalJacobianPenalty``'s probes/subsampling, generator
+        ``None``) and shifting the probes every subsequent epoch's TRAINING
+        step draws.
+        """
         cfg = self.config
         T = u_bt.shape[0]
         z = encoder(x_bt)  # (T+1, B, d_z) online
@@ -324,7 +433,7 @@ class Trainer:
             # jac_steps captures the INPUT (h_t, m_t, u_t) of every step BEFORE
             # it runs, entirely skipped when mu_j == 0 (doctrine: a disabled
             # branch is not evaluated, l.258 zero placeholder)
-            jac_steps = [] if cfg["mu_j"] > 0 else None
+            jac_steps = [] if (cfg["mu_j"] > 0 and compute_jac_penalty) else None
             for t in range(T):
                 if jac_steps is not None:
                     jac_steps.append((h_true[t], state.m, u_bt[t]))
@@ -585,8 +694,21 @@ class Trainer:
 
                 with torch.no_grad():
                     x_v, u_v = _time_major(val_split, val_idx)
+                    # mu_j is NOT evaluated on val (see METRICS_HEADER note
+                    # and _composite_loss docstring): unused downstream and
+                    # 23-38% of epoch time when it was
                     val_total, _ = self._composite_loss(
-                        encoder, predictor, ema, jepa, x_v, u_v, lifted, lift_fn, project_fn, h_fr
+                        encoder,
+                        predictor,
+                        ema,
+                        jepa,
+                        x_v,
+                        u_v,
+                        lifted,
+                        lift_fn,
+                        project_fn,
+                        h_fr,
+                        compute_jac_penalty=False,
                     )
 
                 train_loss, val_loss = float(train_total.item()), float(val_total.item())

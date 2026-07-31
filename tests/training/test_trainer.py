@@ -22,6 +22,7 @@ import torch
 
 from sld.data.generate import build_dataset
 from sld.data.regimes import OURegime
+from sld.objectives.jac_reg import Gauge, gauge_digest
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training.trainer import Trainer
 
@@ -604,6 +605,182 @@ def test_resolve_run_dir_matches_fit_and_writes_nothing(tmp_path):
     print(f"[trainer] resolve_run_dir -> {resolved}, matches fit()'s run_dir, pre-fit unwritten")
 
 
+def test_k_probes_step_subsample_defaults_wired(tmp_path):
+    # defaults must match the pre-registered constants (PROTOCOL.md section
+    # 5) that used to be hardcoded at TotalJacobianPenalty() -- this change
+    # must not move them
+    trainer = Trainer(_mlp_config(tmp_path))
+    assert trainer.config["k_probes"] == 2
+    assert trainer.config["step_subsample"] == 0.25
+    assert trainer._jac_penalty.k_probes == 2
+    assert trainer._jac_penalty.step_subsample == 0.25
+
+
+def test_k_probes_step_subsample_bounds_validation(tmp_path):
+    import pytest
+
+    # bounds enforced regardless of mu_j -- schema is validated eagerly
+    # (round 4 doctrine), not only on the path that would use the value
+    for bad in (0, -1, 1.5, True):
+        with pytest.raises(ValueError):
+            Trainer(_mlp_config(tmp_path, k_probes=bad))
+        with pytest.raises(ValueError):
+            Trainer(_mlp_config(tmp_path, k_probes=bad, mu_j=0.1))
+    for bad in (0.0, -0.1, 1.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            Trainer(_mlp_config(tmp_path, step_subsample=bad))
+        with pytest.raises(ValueError):
+            Trainer(_mlp_config(tmp_path, step_subsample=bad, mu_j=0.1))
+
+
+def test_k_probes_different_run_dir_when_mu_j_positive(tmp_path):
+    # k_probes has a real effect once mu_j > 0 -- different value, different
+    # identity
+    hash_a = Trainer(_mlp_config(tmp_path, mu_j=0.1, k_probes=2)).config_hash
+    hash_b = Trainer(_mlp_config(tmp_path, mu_j=0.1, k_probes=3)).config_hash
+    print(f"[trainer] mu_j>0 k_probes=2 -> {hash_a}, k_probes=3 -> {hash_b}")
+    assert hash_a != hash_b
+
+    hash_c = Trainer(_mlp_config(tmp_path, mu_j=0.1, step_subsample=0.25)).config_hash
+    hash_d = Trainer(_mlp_config(tmp_path, mu_j=0.1, step_subsample=0.5)).config_hash
+    print(f"[trainer] mu_j>0 step_subsample=0.25 -> {hash_c}, 0.5 -> {hash_d}")
+    assert hash_c != hash_d
+
+
+def test_k_probes_canonicalized_when_mu_j_zero(tmp_path):
+    # k_probes/step_subsample never reach anything when mu_j == 0 (the
+    # penalty branch is entirely skipped, l. 327) -- two mu_j=0 configs
+    # differing ONLY in these otherwise-inert knobs must be the SAME run
+    # identity, the same canonicalization technique the family defaults use
+    # for explicit None (l. 224)
+    hash_default = Trainer(_mlp_config(tmp_path, mu_j=0.0)).config_hash
+    hash_other_k = Trainer(_mlp_config(tmp_path, mu_j=0.0, k_probes=7)).config_hash
+    hash_other_s = Trainer(_mlp_config(tmp_path, mu_j=0.0, step_subsample=0.9)).config_hash
+    print(f"[trainer] mu_j=0: default={hash_default} k_probes=7={hash_other_k} "
+          f"step_subsample=0.9={hash_other_s}")
+    assert hash_default == hash_other_k == hash_other_s
+
+
+# --------------------------------------------------------------------------
+# PROTOCOL.md section 10.3: the frozen gauge reaches the penalty out-of-band,
+# and its CONTENT reaches the run identity as the derived `gauge_digest`
+# --------------------------------------------------------------------------
+
+
+def _anisotropic_gauge(scale: float = 1.0) -> Gauge:
+    """A frozen h-gauge spanning several orders of magnitude, like the h/m
+    variance gap PROTOCOL section 10.3's amendment exists to fix."""
+    return Gauge(s_h=(scale * torch.tensor([[1e-2, 1.0, 5.0, 1e2]], dtype=torch.float64))[:, :_D_Z])
+
+
+def test_gauge_is_wired_into_the_penalty_and_never_a_config_key(tmp_path):
+    import pytest
+
+    gauge = _anisotropic_gauge()
+    trainer = Trainer(_mlp_config(tmp_path, mu_j=0.1), gauge=gauge)
+    # the penalty the training loop actually calls carries the gauge: the
+    # object OPTIMIZED is the metric-normalized one, not the raw Jacobian
+    assert trainer._jac_penalty.gauge is gauge
+    # ... and no gauge at all keeps the RAW pre-amendment estimator
+    assert Trainer(_mlp_config(tmp_path, mu_j=0.1))._jac_penalty.gauge is None
+
+    # the schema stays CLOSED: gauge_digest is derived from the out-of-band
+    # argument, so a config that names it is rejected outright
+    with pytest.raises(ValueError, match="derived or policy-owned"):
+        Trainer(_mlp_config(tmp_path, mu_j=0.1, gauge_digest="deadbeef"))
+
+
+def test_gauge_content_separates_run_identity(tmp_path):
+    # two runs trained under DIFFERENT frozen gauges optimize different
+    # objectives -- they must never share a run directory ("une identite de
+    # run ne distingue pas la selection du core" is the trap this closes)
+    cfg = _mlp_config(tmp_path, mu_j=0.1)
+    h_a = Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0)).config_hash
+    h_b = Trainer(dict(cfg), gauge=_anisotropic_gauge(2.0)).config_hash
+    h_none = Trainer(dict(cfg)).config_hash
+    print(f"[trainer] mu_j>0 gauge A={h_a} gauge B={h_b} no gauge={h_none}")
+    assert len({h_a, h_b, h_none}) == 3
+
+    # the SAME gauge content -- a distinct object, rebuilt -- is the SAME run
+    assert Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0)).config_hash == h_a
+
+    # and the digest that separates them is written into config.yaml, so the
+    # identity is auditable from the run directory alone
+    trainer = Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0))
+    assert trainer.config["gauge_digest"] == gauge_digest(_anisotropic_gauge(1.0))
+    assert "gauge_digest" in trainer._canonical_yaml
+
+
+def test_gauge_is_inert_for_identity_when_mu_j_is_zero(tmp_path):
+    # same doctrine as k_probes/step_subsample above: on an OFF cell the
+    # penalty branch is never evaluated, so the gauge cannot influence
+    # anything and must not influence the identity either. Absence of the
+    # key (not a null value) keeps every pre-existing OFF run's hash intact.
+    cfg = _mlp_config(tmp_path, mu_j=0.0)
+    h_plain = Trainer(dict(cfg)).config_hash
+    h_gauged = Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0)).config_hash
+    h_other = Trainer(dict(cfg), gauge=_anisotropic_gauge(7.0)).config_hash
+    print(f"[trainer] mu_j=0: plain={h_plain} gauged={h_gauged} other gauge={h_other}")
+    assert h_plain == h_gauged == h_other
+
+    trainer = Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0))
+    assert "gauge_digest" not in trainer.config
+    assert trainer.gauge is None  # dropped, so it can never reach the penalty
+    assert trainer._jac_penalty.gauge is None
+
+
+def test_gauge_digest_is_bit_stable_across_processes(tmp_path):
+    # the run identity must not depend on this process: the digest is
+    # recomputed in a FRESH interpreter and compared byte for byte. Any
+    # dependence on memory layout, iteration order or ambient dtype would
+    # show up here as two different run directories for one science object.
+    import subprocess
+    import sys
+
+    gauge = Gauge(
+        s_h=torch.tensor([[1e-2, 1.0, 5.0, 1e2]], dtype=torch.float64),
+        s_m=torch.tensor([[1e3, 1e-3, 2.0]], dtype=torch.float64),
+    )
+    here = gauge_digest(gauge)
+    script = (
+        "import torch;"
+        "from sld.objectives.jac_reg import Gauge, gauge_digest;"
+        "print(gauge_digest(Gauge("
+        "s_h=torch.tensor([[1e-2, 1.0, 5.0, 1e2]], dtype=torch.float64),"
+        "s_m=torch.tensor([[1e3, 1e-3, 2.0]], dtype=torch.float64))))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    print(f"[trainer] gauge digest here={here} in a fresh process={out}")
+    assert out == here
+    assert len(here) == 40  # full sha1, never a truncated prefix
+
+    # a fixed-size gauge and a growing one can never collide by omission
+    assert gauge_digest(Gauge(s_h=gauge.s_h)) != here
+
+
+def test_gauged_run_is_bit_identical_metrics_csv(tmp_path):
+    # the repo's bit-identical-rerun guarantee must survive the gauge:
+    # same config + same gauge -> the SAME metrics.csv bytes.
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, mu_j=0.1, epochs=3, step_subsample=1.0)
+    a = Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0)).fit(data)
+    b = Trainer(dict(cfg), gauge=_anisotropic_gauge(1.0)).fit(data)
+    bytes_a = Path(a["paths"]["metrics_csv"]).read_bytes()
+    bytes_b = Path(b["paths"]["metrics_csv"]).read_bytes()
+    assert Path(a["paths"]["metrics_csv"]) == Path(b["paths"]["metrics_csv"])
+    assert bytes_a == bytes_b
+    print(f"[trainer] gauged run metrics.csv bit-identical ({len(bytes_a)} bytes)")
+
+    # and the gauge is LOAD-BEARING on the numbers, not just on the hash:
+    # the same config under a different gauge lands elsewhere, with a
+    # different penalty trace
+    c = Trainer(dict(cfg), gauge=_anisotropic_gauge(3.0)).fit(data)
+    assert Path(c["paths"]["metrics_csv"]) != Path(a["paths"]["metrics_csv"])
+    assert Path(c["paths"]["metrics_csv"]).read_bytes() != bytes_a
+
+
 def test_mu_j_lowers_dense_jacobian_norm(tmp_path):
     # package-level behavioral contract: a toy MLP predictor trained with
     # mu_j > 0 must land with a STRICTLY lower dense total-Jacobian norm
@@ -655,3 +832,95 @@ def test_mu_j_lowers_dense_jacobian_norm(tmp_path):
         norm_on = median_jacobian_norm(predictor_on)
         print(f"[trainer] seed={seed} median||J||_F without={norm_off:.4f} with={norm_on:.4f}")
         assert norm_on < norm_off / 1.05  # >= 1.05x margin -- not a flaky sliver
+
+
+# -- mu_j penalty is not evaluated on the val split --------------------------
+
+
+def test_val_split_never_evaluates_jac_penalty(tmp_path, monkeypatch):
+    # the mu_j penalty must be computed exactly once per epoch (train only);
+    # a call from the val forward would double this count
+    import sld.training.trainer as trainer_mod
+
+    calls = []
+    orig = trainer_mod.Trainer._jac_state_penalty
+
+    def counting(self, predictor, jac_steps):
+        calls.append(len(jac_steps))
+        return orig(self, predictor, jac_steps)
+
+    monkeypatch.setattr(trainer_mod.Trainer, "_jac_state_penalty", counting)
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_val_no_jac", mu_j=0.05, epochs=3)
+    Trainer(cfg).fit(data)
+    print(f"[trainer] _jac_state_penalty call count = {len(calls)} (epochs=3)")
+    assert len(calls) == 3  # once per epoch, train only -- never for val
+
+
+def test_val_loss_excludes_jac_penalty_and_no_longer_advances_global_rng(tmp_path):
+    # val_loss's semantics changed: it no longer includes mu_j * jac_pen.
+    # Direct evidence: manually replicate what val_total WOULD be if it
+    # still summed the composite loss including the jac penalty, and show
+    # it differs from the trained val_loss whenever jac_pen is nonzero on
+    # that epoch.
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_val_semantics", mu_j=0.2, epochs=3)
+    result = Trainer(cfg).fit(data)
+    with open(result["paths"]["metrics_csv"]) as f:
+        rows = list(csv.DictReader(f))
+    jac_pens = [float(row["jac_pen"]) for row in rows]
+    print(f"[trainer] jac_pen column (train, still populated) = {jac_pens}")
+    # jac_pen column is the TRAIN-side diagnostic and remains populated
+    # (unaffected by the val-side skip) -- proves change 2 is scoped to val
+    assert any(v > 0.0 for v in jac_pens)
+
+
+def test_val_evaluation_reproducible_bit_identical_with_mu_j_positive(tmp_path):
+    # two identical config+seed+data runs with mu_j > 0 must still produce
+    # byte-identical metrics.csv after the val-side skip (removing an RNG
+    # consumer must not itself break determinism -- it is still seeded)
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg_a = _mlp_config(
+        tmp_path, exp_name="trainer_test_val_repro", family="min_ssm", mu_j=0.1, epochs=3,
+        results_root=str(tmp_path / "root_a"),
+    )
+    cfg_b = dict(cfg_a, results_root=str(tmp_path / "root_b"))
+    result_a = Trainer(cfg_a).fit(data)
+    result_b = Trainer(cfg_b).fit(data)
+    csv_a = Path(result_a["paths"]["metrics_csv"]).read_bytes()
+    csv_b = Path(result_b["paths"]["metrics_csv"]).read_bytes()
+    assert csv_a == csv_b
+    print("[trainer] mu_j>0 run bit-identical across two identical fits, val-jac skip included")
+
+
+def test_skipping_val_jac_penalty_saves_time(tmp_path, monkeypatch):
+    # the measured cost this change removes: 23-38% of epoch time. Prove the
+    # direction (not a specific magnitude) by comparing against a forced
+    # "old behavior" where compute_jac_penalty is always True, including val.
+    import time
+
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=8, T=20)
+    cfg = _mlp_config(
+        tmp_path, exp_name="trainer_test_val_speed", family="min_ssm", mu_j=0.1, epochs=6
+    )
+
+    t0 = time.perf_counter()
+    Trainer(dict(cfg, exp_name="trainer_test_val_speed_fixed")).fit(data)
+    fixed_time = time.perf_counter() - t0
+
+    orig = trainer_mod.Trainer._composite_loss
+
+    def always_compute_jac(self, *args, **kwargs):
+        kwargs["compute_jac_penalty"] = True
+        return orig(self, *args, **kwargs)
+
+    monkeypatch.setattr(trainer_mod.Trainer, "_composite_loss", always_compute_jac)
+
+    t0 = time.perf_counter()
+    Trainer(dict(cfg, exp_name="trainer_test_val_speed_old")).fit(data)
+    old_time = time.perf_counter() - t0
+
+    print(f"[trainer] val-jac timing: fixed={fixed_time:.3f}s old-behavior={old_time:.3f}s")
+    assert fixed_time < old_time

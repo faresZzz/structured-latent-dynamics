@@ -310,8 +310,10 @@ def test_constraint_mu_j_semantic_mismatch_raises():
 
 
 def test_run_identity_collision_raises(tmp_path):
-    # both arms are legitimately 'on' (mu_j=0.05 > 0, F8b is satisfied) --
-    # but the 2nd arm's explicit lr equals the Trainer's own default, so
+    # both arms are legitimately 'off' (mu_j=0.0, F8b is satisfied -- 'on'
+    # would now be refused in run mode by the mu_j > 0 gauge-preflight check,
+    # see test_on_cell_run_mode_refuses_mu_j_positive_but_dry_run_lists_it)
+    # -- but the 2nd arm's explicit lr equals the Trainer's own default, so
     # BOTH resolve to the byte-identical hashed config: a real collision the
     # F8b semantic check does NOT catch, caught by the preflight instead
     results_root = tmp_path / "results"
@@ -328,8 +330,8 @@ def test_run_identity_collision_raises(tmp_path):
             "results_root": str(results_root),
         },
         "arms": [
-            {"family": "mlp", "constraint": "on", "overrides": {"mu_j": 0.05}},
-            {"family": "mlp", "constraint": "on", "overrides": {"mu_j": 0.05, "lr": 1e-3}},
+            {"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}},
+            {"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0, "lr": 1e-3}},
         ],
         "seeds": [0],
     }
@@ -340,6 +342,28 @@ def test_run_identity_collision_raises(tmp_path):
         main(["--config", str(config_path)])
     # nothing was trained -- the preflight runs before any fit() call
     assert not results_root.exists()
+
+
+def test_on_cell_run_mode_refuses_mu_j_positive_but_dry_run_lists_it():
+    # sld-factorial never threads a gauge into Trainer (unlike
+    # sld.experiments.selection._fit_and_load, which does), so any ON cell
+    # (mu_j > 0) trained through here would silently fall back to Trainer's
+    # undeclared raw Jacobian estimator instead of the PROTOCOL.md section
+    # 10.3 declared, gauge-normalized one. The run path must refuse before
+    # touching a dataset or a Trainer; --dry-run must still list the cell,
+    # same convention as the null-override case above.
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "arms": [{"family": "mlp", "constraint": "on", "overrides": {"mu_j": 0.05}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="gauge"):
+        expand(config, dry_run=False)
+
+    cells = expand(config, dry_run=True)
+    assert len(cells) == 1
+    assert cells[0]["mu_j"] == 0.05
 
 
 # -- F9: run_complete.json sentinel, never ckpt.pt, drives resume/status -----

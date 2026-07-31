@@ -16,12 +16,20 @@ estimator of ``objectives.jac_reg``.
 from sld.audit.jacobian import (
     ExcludedAugmentedJacobian,
     augmented_jacobian_excluding_identity,
+    augmented_sigma_max_normalized,
     conditional_jacobian,
     fr_drift_curve,
     fr_lyapunov_exponents,
     jacobian_products,
     lipschitz_pi,
     total_jacobian,
+)
+from sld.audit.invariance import (
+    GaugeCheckResult,
+    assert_diagonal_gauge_invariant,
+    check_diagonal_gauge_invariance,
+    check_shear_breaks_invariance,
+    diagonal_gauges,
 )
 from sld.audit.spectral import (
     edmd_fit,
@@ -33,8 +41,14 @@ from sld.audit.spectral import (
 
 __all__ = [
     "ExcludedAugmentedJacobian",
+    "GaugeCheckResult",
+    "assert_diagonal_gauge_invariant",
     "augmented_jacobian_excluding_identity",
+    "augmented_sigma_max_normalized",
+    "check_diagonal_gauge_invariance",
+    "check_shear_breaks_invariance",
     "conditional_jacobian",
+    "diagonal_gauges",
     "edmd_fit",
     "fr_drift_curve",
     "fr_lyapunov_exponents",
