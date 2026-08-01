@@ -316,6 +316,79 @@ def test_readout_drift_invariant_to_linear_reparam(tmp_path: Path) -> None:
         )
 
 
+def test_fr_drift_target_is_true_state_not_encoder_reconstruction() -> None:
+    """Root-cause regression for the F1 metric-target bug: ``_fit_run_readout``
+    used to compare the rollout prediction against the READOUT-DECODED
+    ENCODER'S OWN EMBEDDING (``_apply_readout(z_enc[1:H+1], W)``) instead of
+    the dataset's actual ground-truth physical state (``z_true``). Construct
+    a "cheat" predictor whose rollout output is EXACTLY the encoder's own
+    future embeddings (``pred_z == z_enc[1:H+1]``): under the old buggy
+    target this predictor is compared against a decode of the very same
+    array it copied, so the curve was IDENTICALLY ZERO ("perfect") no
+    matter how badly the encoder itself tracks reality. The encoder here is
+    a deliberately NONLINEAR (quadratic) distortion of the true state,
+    ``z_enc = z_true + 0.2 * z_true**2`` -- a KNOWN discrepancy an affine
+    OLS readout cannot cancel (R^2 < 1), so the fixed metric must read
+    nonzero and must match a hand-recomputed curve against ``z_true``.
+    """
+    T, d_state = 30, 2
+    t = np.arange(T + 1, dtype=np.float64)
+    z0 = 0.5 * np.sin(0.3 * t)
+    z1 = 0.5 * np.cos(0.2 * t) + 0.1 * t / T  # not collinear with z0 or the intercept
+    z_true = np.stack([z0, z1], axis=-1)[None]  # (B=1, T+1, d_state)
+
+    # the encoder's reconstruction differs from the true state by this
+    # KNOWN, deliberately nonlinear amount -- no affine readout can cancel it
+    z_enc_np_full = z_true + 0.2 * z_true**2  # (1, T+1, d_state)
+    z_enc_t = torch.as_tensor(z_enc_np_full, dtype=torch.float64).transpose(0, 1)  # (T+1,1,d_state)
+    H = 10
+
+    class _FixedEncoder:
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            return z_enc_t  # ignores x -- test double, output is fixed
+
+    class _CheatPredictor:
+        """"Predicts" perfectly by copying the encoder's OWN future
+        embeddings -- the exact scenario the bug hid: a predictor that
+        tracks the ENCODER, not physical reality."""
+
+        def rollout(self, h0: torch.Tensor, u_seq: torch.Tensor) -> torch.Tensor:
+            return z_enc_t[1 : 1 + u_seq.shape[0]]
+
+    dataset = {
+        "val": {
+            "x": np.zeros((1, T + 1, d_state)),  # unused -- _FixedEncoder ignores it
+            "u": np.zeros((1, T, 1)),
+            "z_true": z_true,
+        }
+    }
+    run = {"encoder": _FixedEncoder(), "predictor": _CheatPredictor()}
+
+    curve, fit = _run_drift_curve(run, dataset, horizon=H)
+    assert not fit.indeterminate
+    assert fit.r2 < 1.0 - 1e-9  # nonlinear distortion: an affine readout cannot fit it exactly
+
+    # independent hand-recomputation from the same fitted W: the correct
+    # target (z_true) vs. the OLD buggy target (decoded encoder self-embedding)
+    z_enc_np = z_enc_t.double().numpy()
+    pred_state = _apply_readout(z_enc_np[1 : H + 1], fit.W)  # the cheat predictor's decoded output
+    target_true = z_true.transpose(1, 0, 2)[1 : H + 1]  # dataset ground truth -- the correct target
+    target_old_buggy = _apply_readout(z_enc_np[1 : H + 1], fit.W)  # decoded encoder self-embedding
+
+    expected_curve_new = fr_drift_curve(pred_state, target_true)
+    expected_curve_old = fr_drift_curve(pred_state, target_old_buggy)
+
+    # sanity check on the bug itself: the old buggy target is EXACTLY
+    # pred_state here (identical array decoded by the identical W), so its
+    # curve is exactly zero -- this is what the old code would have called
+    # "perfect", even though the encoder demonstrably does not track reality
+    assert np.allclose(expected_curve_old, 0.0, atol=1e-12)
+
+    # the FIXED metric must not report perfection: it must follow z_true
+    assert np.all(curve > 1e-3)
+    assert np.allclose(curve, expected_curve_new, atol=1e-12, rtol=1e-10)
+
+
 # -- fig1 / fig2 --------------------------------------------------------------
 
 

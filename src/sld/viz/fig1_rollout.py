@@ -5,8 +5,14 @@ retrains). For each completed run, the drift curve
 (``sld.audit.jacobian.fr_drift_curve``) is measured in TRUE-STATE
 coordinates: a per-run linear readout ``W`` is fit by ordinary least
 squares (val split, encoder embedding -> dataset ``z_true``, with a bias
-term) and applied to BOTH the rollout prediction and the encoder's own
-target embedding before the drift is computed.
+term) and applied to the rollout prediction only; the target is the
+dataset's actual ground-truth physical state ``z_true`` (already in state
+coordinates), never a decoded reconstruction of the encoder's own
+embedding -- comparing against the latter would let a predictor that
+merely reproduces the encoder's own drift away from reality read as zero
+error (fixed 2026-08-01: the target used to be
+``_apply_readout(z_enc[1:H+1], W)``, the encoder's own embedding decoded
+through the readout, instead of ``z_true`` itself).
 
 This closes the F1 blocker from the Wave 5 adversarial review: measuring
 drift in a run's raw encoder coordinates is NOT gauge invariant -- a
@@ -331,10 +337,10 @@ class _RunProjection(NamedTuple):
 
 
 def _fit_run_readout(run: dict, dataset: dict, horizon: int) -> _RunProjection:
-    """Fit one run's readout and decode both the rollout prediction and the
-    encoder's own target embedding into true-state coordinates (M8: the
-    half of the old ``_run_drift_curve`` that can succeed independently of
-    ``fr_drift_curve``). This function only MEASURES ``ReadoutFit``;
+    """Fit one run's readout, decode the rollout prediction into true-state
+    coordinates, and pair it with the dataset's actual ground-truth state
+    (M8: the half of the old ``_run_drift_curve`` that can succeed
+    independently of ``fr_drift_curve``). This function only MEASURES ``ReadoutFit``;
     deciding what an indeterminate readout means for strict vs. lenient
     rendering, or what a downstream drift failure means, is
     ``make_fig1``'s job (B1/M8), not this one's.
@@ -362,7 +368,18 @@ def _fit_run_readout(run: dict, dataset: dict, horizon: int) -> _RunProjection:
         z_gt.reshape(-1, z_gt.shape[-1]),
     )
     pred_state = _apply_readout(pred_z.double().numpy(), fit.W)
-    target_state = _apply_readout(z_enc_np[1 : H + 1], fit.W)
+    # BUG FIX: the target is the dataset's actual ground-truth physical
+    # state (z_gt, already in state coordinates -- no readout decode
+    # needed), NOT the encoder's own embedding decoded through W. The old
+    # line here (``_apply_readout(z_enc_np[1:H+1], fit.W)``) compared the
+    # rollout prediction against what the ENCODER reconstructs of itself;
+    # a predictor that faithfully reproduces the encoder's drift away from
+    # reality would then read as zero error. z_gt[1:H+1] is time-aligned
+    # with pred_z: h0 is lifted from z_enc[0] (physical time 0), so
+    # pred_z[i] is the rollout's estimate of physical time i+1, matching
+    # z_gt[1:H+1]'s indices 1..H (the same slice the old buggy code took
+    # of z_enc_np).
+    target_state = z_gt[1 : H + 1]
     return _RunProjection(fit=fit, pred_state=pred_state, target_state=target_state)
 
 

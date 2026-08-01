@@ -198,6 +198,37 @@ Proportionnels au risque, comportementaux d'abord :
 Un résultat « trop beau » déclenche la même chasse au bug qu'un résultat trop
 mauvais.
 
+### 7.1 La règle des deux checks (adoptée 2026-08-01, non négociable)
+
+**Tout objet mathématique — cœur comme instrument de mesure — porte au minimum
+DEUX tests :**
+
+1. **Le positif.** L'objet donne la bonne réponse sur un cas où la réponse est
+   connue à la main : matrice évidente, polynôme, solution analytique, forme
+   fermée, limite exactement calculable. Pas « une valeur plausible » : LA
+   valeur, avec sa tolérance justifiée.
+2. **Le négatif.** L'objet **signale** quand ça ne marche pas. On lui présente
+   l'entrée dégénérée, la violation d'hypothèse ou le cas hors domaine qu'il est
+   censé attraper, et le test échoue si l'objet laisse passer en silence.
+
+Le second est celui qu'on oublie, et c'est celui qui compte. Un test positif
+seul prouve que l'objet répond juste quand tout va bien ; il ne prouve pas qu'il
+**agit comme on le pense**. Un audit de 2026-08-01 a trouvé une vingtaine de
+tests verts qui ne pouvaient pas échouer : un compteur de FLOPs satisfait par une
+formule en `2^t`, une borne de Lipschitz satisfaite par la constante `0.25`, un
+test d'ordre RK4 qui compare RK4 à un RK4 plus fin, un test OU dont les seuils
+acceptent une intégration d'Euler à la place du noyau exact.
+
+**Le critère d'écriture d'un test est donc : « une implémentation fausse
+échouerait-elle à ce test ? »** Si la réponse n'est pas un oui démontrable, le
+test n'est pas écrit.
+
+**Corollaire — la référence doit être indépendante.** Un objet ne se valide
+jamais contre lui-même : ni contre sa propre sortie stockée, ni contre une
+quantité calculée par le même chemin de code, ni contre une version plus fine de
+lui-même. La référence est analytique, faite à la main, ou issue d'une seconde
+dérivation.
+
 ---
 
 ## 8. Règles notebooks — le cours qui prouve le package

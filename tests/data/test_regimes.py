@@ -48,6 +48,111 @@ def test_ou_isotropy_converges():
     assert np.all(np.abs(stds - 1.0) < 0.1)
 
 
+class _UnclippedZeroSystem(DynamicalSystem):
+    """Like ``_ZeroSystem`` but with a huge ``u_max`` so the exact-kernel
+    tests below are never touched by ``_ou_action_sequence``'s +/-u_max
+    clip -- the comparison must be to the RAW recursion, not a clipped one.
+    ``sample_ic`` makes no ``rng`` calls (like ``_ZeroSystem``), so an
+    independently-seeded RNG replays the exact same Gaussian draws
+    ``_ou_action_sequence`` consumes.
+    """
+
+    state_dim = 1
+    action_dim = 3
+    u_max = 1e6
+    partial_indices = (0,)
+
+    def f(self, x, u):
+        return np.zeros(1, dtype=np.float64)
+
+    def sample_ic(self, rng, regime="default"):
+        return np.zeros(1, dtype=np.float64)
+
+
+def test_ou_exact_transition_kernel_matches_closed_form():
+    """Positive (REGLES 7.1): ``test_ou_isotropy_converges`` above only
+    checks loose distributional statistics over 200k steps -- an
+    Euler-Maruyama discretization would pass it too, since both schemes
+    share the same continuous-time stationary distribution. This test pins
+    the EXACT one-step kernel instead: theta_ou*dt = 1 (not a small-dt
+    regime, so exact vs. approximate schemes disagree by O(1), not O(dt)),
+    u0 and the step-1 noise draw are FIXED (recovered by replaying the same
+    seed through an independent RNG, since ``_UnclippedZeroSystem.sample_ic``
+    makes no rng calls -- so the two streams are provably identical), and
+    the comparison is against the module's own claimed convention
+    (docstring of ``_ou_action_sequence``): u_1 = u_0*exp(-theta*dt) +
+    sigma_stationary*sqrt(1 - exp(-2*theta*dt))*xi_1.
+    """
+    theta_ou, dt, sigma_stationary, seed = 1.0, 1.0, 1.0, 123  # theta_ou*dt = 1 exactly
+    system = _UnclippedZeroSystem()
+    regime = OURegime(theta_ou=theta_ou, sigma_stationary=sigma_stationary)
+
+    rng = np.random.default_rng(seed)
+    _, u_seq = regime.sample_episode(system, T=2, dt=dt, rng=rng)
+
+    # independent replay of the identical seed/draw order (sample_ic above
+    # makes zero rng calls, so a fresh generator's first two
+    # standard_normal(3) draws are exactly xi_0 (-> u_seq[0]) and xi_1 (->
+    # the diffusion term of u_seq[1]) that _ou_action_sequence consumed
+    rng_oracle = np.random.default_rng(seed)
+    xi0 = rng_oracle.standard_normal(system.action_dim)
+    xi1 = rng_oracle.standard_normal(system.action_dim)
+
+    decay = np.exp(-theta_ou * dt)
+    diffusion = sigma_stationary * np.sqrt(1.0 - np.exp(-2.0 * theta_ou * dt))
+    u0_expected = sigma_stationary * xi0
+    u1_expected = u0_expected * decay + diffusion * xi1
+
+    # float64 rounding over a handful of exp/sqrt/multiply-add ops on O(1)
+    # operands: ~1e-15 unit-in-last-place accumulation, so 1e-12 leaves 3
+    # orders of margin
+    max_err = np.max(np.abs(u_seq - np.stack([u0_expected, u1_expected])))
+    print(f"[ou exact kernel] max_err={max_err:.3e}")
+    assert max_err < 1e-12
+
+
+def test_ou_euler_maruyama_step_fails_exact_kernel_comparison():
+    """Negative (REGLES 7.1, "this is the whole point"): given the IDENTICAL
+    u0 and noise draw as the positive test above, an Euler-Maruyama
+    discretization of the same OU SDE (dU = -theta*U dt + sigma_em*dW,
+    sigma_em = sigma_stationary*sqrt(2*theta_ou) -- the standard SDE
+    parameterization whose CONTINUOUS-time stationary variance matches
+    sigma_stationary^2, i.e. genuinely "the same physical process, wrong
+    discretization", not an arbitrary strawman) must FAIL the exact-kernel
+    comparison at the same 1e-12 tolerance -- and must disagree with what
+    the actual ``OURegime``/``_ou_action_sequence`` code produces. This is
+    what ``test_ou_isotropy_converges`` could never catch: both schemes
+    converge to the same stationary distribution, so only a one-step,
+    fixed-noise comparison exposes the difference.
+    """
+    theta_ou, dt, sigma_stationary, seed = 1.0, 1.0, 1.0, 123
+    system = _UnclippedZeroSystem()
+    regime = OURegime(theta_ou=theta_ou, sigma_stationary=sigma_stationary)
+
+    rng = np.random.default_rng(seed)
+    _, u_seq_actual = regime.sample_episode(system, T=2, dt=dt, rng=rng)
+
+    rng_oracle = np.random.default_rng(seed)
+    xi0 = rng_oracle.standard_normal(system.action_dim)
+    xi1 = rng_oracle.standard_normal(system.action_dim)
+    u0 = sigma_stationary * xi0
+
+    decay_em = 1.0 - theta_ou * dt  # Euler-Maruyama's linear-in-dt decay
+    sigma_em = sigma_stationary * np.sqrt(2.0 * theta_ou)
+    diffusion_em = sigma_em * np.sqrt(dt)
+    u1_em = u0 * decay_em + diffusion_em * xi1
+
+    decay_exact = np.exp(-theta_ou * dt)
+    diffusion_exact = sigma_stationary * np.sqrt(1.0 - np.exp(-2.0 * theta_ou * dt))
+    u1_exact = u0 * decay_exact + diffusion_exact * xi1
+
+    max_err_em_vs_exact = np.max(np.abs(u1_em - u1_exact))
+    max_err_em_vs_actual = np.max(np.abs(u1_em - u_seq_actual[1]))
+    print(f"[ou EM vs exact] max_err={max_err_em_vs_actual:.3e}")
+    assert max_err_em_vs_exact > 1e-12  # EM disagrees with the exact-kernel oracle
+    assert max_err_em_vs_actual > 1e-12  # ...and with what the real code actually produces
+
+
 def test_anisotropic_ic_ratio():
     system = DampedPendulum()
     regime = AnisotropicRegime(ic_scales=(3.0, 0.3))
