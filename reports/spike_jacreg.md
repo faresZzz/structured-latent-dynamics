@@ -8,8 +8,8 @@ variant benchmark. Decision at the bottom.
 
 ## Experiment 1 — Unbiasedness (d-scaling verified)
 
-For probes v ~ Uniform(S^{d-1}), E[v v^T] = I/d, so E||Jv||^2 = ||J||_F^2/d:
-the estimator MUST carry the factor d — `(d/k) sum_v ||JVP(step, q, v)||^2`.
+For probes $v ~ Uniform(S^{d-1}), E[v v^T] = I/d, so E||Jv||^2 = ||J||_F^2/d$:
+the estimator MUST carry the factor d $(d/k) sum_v ||JVP(step, q, v)||^2$.
 Verified numerically on a known linear map (J = A exactly, d = 16):
 
 | quantity | value |

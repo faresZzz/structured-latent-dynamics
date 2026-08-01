@@ -36,7 +36,7 @@ from sld.data.regimes import (
 from sld.predictors.registry import FAMILIES
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training import trainer as trainer_mod
-from sld.training.trainer import RUN_COMPLETE_FILENAME, Trainer
+from sld.training.trainer import FAILURE_FILENAME, RUN_COMPLETE_FILENAME, Trainer
 
 # explicit name -> class registries (v0: DampedPendulum + the four regimes,
 # per the factorial's design brief -- an unknown name lists the known ones
@@ -618,11 +618,16 @@ def _cell_status(run_dir: Path) -> tuple[str, str]:
     the next invocation, never reported as ``complete``. A sentinel that
     exists but fails validation gets its own explicit status
     (``invalid_sentinel``), distinct from both ``complete`` and a run that
-    never got as far as writing one at all. Otherwise metrics.csv's last row
-    (if any) is read defensively; a value that fails to parse or is not
-    finite (nan/inf) is reported as status ``nonfinite`` -- explicit, never
-    silently accepted as a valid number (REGLES section 5, finite-metrics
-    law; F17c).
+    never got as far as writing one at all. A run dir carrying
+    ``failure.json`` (``FAILURE_FILENAME``, ``Trainer.fit``) is reported as
+    ``divergence`` (PROTOCOL.md section 11.7) -- a TERMINAL result about
+    that (family, regime, seed, LR), distinct from ``missing`` (a cell never
+    attempted at all): before this status existed, a diverged cell and a
+    never-run cell were both indistinguishably ``missing``. Otherwise
+    metrics.csv's last row (if any) is read defensively; a value that fails
+    to parse or is not finite (nan/inf) is reported as status ``nonfinite``
+    -- explicit, never silently accepted as a valid number (REGLES section
+    5, finite-metrics law; F17c).
     """
     sentinel = _validate_completion_sentinel(run_dir)
     if sentinel is not None:
@@ -631,6 +636,14 @@ def _cell_status(run_dir: Path) -> tuple[str, str]:
         # present but untrustworthy (M9): never "complete", but distinct
         # from a run that never wrote a sentinel at all
         return "invalid_sentinel", _final_val_loss(run_dir)
+    if (run_dir / FAILURE_FILENAME).exists():
+        # PROTOCOL.md section 11.7: a divergence is a terminal, durable
+        # result -- reported by name, never folded into "missing" (which
+        # means "this cell was never attempted"). The reported value is
+        # metrics.csv's last GOOD row (the epoch before the abort), the
+        # same value this run dir already reported before failure.json
+        # existed -- only the status label changes.
+        return "divergence", _final_val_loss(run_dir)
 
     raw = _final_val_loss(run_dir)
     if raw == "":
@@ -711,6 +724,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             if _validate_completion_sentinel(run_dir) is not None:
                 print(f"{label} -> {run_dir} (SKIP, resume)")
+                continue
+            if (run_dir / FAILURE_FILENAME).exists():
+                # PROTOCOL.md section 11.7: a divergence is TERMINAL --
+                # never re-seeded, never silently retrained on the next
+                # invocation. (11.7 makes no determinism claim: the runs are
+                # seeded, but deterministic algorithms across execution
+                # environments are not established in this repo.) Reported
+                # and moved on, exactly like the resume skip above; the
+                # overall exit code still reflects that this cell did not
+                # succeed (no CLI flag to force a retrain -- out of scope,
+                # and 11.7 deliberately restricts replay to a separate
+                # namespace).
+                any_failed = True
+                print(f"{label} -> {run_dir} (SKIP, divergence)")
                 continue
             t0 = time.perf_counter()
             try:

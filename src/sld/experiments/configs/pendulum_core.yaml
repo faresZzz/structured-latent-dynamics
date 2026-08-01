@@ -62,6 +62,11 @@ arms:
   - family: mlp
     constraint: "off"
     overrides: {mu_j: 0.0, lr: 1.0e-4}
+  # The only ON value that came from a "selected" verdict -- but from the
+  # POST-HOC REPAIR STUDY (PROTOCOL.md section 11.2), at seed 0, under an
+  # amendment that was not yet committed when it ran. Kept with its provenance
+  # rather than deleted; it is not pre-registered evidence and the runner
+  # refuses every ON cell anyway until the gauge is threaded.
   - family: mlp
     constraint: "on"
     overrides: {mu_j: 0.01, lr: 1.0e-4}
@@ -80,7 +85,12 @@ arms:
   - family: koopman_ssm
     constraint: "off"
     overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: 3.0e-4}
+  # mu_j reset to null 2026-07-31 (PROTOCOL.md section 11.5): the 0.1 that stood
+  # here was written by the selection patcher from a TERMINAL "band not reached"
+  # verdict -- the report says `mu_j: null`. The patcher now refuses to do that
+  # (selection.py::_patch_arms), but it does not rewrite a manifest it already
+  # corrupted, so this value is cleared by hand.
   - family: koopman_ssm
     constraint: "on"
-    overrides: {mu_j: 0.1, constrained: true, delta: 0.02, lr: 3.0e-4}
+    overrides: {mu_j: null, constrained: true, delta: 0.02, lr: null}
 seeds: [0, 1, 2, 3, 4]

@@ -822,8 +822,10 @@ are not silently deleted: they are the measurement that produced this amendment.
 
 This amendment **withdraws prediction P1(b)** — "at fixed constraint, the explicit
 spectral parametrization beats the generic families" — from the flagship's claim set.
-P1(a), P2, P3, P4 and P5 stand unchanged. Nothing already measured is deleted; the
-runs, the verdicts and the reasoning that led here stay published.
+It also leaves **P1(a) unresolved** and puts **P3** under a dependency audit, because both
+are stated in terms of an ON arm that no longer has an admissible definition; the exact
+status of every prediction is in 11.5. Nothing already measured is deleted; the runs, the
+verdicts and the reasoning that led here stay published.
 
 It is written and committed **before** the study that replaces it runs (section 11.6),
 as sections 5 and 10.4 require of any resolution of a terminal calibration state.
@@ -867,10 +869,10 @@ Withdrawal is the accurate verdict.
    | `min_ssm` | 1.3299 | 1.1551 | 1.0767 | 1.0644 | 1.0639 | band not reached |
    | `koopman_ssm` | 1.0326 | 1.0340 | 1.0348 | 1.0348 | 1.0347 | band not reached |
 
-   **One family, at one seed, reached the band.** The μ_J axis is alive — three
-   families produce a genuine decreasing response where 10 updates gave medians
-   identical to six digits — but aliveness of the axis is not reachability of a common
-   target.
+   **One family, at one seed, reached the band.** The μ_J axis is not inert: at seed 0,
+   `mlp` and `min_ssm` show an **observed decreasing response** where 10 updates gave
+   medians identical to six digits. That is a single-seed observation, not a replicated
+   family-level result, and it is not reachability of a common target.
 
 **Declared defect of this campaign.** The repaired sweep ran under an amendment
 (section 10) that was written but **not yet committed** at run time. It is therefore
@@ -878,47 +880,78 @@ Withdrawal is the accurate verdict.
 and published as such. Committing section 10 now does not cure this retroactively, and
 this amendment does not pretend otherwise.
 
-### 11.3 Why we think it did not work
+### 11.3 What the calibration failure exposed
 
-Ordered by strength of evidence, with the evidential status stated.
+This section is deliberately **not** titled "why it did not work". Only item 2 was ever a
+candidate numeric mechanism, and it has since been refuted. What follows is a list of what
+the failure exposed, each with its evidential status stated.
 
-1. **The band asked four non-comparable measurements to agree on one number**
-   (ESTABLISHED). Each family's metric is normalized by scales estimated on **its own**
-   OFF representation. Section 5's honesty declaration (c) called this "the same
-   measured contraction target"; that was an **operational convention, never
-   established physical comparability**. A common numeric target across four
-   heterogeneous state spaces was not a well-posed goal to begin with.
-2. **Estimator/measurement gap, able to invert the response** (CONSISTENT, NOT PROVEN).
-   Training minimizes a normalized Frobenius-squared estimate; acceptance reads the top
-   singular value. Reducing the Frobenius norm can **redistribute** the spectrum
-   upward in `sigma_1` — derived counterexample: singular values (1,1) → (1.1, 0)
-   reduce `||.||_F^2` from 2 to 1.21 while raising `sigma_1` from 1 to 1.1. Consistent
-   with `koopman_ssm`: its logged training penalty decreases (7.8923 → 7.8842) while
-   its audited `sigma_1` rises. Not proof — the training statistic is a batch mean and
-   the audited one a validation median, so the distributions are not matched.
-   Section 5's honesty declaration (a) already conceded this gap; what was never
-   declared is that the gap can **reverse the sign of the response**.
-3. **For the transformer, the band constrains a different object** (STRUCTURAL). The
-   full augmented Jacobian has `sigma_max >= 1` by construction — the KV cache's
-   identity carry-forward rows. Section 5 excludes those rows, so the transformer's
-   measured quantity is a **new-write sensitivity**, not contraction of the complete
-   augmented state. Putting the same numeric band on it is not the same constraint.
-4. **For `koopman_ssm`, ON is a bundled intervention** (STRUCTURAL). Only this family
-   changes two things at once between OFF and ON: `mu_j > 0` **and** the parametrization
-   (`alpha` free → `alpha = -exp(nu)`). Any ON/OFF contrast for this family is a
-   package effect. Deliberate confounding is still confounding.
+1. **DESIGN LIMITATION — cross-family physical comparability was never validated.** What
+   is established: each family is measured against its own OFF-derived reference; the
+   declared whole-experiment diagonal invariance does hold; physical equivalence across
+   those four references was never checked. What is **not** established is that the four
+   measurements are intrinsically non-comparable, nor that normalization *caused* the band
+   failures — that would need an external common-space validation. Section 5's honesty
+   declaration (c) called this "the same measured contraction target"; that was an
+   operational convention presented as if it were comparability.
 
-**Explicitly refuted, so it is not re-dug:** the hypothesis that freezing `S` on the
-OFF arm breaks the declared invariance, or mechanically drives the margin upward. The
-algebra is closed — under `q' = D q` the normalized Jacobian is conjugated by sign
-matrices, so singular values are preserved — and a fixed `S` carries **no monotone
-sign**, hence cannot force a direction. What survives of that objection is item 1
-above: comparability, not invariance.
+   **Measured consequence** (offline probe, 2026-07-31, `_private/research/
+   gauge-endpoint-unblock/probe_ab_report.json`, step-0 self-check reproducing the stored
+   medians at absolute error 0.0): re-estimating the gauge per cell instead of freezing it
+   flips a pre-registered acceptance criterion. `min_ssm` under the frozen gauge is
+   monotone decreasing (1.3299 → 1.0639, criterion 1 satisfied); under its own per-cell
+   gauge it is **non-monotone** (1.6209 → 2.0692 → 1.6653 → 1.5946 → 1.6096) and at a
+   different level entirely. A verdict that moves with a normalization choice declared to
+   be a convention is the concrete cost of the unvalidated construct.
+2. **REFUTED — spectrum redistribution.** The general possibility is DERIVED: training
+   minimizes a normalized Frobenius-squared estimate while acceptance reads the top
+   singular value, and singular values (1,1) → (1.1, 0) reduce `||.||_F^2` from 2 to 1.21
+   while raising `sigma_1` from 1 to 1.1. The `koopman_ssm`-specific account is **refuted
+   by matched measurement**: on identical Jacobians, states, normalization and
+   aggregation, its Frobenius norm **rises** with `sigma_max` (2.8097 → 2.8154) and its
+   stable rank is flat (7.4028 → 7.4031). No redistribution occurs; the whole operator
+   grows slightly. For `mlp` and `min_ssm` both norms fall together.
+3. **ESTABLISHED construct limitation — the transformer's audited object.** The full
+   augmented Jacobian has `sigma_max >= 1` by construction (the KV cache's identity
+   carry-forward rows). Section 5 excludes those rows, so the transformer's measured
+   quantity is a **new-write sensitivity**, not contraction of the complete augmented
+   state. This is a limitation of the construct, **not** an explanation of the
+   transformer's numeric non-response.
+4. **ESTABLISHED confounding — `koopman_ssm`'s ON arm.** Only this family changes two
+   things at once between OFF and ON: `mu_j > 0` **and** the parametrization (`alpha` free
+   → `alpha = -exp(nu)`). Any ON/OFF contrast for it is a package effect. This is
+   confounding, **not** an explanation of the positive-dose curve.
+
+**What the measurement leaves standing, unexplained:** for `koopman_ssm` the penalty is
+**inert**. Four decades of `mu_j` move every norm of its Jacobian by roughly 0.2 %, upward,
+under both the frozen and the per-cell gauge, while the same penalty moves `mlp` from
+1.0301 to 0.8755 and `min_ssm` from 1.3299 to 1.0639. A candidate — untested — is the
+gradient-ratio measurement taken earlier for another purpose: `||grad P|| / ||grad L_pred||`
+at init is 1.4 for `koopman_ssm` against 16 (`mlp`), 15 (`transformer`) and 314
+(`min_ssm`). Whether low penalty leverage explains the inertia is an open question, not a
+claim.
+
+**Explicitly refuted, so it is not re-dug:** the hypothesis that freezing `S` on the OFF
+arm breaks the declared invariance, or mechanically drives the margin upward. Two
+independent grounds. Algebraic: under `q' = D q` the normalized Jacobian is conjugated by
+sign matrices, so singular values are preserved, and a fixed `S` carries no monotone sign.
+Measured: with each cell's own gauge `koopman_ssm`'s curve is unchanged to three decimals
+(1.0327 → 1.0350 → 1.0347), no band verdict changes, and the leading singular direction is
+**not** aligned with the coordinates where `S_cell / S_OFF` differs most (median
+participation <= 0.0034 against a 0.25 uniform baseline). Note the asymmetry with item 1:
+the gauge choice does not explain `koopman_ssm`, and it does move `min_ssm`'s verdict.
+Those are compatible and both are measured.
+
+**Declared exclusion:** the transformer was excluded from this probe on cost grounds (its
+dense growing-cache Jacobian audit did not finish). Its numbers are therefore unexamined,
+and that is a declared gap, not a silent omission.
 
 ### 11.4 What would make P1(b) pass, and why none of it is done here
 
-- **(i) A dual/Lagrangian controller on the audited quantity.** The only candidate that
-  could genuinely work. It must control the **median of `sigma_max`** — what acceptance
+- **(i) A dual/Lagrangian controller on the audited quantity.** One candidate, conditional
+  on the target being feasible at all — a controller cannot make an infeasible target
+  feasible, and a direct spectral objective or an architectural change could alter
+  feasibility instead. It must control the **median of `sigma_max`** — what acceptance
   reads — not the mean Frobenius norm the current penalty minimizes; a naive two-sided
   hinge is already refuted (for stochastic `X`,
   `grad E[(L-X)+ + (X-U)+] = E[(-1{X<L} + 1{X>U}) grad X]`: both tails fire even when
@@ -949,50 +982,146 @@ the phenomenon.
 
 ### 11.5 What survives, and what is reclassified
 
-**Survives.**
-- **P1(a)** as a within-family treatment contrast, with the declaration that for
-  `koopman_ssm` it measures an ON *package* (penalty + parametrization), not the
-  penalty alone.
-- **P2, P3, P4, P5** — untouched by this amendment.
-- **The OFF grid**: 4 families × 2 regimes × 5 seeds at the amended 200-update budget,
-  a complete and valid measurement of the unconstrained baseline. One cell diverged
-  (`action_conditioned` / `min_ssm` / seed 4, non-finite training loss at update 46);
-  it is reported as a divergence, never silently dropped or re-seeded — see 11.7.
+**Status of every prediction** (corrected 2026-07-31 after review round 2 — an earlier
+draft of this section wrongly asserted that P1(a) "stands unchanged"):
+
+- **P1(b)** — withdrawn as unidentified.
+- **P1(a)** — **UNRESOLVED**, not surviving. As published it is an ON-versus-OFF
+  contrast, and no admissible ON cell exists: the calibration that was to define it
+  terminated for three families, and section 5 forbids resolving a terminal state inside
+  the procedure. Section 11.6 proposes a different, multi-dose estimand but does not yet
+  supply a falsification rule for it. Until that rule is written and committed, P1(a) is
+  open. For `koopman_ssm` any future version must additionally declare that it measures a
+  package, not the penalty alone.
+- **P3** — **DEPENDENCY AUDIT REQUIRED.** It is stated in terms of "the constrained
+  predictor", which is the same undefined ON arm. It cannot be assumed untouched.
+- **P2, P4, P5** — retained **only** insofar as their executable arms do not depend on the
+  unresolved ON selection. Each must be checked before it is run, not assumed.
 
 **Reclassified.**
 - The repaired μ_J sweep → **post-hoc repair study** (11.2), published with its trace.
+- **The OFF grid → post-hoc diagnostic, pending re-run.** An earlier draft called it "a
+  complete and valid measurement"; that was false on the repo's own rule. The 40 cells ran
+  at 17:14 on 2026-07-31; the amendment authorizing their 200-update budget was committed
+  at 18:48 the same day. Section 11.2 states that later commitment does not retroactively
+  pre-register a run, and `REGLES.md` requires a post-tag budget change to be committed
+  before execution. The rule applies to this repo's own convenience too: the artifacts are
+  preserved as diagnostics and the grid is re-run against the committed amendment **in a
+  separate result root**, so sentinels cannot resume the pre-amendment artifacts.
+  Seventeen minutes of compute is not a reason to carry a provenance defect.
+  One cell failed (`action_conditioned` / `min_ssm` / seed 4, non-finite training loss at
+  update 46) — see 11.7, and note that one cell out of 40 supports the cell-level fact and
+  nothing more.
 - The four core ON runs already on disk (`mlp` μ_J = 0.01 and `koopman_ssm`
   μ_J = 0.1, seed 0, both regimes) → **protocol-violation traces, never core
   evidence**. Two independent reasons: they were trained against the **raw** penalty
   because the factorial runner never supplied the frozen gauge, and `koopman_ssm`'s
   μ_J = 0.1 was written into the manifest from a **terminal "band not reached"**
   verdict by a patcher that ignored the verdict. Both defects are fixed in the same
-  commit as this amendment. The runs are kept and marked, not deleted.
+  commit as this amendment; the corrupted manifest value itself is cleared by hand,
+  because the repaired patcher refuses to write but does not rewrite what it already
+  wrote. The runs are kept and marked, not deleted.
 
 ### 11.6 What replaces P1(b) — a dose-response study (declared, not yet run)
 
-A **secondary** study, committed before it runs, and explicitly **not** a rescue of
-P1(b):
+A **secondary** study, committed before it runs. It is **not** a rescue of P1(b) and
+cannot be one: without a common estimand there is nothing for a cross-family comparison
+to be *of*. What it can legitimately deliver is exactly three things — a **within-family
+dose response**, a **sensitivity of every conclusion to the normalization choice**, and
+**evidence that families respond differently to the same intervention**.
 
-- fresh seeds (5-9), disjoint from the calibration seeds;
-- `mu_j = 0` plus the full declared dose grid, identical LR sweep and update budget per
-  arm;
-- jointly reported outcomes per cell: achieved margin, true-state FR drift, validation
-  loss — the margin is a **measured covariate**, never a controlled quantity;
-- a `koopman_ssm` structural-only arm (`constrained: true`, `mu_j = 0`) so the
-  parametrization can be separated from the penalty;
-- the transformer's excluded-identity quantity reported under its accurate name,
-  **new-write sensitivity**, never as contraction of the complete augmented state;
-- **no cross-family superiority claim outside overlapping achieved-margin support**,
-  and no interpolation between dose points. Five doses describe a response shape; they
-  do not license a frontier comparison. The words "Pareto frontier" are not used.
+**11.6.1 Design.**
+- Fresh seeds (5-9), disjoint from the calibration seeds. **Seed is the inferential
+  unit.**
+- `mu_j = 0` plus an exact, enumerated dose grid — the doses are written into the
+  committed manifest, never "the full declared grid" resolved later.
+- **Learning rate is held FIXED within each (family, regime) across all doses.** An
+  LR re-selected per dose turns the curve into an optimized envelope over
+  `(mu_j, LR)`, not a dose response: identical tuning budgets establish fairness, they
+  do not isolate `mu_j`. If a future variant does tune per dose, it must be named
+  **"dose-conditioned optimized performance"** and report the selected LR as a second
+  treatment component.
+- Jointly reported outcomes per cell: achieved margin (both metrics, see 11.6.2),
+  true-state FR drift, validation loss. The margin is a **measured covariate**, never a
+  controlled quantity.
+- `koopman_ssm`: the arms are `(free alpha, mu_j = 0)`, `(constrained alpha, mu_j = 0)`
+  and `(constrained alpha, mu_j > 0)`. This is a **path decomposition, not a 2×2**: the
+  `(free alpha, mu_j > 0)` cell is absent, so **no structure-by-penalty interaction may be
+  estimated or claimed**. Either that fourth arm is added, or the claim stays limited —
+  declared here so the limitation cannot be forgotten at analysis time.
+- The transformer's excluded-identity quantity is reported under its accurate name,
+  **new-write sensitivity**, never as contraction of the complete augmented state.
+
+**11.6.2 Metric — decided here, asymmetrically.**
+Both metrics are reported for every cell, but they are **not interchangeable endpoints**:
+
+- **Primary: frozen `S_OFF`.** One reference per `(family, regime, seed)`, estimated from
+  that seed's own `mu_j = 0` teacher-forced validation trajectory, **before** any
+  positive-dose training, and reused unchanged for every dose in that paired chain. For
+  `koopman_ssm` the unconstrained `mu_j = 0` arm is the path reference — changing the
+  reference at the structural-only arm would destroy the common meaning along the path.
+- **Mandatory sensitivity: per-cell `S_cell`.** Offline **audit only**. It may not train,
+  may not select a dose, may not define overlap, may not gate inclusion.
+
+Pre-declared before any positive-dose run, so that nothing can be chosen after seeing
+numbers: (1) the exact doses; (2) the gauge-producing arm, split, trajectories,
+coordinates, cache positions, centering, float precision and zero-variance handling;
+(3) a **digest of each frozen gauge recorded before positive-dose execution**;
+(4) identical Jacobian samples and aggregation order on both audits; (5) seed as the
+inferential unit, and the interval/test procedure; (6) `S_cell` is audit-only as above;
+(7) both metrics appear for every cell; (8) **interpretation rule** — if the direction or
+the family ordering changes between the two gauges, the result is reported as
+**"metric-sensitive"** and no robust directional claim is made; (9) no cross-family
+superiority claim under either normalization; (10) fixed-LR dose response versus
+optimized envelope, named; (11) the exact `koopman_ssm` contrasts and the divergence
+handling.
+
+This is what stops "report both" from becoming "keep whichever looks better": only
+`S_OFF` answers the primary fixed-reference question, and `S_cell` answers a separately
+named sensitivity question. The rule that already bit — `min_ssm`'s monotonicity flips
+between the two (11.3, item 1) — is precisely the case clause (8) exists for.
+
+**11.6.3 What may never be claimed from this study.**
+**No cross-family superiority claim, under either normalization, including inside
+overlapping achieved-margin support.** Numeric overlap does not repair the construct: two
+family-specific, post-treatment quantities can share values without sharing physical
+meaning, and the transformer's quantity is explicitly a different object. No
+interpolation between dose points. The words "Pareto frontier" are not used. The single
+most likely empirical outcome is disjoint support — the observed ranges are already
+separated (transformer ~5.8-7.2 against ~0.9-1.3 for the others) — which would leave a
+useful within-family result and no frontier at all. That outcome is anticipated here, not
+discovered later.
 
 ### 11.7 Divergence policy for core cells (new)
 
 Section 5 had no policy for a core cell whose training diverges. Declared here, before
-the figures are read: a cell whose loss becomes non-finite **aborts without success
-artifacts** (already the trainer's behaviour) and is reported as a **divergence** — a
-result about that (family, regime, seed, LR), on the same footing as a "readout
-indeterminate" verdict. It is never re-seeded, never re-run at a different LR to make
-it complete, and never silently excluded from a figure: strict-mode rendering names it.
-Because it is deterministic under the run's seed, re-running reproduces it.
+the figures are read.
+
+A cell whose loss becomes non-finite **aborts without success artifacts** (already the
+trainer's behaviour) and is recorded as a **divergence** — a result about that
+(family, regime, seed, LR), on the same footing as a "readout indeterminate" verdict.
+
+**It must be durable, and that requires artifacts, not prose.** A partial run directory
+with no completion sentinel is otherwise indistinguishable from a cell that never ran,
+and a resume would silently retrain it. Therefore: a terminal `failure.json` is written
+atomically into the run directory carrying the run identity, the epoch/update index, the
+reason, the offending values and the exception class; the index classifies such a cell as
+**`divergence`**, distinct from both `ok` and `missing`; resume **preserves** it and does
+not retrain; strict-mode rendering names it.
+
+**Replay is permitted, substitution is not.** An exact diagnostic replay of the same
+configuration, in a **separate namespace**, is allowed and encouraged — an absolute
+"never re-run" rule would create an incentive not to distinguish a genuine numerical
+instability from infrastructure corruption. What is forbidden is substituting a different
+seed or a different LR into the primary result, or letting a replay overwrite the
+original artifact.
+
+**No determinism claim is made.** An earlier draft asserted that re-running reproduces the
+divergence. The runs are seeded, but deterministic algorithms across execution
+environments have not been established in this repo, so that claim is withdrawn until it
+is tested.
+
+**Inference from a divergence is bounded.** A diverged cell supports the cell-level fact
+and nothing more. One cell out of forty is not evidence that a family is generally
+unstable; reporting "39 complete, one cell failed" without inference is the correct
+treatment.

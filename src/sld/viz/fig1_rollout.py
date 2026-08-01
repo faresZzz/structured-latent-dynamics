@@ -538,7 +538,10 @@ def make_fig1(
             outside the required set is refused too, not just a missing
             one (M10) -- a stray extra run must not silently enter the
             mean. Pass ``False`` explicitly to relax this -- e.g. small
-            smoke tests that only have 1-2 seeds.
+            smoke tests that only have 1-2 seeds. A missing seed whose run
+            is a ``divergence`` (index status, PROTOCOL.md section 11.7) is
+            named by run_dir, distinct from a seed that was never run at
+            all.
     """
     apply_style()
     try:
@@ -682,15 +685,42 @@ def make_fig1(
         # exactly like a partially-filled one. All violations are
         # collected, not just the first (M5, round 3). Cells and seeds
         # come from the yaml's own declarations when present (m7).
+        #
+        # PROTOCOL.md section 11.7: a missing seed whose run diverged is
+        # NOT the same thing as a seed that was never run -- "on the same
+        # footing as a readout indeterminate verdict", so it must be named
+        # by run_dir, exactly like the indeterminate-readout violation
+        # above, not folded into the generic "missing seeds" message.
+        # Looked up from ``rows`` (the FULL, unfiltered index -- ``complete``
+        # only ever contains status=="complete" rows, so a diverged run
+        # never reaches ``cells`` above and would otherwise be silently
+        # indistinguishable from one that was never attempted at all).
+        status_by_cell_seed = {
+            (r["regime"], r["family"], r["constraint"], r["seed"]): r for r in rows
+        }
         expected_cells, required_seeds = _expected_grid(exp_yaml)
         for regime, family, constraint in expected_cells:
             entries = cells.get((regime, family, constraint), [])
             present_seeds = {seed for seed, _, _ in entries}
             missing = sorted(required_seeds - present_seeds)
-            if missing:
+            diverged = [
+                seed
+                for seed in missing
+                if status_by_cell_seed.get((regime, family, constraint, seed), {}).get("status")
+                == "divergence"
+            ]
+            for seed in diverged:
+                diverged_row = status_by_cell_seed[(regime, family, constraint, seed)]
+                strict_violations.append(
+                    f"run {diverged_row['run_dir']} "
+                    f"({family}/{constraint}/seed{seed}) is a divergence -- non-finite "
+                    "training loss (PROTOCOL.md section 11.7), never silently excluded"
+                )
+            still_missing = [seed for seed in missing if seed not in diverged]
+            if still_missing:
                 strict_violations.append(
                     f"cell (regime={regime!r}, family={family!r}, "
-                    f"constraint={constraint!r}) is missing seeds {missing} "
+                    f"constraint={constraint!r}) is missing seeds {still_missing} "
                     f"(has {sorted(present_seeds)}, requires "
                     f"{sorted(required_seeds)})"
                 )

@@ -400,6 +400,72 @@ def test_resume_skips_only_when_sentinel_present(tmp_path):
     assert rows2[0]["status"] == "complete"
 
 
+# -- PROTOCOL.md section 11.7: divergence is durable, indexed, never retried -
+
+
+def test_diverged_cell_is_indexed_as_divergence_not_missing(tmp_path, monkeypatch):
+    # a non-finite loss must be a DURABLE, distinguishable result -- not
+    # indistinguishable from a cell that was simply never run.
+    import torch
+
+    import sld.training.trainer as trainer_mod
+
+    monkeypatch.setattr(trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan")))
+
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "diverge.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    rc = main(["--config", str(config_path)])
+    assert rc == 1  # the grid did not fully succeed
+
+    index_path = results_root / "mini" / "index.csv"
+    rows = list(csv.DictReader(index_path.open()))
+    assert len(rows) == 1
+    print(f"[factorial] diverged cell status = {rows[0]['status']!r}")
+    assert rows[0]["status"] == "divergence"
+
+    run_dir = Path(rows[0]["run_dir"])
+    assert (run_dir / "failure.json").exists()
+    assert not (run_dir / "run_complete.json").exists()
+    status, _ = _cell_status(run_dir)
+    assert status == "divergence"
+
+
+def test_diverged_cell_not_retrained_on_resume(tmp_path, monkeypatch):
+    # a cell carrying failure.json is a TERMINAL result (11.7): the next
+    # sld-factorial invocation must report and move on, never silently
+    # retrain it -- variance_loss stays mocked nan for BOTH invocations, so
+    # a retrain would raise again and rewrite failure.json (new mtime).
+    import torch
+
+    import sld.training.trainer as trainer_mod
+
+    monkeypatch.setattr(trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan")))
+
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "diverge_resume.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert main(["--config", str(config_path)]) == 1
+    index_path = results_root / "mini" / "index.csv"
+    run_dir = Path(list(csv.DictReader(index_path.open()))[0]["run_dir"])
+    failure_path = run_dir / "failure.json"
+    assert failure_path.exists()
+    mtime_before = failure_path.stat().st_mtime_ns
+
+    rc2 = main(["--config", str(config_path)])
+    assert rc2 == 1  # still reported as not-fully-succeeded
+    print(f"[factorial] failure.json rewritten by resume: "
+          f"{failure_path.stat().st_mtime_ns != mtime_before}")
+    assert failure_path.stat().st_mtime_ns == mtime_before  # untouched -- not retrained
+
+    rows2 = list(csv.DictReader(index_path.open()))
+    assert rows2[0]["status"] == "divergence"
+
+
 # -- M9: resume and index share ONE sentinel validator ------------------------
 
 

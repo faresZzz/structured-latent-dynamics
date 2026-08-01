@@ -114,6 +114,20 @@ _HISTORY_DIAGNOSTIC_KEYS = ("jac_margin", "r_ctrl", "lip_pi", "vpt")
 # detection and the factorial index's "complete" status key on.
 RUN_COMPLETE_FILENAME = "run_complete.json"
 
+# the run's TERMINAL failure sentinel (PROTOCOL.md section 11.7): written
+# when -- and only when -- training aborts on a non-finite loss, so the
+# divergence is a DURABLE, distinguishable result about this (family,
+# regime, seed, LR), never indistinguishable from a cell that was simply
+# never attempted. Written the SAME way as RUN_COMPLETE_FILENAME (temp file
+# + os.replace in the same directory), so a kill mid-write never leaves a
+# half-written failure record either. Unlike RUN_COMPLETE_FILENAME, this
+# file is deliberately NOT among the stale artifacts ``fit`` clears at the
+# top of a run (see the cleanup loop below) -- it must survive a cleanup
+# pass rather than be silently wiped, because 11.7 forbids re-seeding or
+# silently retrying a divergence. ``sld-factorial`` (``factorial.py``)
+# checks for it before ever calling ``fit`` again on this identity.
+FAILURE_FILENAME = "failure.json"
+
 # metrics.csv's exact header, written by fit() below and re-checked (schema,
 # not just column presence) by the factorial validator's sentinel-binding
 # check (M3, round 4) -- one shared constant so the two can never drift apart
@@ -580,7 +594,18 @@ class Trainer:
         ``audit.json`` (placeholder ``{}``, filled by the Wave 4 audit
         offline), ``figs/`` (empty). Any nonfinite train/val loss ABORTS
         the run with ``RuntimeError`` (finite-metrics law: NaN is a bug,
-        never a result) -- no artifact is written for an aborted run.
+        never a result) -- no SUCCESS artifact (``ckpt.pt``, ``audit.json``,
+        ``run_complete.json``) is written for an aborted run, and the
+        offending metrics.csv row is never written either (metrics.csv only
+        ever carries finite values). Instead (PROTOCOL.md section 11.7),
+        ``run_dir / "failure.json"`` (``FAILURE_FILENAME``) is written,
+        atomically, BEFORE the ``RuntimeError`` is raised: it is this run's
+        own terminal, durable record of the divergence -- config_hash,
+        data_hash, the failing epoch, which of train/val loss was
+        non-finite and its value, and the exception class -- so the
+        offending values are recoverable from failure.json even though they
+        never reach metrics.csv. See ``FAILURE_FILENAME``'s module-level
+        docstring for why it survives the stale-artifact cleanup below.
 
         Contract extension (adversarial review F9): ``paths["complete"]``
         points to ``run_dir / "run_complete.json"``, the run's completion
@@ -653,6 +678,10 @@ class Trainer:
         # would otherwise raise IsADirectoryError, as would recreating figs/
         # if it had become a regular file.  Remove each stale path however it
         # exists: shutil.rmtree for a directory, unlink otherwise.
+        # FAILURE_FILENAME is DELIBERATELY absent from this list (PROTOCOL.md
+        # section 11.7): a divergence is a terminal result, not a partial
+        # artifact to be wiped and silently retried -- see FAILURE_FILENAME's
+        # docstring above.
         for stale in (
             "config.yaml",
             "metrics.csv",
@@ -716,9 +745,41 @@ class Trainer:
                 # bug, never a result -- abort loudly instead of writing a
                 # completed-looking run (adversarial review round 1)
                 if not (math.isfinite(train_loss) and math.isfinite(val_loss)):
+                    # PROTOCOL.md section 11.7: the divergence is reported,
+                    # not just raised -- failure.json is this run's terminal
+                    # sentinel, written atomically (temp file + os.replace,
+                    # same discipline as RUN_COMPLETE_FILENAME) BEFORE the
+                    # abort. The offending values are recorded HERE, as
+                    # strings ("nan"/"inf"/"-inf") rather than raw floats --
+                    # json.dumps would otherwise emit the bare NaN/Infinity
+                    # literals Python's own json module accepts but strict
+                    # JSON does not -- since this row is never written to
+                    # metrics.csv (metrics.csv only ever carries finite
+                    # values; this is the recovery path for it, chosen over
+                    # writing the nonfinite row into metrics.csv itself).
+                    nonfinite_fields = [
+                        name
+                        for name, value in (("train_loss", train_loss), ("val_loss", val_loss))
+                        if not math.isfinite(value)
+                    ]
+                    failure = {
+                        "config_hash": self.config_hash,
+                        "data_hash": self.data_hash,
+                        "epoch": epoch,
+                        "reason": "non-finite loss",
+                        "nonfinite_fields": nonfinite_fields,
+                        "train_loss": str(train_loss),
+                        "val_loss": str(val_loss),
+                        "exception_class": "RuntimeError",
+                    }
+                    failure_path = self.run_dir / FAILURE_FILENAME
+                    failure_tmp = failure_path.with_name(failure_path.name + ".tmp")
+                    failure_tmp.write_text(json.dumps(failure))
+                    os.replace(failure_tmp, failure_path)
                     raise RuntimeError(
                         f"nonfinite loss at epoch {epoch}: train={train_loss}, "
-                        f"val={val_loss} -- run aborted, artifacts incomplete"
+                        f"val={val_loss} -- run aborted, artifacts incomplete "
+                        f"(terminal failure recorded at {failure_path})"
                     )
                 history["epoch"].append(epoch)
                 history["train_loss"].append(train_loss)

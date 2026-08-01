@@ -278,6 +278,42 @@ def test_nonfinite_loss_aborts_run(tmp_path, monkeypatch):
     print("[trainer] nonfinite loss aborted the run")
 
 
+def test_nonfinite_loss_writes_failure_json(tmp_path, monkeypatch):
+    # PROTOCOL.md section 11.7: the divergence must be a DURABLE, terminal
+    # result -- failure.json is the record of it, written before the abort,
+    # never a completion sentinel alongside it.
+    import json
+
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    monkeypatch.setattr(trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan")))
+    data = _small_dataset(n_episodes=6, T=10)
+    trainer = Trainer(_mlp_config(tmp_path, exp_name="trainer_test_failure_json"))
+    with pytest.raises(RuntimeError, match="nonfinite"):
+        trainer.fit(data)
+
+    run_dir = trainer.run_dir
+    failure_path = run_dir / trainer_mod.FAILURE_FILENAME
+    assert failure_path.exists()
+    failure = json.loads(failure_path.read_text())
+    print(f"[trainer] failure.json = {failure}")
+    assert failure["config_hash"] == trainer.config_hash
+    assert failure["data_hash"] == trainer.data_hash
+    assert failure["epoch"] == 0  # variance_loss is nan from the first epoch
+    assert failure["reason"] == "non-finite loss"
+    assert failure["exception_class"] == "RuntimeError"
+    assert failure["nonfinite_fields"]  # at least train_loss is flagged
+    assert failure["train_loss"] == "nan"
+    # the failure is recoverable without a nonfinite row surviving anywhere
+    # else: no completion sentinel, and no row for this epoch in metrics.csv
+    assert not (run_dir / trainer_mod.RUN_COMPLETE_FILENAME).exists()
+    with open(run_dir / "metrics.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows == []  # epoch 0 never got written: it's the epoch that diverged
+
+
 def test_budget_owned_and_selective_only_keys_rejected(tmp_path):
     import pytest
 
