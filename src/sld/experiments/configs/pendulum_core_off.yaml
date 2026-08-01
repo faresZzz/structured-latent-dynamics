@@ -15,19 +15,40 @@
 # ON arms here is the only change.
 #
 # 2 datasets x 4 arms (4 families, constraint=off) x 5 seeds = 40 runs.
+#
+# `results_root: results_amended` (PROTOCOL.md section 11.5, review round 2
+# BLOCKER 1): the first execution of these 40 cells ran at 17:14 on 2026-07-31,
+# and the amendment authorizing their 200-update budget was committed at 18:48
+# the same day. Later commitment does not retroactively pre-register a run --
+# section 11.2 states that rule and it applies to this repo's own convenience.
+# The pre-amendment artifacts stay under `results/` as post-hoc diagnostics; a
+# SEPARATE root is required so resume sentinels cannot silently adopt them.
 exp_name: pendulum_core
 datasets:
   ou:
-    system: {name: DampedPendulum, params: {}}
-    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    system:
+      name: DampedPendulum
+      params: {}
+    regime:
+      name: OURegime
+      params:
+        theta_ou: 1.0
     obs: null
     n_episodes: 64
     T: 100
     dt: 0.02
     seed: 0
   action_conditioned:
-    system: {name: DampedPendulum, params: {}}
-    regime: {name: ActionConditionedRegime, params: {K_gain: [[0.8, 0.4]], sigma: 0.3}}
+    system:
+      name: DampedPendulum
+      params: {}
+    regime:
+      name: ActionConditionedRegime
+      params:
+        K_gain:
+        - - 0.8
+          - 0.4
+        sigma: 0.3
     obs: null
     n_episodes: 64
     T: 100
@@ -40,17 +61,33 @@ base:
   target_params: 10000
   epochs: 200
   step_subsample: 1.0
+  results_root: results_amended
 arms:
-  - family: mlp
-    constraint: "off"
-    overrides: {mu_j: 0.0, lr: 1.0e-4}
-  - family: transformer
-    constraint: "off"
-    overrides: {mu_j: 0.0, lr: 1.0e-4}
-  - family: min_ssm
-    constraint: "off"
-    overrides: {mu_j: 0.0, lr: 3.0e-4}
-  - family: koopman_ssm
-    constraint: "off"
-    overrides: {mu_j: 0.0, constrained: false, delta: 0.02, lr: 3.0e-4}
-seeds: [0, 1, 2, 3, 4]
+- family: mlp
+  constraint: 'off'
+  overrides:
+    mu_j: 0.0
+    lr: 0.0001
+- family: transformer
+  constraint: 'off'
+  overrides:
+    mu_j: 0.0
+    lr: 0.0001
+- family: min_ssm
+  constraint: 'off'
+  overrides:
+    mu_j: 0.0
+    lr: 0.0003
+- family: koopman_ssm
+  constraint: 'off'
+  overrides:
+    mu_j: 0.0
+    constrained: false
+    delta: 0.02
+    lr: 0.0003
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4

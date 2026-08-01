@@ -81,6 +81,7 @@ GEMINI.md
 
 # --- Run artifacts (never committed; assets/ holds the final figures) ---
 /results/
+/results_amended/
 *.npz
 
 # --- Private planning / candidacy context (never publish) ---
