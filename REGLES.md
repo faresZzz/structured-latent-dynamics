@@ -229,6 +229,40 @@ quantité calculée par le même chemin de code, ni contre une version plus fine
 lui-même. La référence est analytique, faite à la main, ou issue d'une seconde
 dérivation.
 
+### 7.2 Un agent ne cherche pas à retrouver le chiffre du superviseur (adoptée 2026-08-03)
+
+Quand un packet de tâche contient une valeur déjà mesurée par le superviseur,
+**cette valeur n'est pas la cible**. La cible est la mathématique juste.
+
+- L'agent **calcule la quantité correctement, sans regarder le chiffre attendu**,
+  puis compare.
+- Si son résultat **contredit** celui du superviseur, il **s'arrête et le remonte
+  honnêtement, avec ses nombres**. Il ne cherche pas un montage qui reproduise le
+  chiffre attendu, il ne resserre pas un domaine, il ne choisit pas la dimension,
+  la seed ou les paramètres qui font tomber juste.
+- Le superviseur **revérifie alors lui-même, directement**, et tranche. Un
+  désaccord est une information ; c'est souvent le superviseur qui a tort.
+
+**Pourquoi cette règle existe** (2026-08-03, item A3). Le domaine intérieur du
+mixing avait été déclaré `|arg| ≤ 7` d'après une mesure `tanh`/`atanh`
+**scalaire** — donc en dimension 1, où `SO(1) = {1}` et où il n'existe aucune
+rotation. Un agent chargé d'écrire le test de bord a mesuré que la borne tombe
+dès `dim ≥ 2` (`3.06e-10` à dim 2, `6.65e-10` à dim 4, contre une tolérance de
+`1e-10`) : l'erreur vaut l'epsilon machine du passage aller **amplifié par**
+`d(atanh)/dw = cosh²(arg) = 3.0e5`. Il l'a signalé — et **en même temps** il a
+posé son test à `dim = 1, a = 1, b = 0`, ce qui reproduisait exactement le
+chiffre du superviseur au lieu de le contredire. Le test aurait été vert, la
+déclaration serait restée fausse, et le seul cas testé aurait été celui qui
+n'existe nulle part dans le pipeline. Domaine recalibré à `≤ 5` après
+revérification directe.
+
+**Ce que ça implique dans les deux sens** : un agent qui retrouve *exactement*
+le chiffre du superviseur ne l'a pas confirmé — il a pu reproduire le même
+montage biaisé. Une reproduction exacte doit donc être **suspectée**, pas
+célébrée : le superviseur vérifie que l'agent a bien mesuré le même **objet**, et
+pas seulement obtenu le même **nombre**. Un chiffre faux validé par accord est
+pire qu'un chiffre absent : il ferme la question.
+
 ---
 
 ## 8. Règles notebooks — le cours qui prouve le package
