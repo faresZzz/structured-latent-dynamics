@@ -8,10 +8,13 @@ import time
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from sld.predictors.base import PredictorState
 from sld.predictors.min_ssm import SelectiveSSMPredictor
 from sld.systems.damped_pendulum import DampedPendulum
+
+GAMMA_OVERFIT = 10.0  # declared before measuring any model, never revised (REGLES 7.2)
 
 D_H, D_U, D_STATE = 2, 1, 8
 
@@ -168,6 +171,7 @@ def test_overfit_one_pendulum_trajectory():
     h_true, u = _pendulum_trajectory(seed=0)
     model = _make_model(10, d_h=D_H, d_u=D_U, d_state=D_STATE)
 
+    _PERSISTENCE = torch.mean((h_true[:-1] - h_true[1:]) ** 2).item()
     opt = torch.optim.Adam(model.parameters(), lr=5e-3)
     start = time.time()
     loss = torch.tensor(float("inf"))
@@ -177,13 +181,42 @@ def test_overfit_one_pendulum_trajectory():
         loss = torch.nn.functional.mse_loss(preds, h_true[1:])
         loss.backward()
         opt.step()
-        if loss.item() < 1e-3:
+        # early stop keyed to the PERSISTENCE-RELATIVE gate, not to the old
+        # absolute 1e-3 -- that bar is only 1.77x above persistence on this
+        # trajectory, so breaking on it stopped training at a bar we have since
+        # declared vacuous. The iteration budget (300) is UNCHANGED; only the
+        # short-circuit moved. GAMMA_OVERFIT itself is not touched (REGLES 7.2).
+        if loss.item() < _PERSISTENCE / GAMMA_OVERFIT:
             break
     elapsed = time.time() - start
 
     print(f"[overfit] final_loss={loss.item():.3e} elapsed={elapsed:.1f}s")
     assert elapsed < 60.0
     assert loss.item() < 1e-3
+
+    # --- persistence-relative gate (REGLES 7.1, added 2026-08-03) ------------
+    # The absolute ``loss < 1e-3`` above is unmoored: it says nothing about
+    # whether the model beat doing NOTHING on this trajectory. Measured on the
+    # four families' own trajectories, persistence (h_hat_{t+1} = h_t) scores
+    # mlp 1.8692e-02, transformer 3.8355e-02, min_ssm 1.7737e-03 and
+    # koopman_ssm 9.0675e-04 -- so on koopman_ssm the 1e-3 gate is satisfied by
+    # persistence itself (the test was literally vacuous there), and on min_ssm
+    # it clears it by only 1.77x. GAMMA_OVERFIT is declared here, BEFORE any
+    # model number was looked at, and is not revised afterwards.
+    persistence = torch.mean((h_true[:-1] - h_true[1:]) ** 2).item()
+    factor = persistence / loss.item()
+    print(f"[overfit] persistence MSE = {persistence:.4e} | factor = {factor:.1f}x")
+    assert loss.item() < persistence / GAMMA_OVERFIT
+
+    with torch.no_grad():
+        # h_true is already (T+1, B=1, d_h) and u already (T, B, d_u) here
+        fr = model.rollout(h_true[0], u[:5])
+    fr_mse = torch.mean((fr - h_true[1:6]) ** 2).item()
+    pers_fr = torch.mean((h_true[0].unsqueeze(0) - h_true[1:6]) ** 2).item()
+    print(f"[overfit] free-rollout H=5 MSE = {fr_mse:.4e} (persistence {pers_fr:.4e})")
+    assert torch.isfinite(fr).all()
+
+    assert not (persistence < persistence / GAMMA_OVERFIT)
 
 
 def test_bounds_validated_and_default_init_finite_rollout():
@@ -231,3 +264,110 @@ def test_bounds_must_survive_default_dtype():
     # that underflows once cast is rejected at construction
     with pytest.raises(ValueError, match="dtype"):
         SelectiveSSMPredictor(d_h=2, d_u=1, d_state=4, delta_min=1e-60, delta_max=1e-40)
+
+
+# ---------------------------------------------------------------------------
+# W_out != 0 (REGLES 7.1): W_out is zero-initialized at construction
+# (min_ssm.py:104-105), so h_next == h exactly regardless of m -- every
+# contract test run on an untrained model (test_contract.py, and
+# test_bounds_validated_and_default_init_finite_rollout above) is VACUOUS on
+# whether the recurrent state m actually reaches the output. Confirmed at
+# the call site by re-reading min_ssm.py:145-155 before writing these tests
+# (R4): step() computes m_next = _frozen_recurrence(...) unconditionally,
+# then h_next = h + W_out(m_next) -- so m always evolves, but only the
+# residual readout gate decides whether it is VISIBLE in h.
+# ---------------------------------------------------------------------------
+def test_min_ssm_nonzero_w_out_output_depends_on_recurrent_state():
+    """Set ``W_out`` to a deterministic, non-zero value and show that two
+    different recurrent states ``m`` -- standing in for two different input
+    histories that produced the SAME current ``h`` -- now give DIFFERENT
+    next ``h``: the recurrent state genuinely reaches the output once
+    ``W_out != 0``.
+    """
+    model = _make_model(20, d_h=D_H, d_u=D_U, d_state=D_STATE)
+    with torch.no_grad():
+        w = 0.1 * (torch.arange(D_H * D_STATE, dtype=torch.float32) + 1).reshape(D_H, D_STATE)
+        model.W_out.weight.copy_(w)
+        model.W_out.bias.copy_(torch.tensor([0.05, -0.05]))
+    assert model.W_out.weight.abs().min().item() > 0.0  # genuinely nonzero, no zero entry
+
+    gen = torch.Generator().manual_seed(21)
+    h = torch.randn(1, D_H, generator=gen)
+    u = torch.randn(1, D_U, generator=gen)
+    m_a = torch.randn(1, D_STATE, generator=gen)  # "history A"
+    m_b = torch.randn(1, D_STATE, generator=gen)  # "history B" -- same h, different memory
+
+    h_next_a, _ = model.step(h, u, PredictorState(m=m_a))
+    h_next_b, _ = model.step(h, u, PredictorState(m=m_b))
+    diff = (h_next_a - h_next_b).abs().max().item()
+    print(f"[nonzero W_out] |h_next(m_a) - h_next(m_b)| = {diff:.3e}")
+    assert diff > 1e-2  # clearly resolvable, not a rounding artifact
+
+
+def test_min_ssm_zero_w_out_output_independent_of_recurrent_state():
+    """Negative counterpart, same (h, u, m_a, m_b) draws as above: with
+    ``W_out`` at its DEFAULT zero init, the two different histories become
+    INDISTINGUISHABLE -- ``h_next`` collapses to exactly ``h`` regardless of
+    ``m``, proving the old contract really was vacuous here (not merely "a
+    small effect").
+    """
+    model = _make_model(20, d_h=D_H, d_u=D_U, d_state=D_STATE)  # default zero W_out, untouched
+
+    gen = torch.Generator().manual_seed(21)  # identical draws to the positive test
+    h = torch.randn(1, D_H, generator=gen)
+    u = torch.randn(1, D_U, generator=gen)
+    m_a = torch.randn(1, D_STATE, generator=gen)
+    m_b = torch.randn(1, D_STATE, generator=gen)
+
+    h_next_a, _ = model.step(h, u, PredictorState(m=m_a))
+    h_next_b, _ = model.step(h, u, PredictorState(m=m_b))
+    diff = (h_next_a - h_next_b).abs().max().item()
+    print(f"[zero W_out] |h_next(m_a) - h_next(m_b)| = {diff:.3e}")
+    assert diff == 0.0
+    torch.testing.assert_close(h_next_a, h, atol=0.0, rtol=0.0)
+
+
+def test_min_ssm_nonzero_w_out_recurrence_matches_hand_rolled_loop():
+    """With ``W_out`` deterministic and non-zero, hand-recompute the SSM
+    recursion from the equations DOCUMENTED in min_ssm.py (the
+    ``_gate_params``/``_frozen_recurrence``/``step`` docstrings): an
+    INDEPENDENT loop written here, calling only the real ``nn.Linear``
+    sub-modules (``W_c``, ``W_delta``, ``W_b``, ``W_in``, ``W_out``,
+    ``a_log``) directly -- never ``model.step``/``model._frozen_recurrence``
+    -- then compared to the real ``rollout``. A wiring bug in ``step`` (wrong
+    operand order, a missing clamp, reading ``h`` instead of ``m`` in the
+    recurrence, forgetting the residual, ...) would make this independently
+    re-derived loop disagree with ``rollout``.
+    """
+    model = _make_model(22, d_h=D_H, d_u=D_U, d_state=D_STATE).double()
+    with torch.no_grad():
+        w = 0.1 * (torch.arange(D_H * D_STATE, dtype=torch.float64) + 1).reshape(D_H, D_STATE)
+        model.W_out.weight.copy_(w)
+        model.W_out.bias.copy_(torch.tensor([0.05, -0.05], dtype=torch.float64))
+
+    Batch, T = 3, 8
+    gen = torch.Generator().manual_seed(23)
+    h0 = torch.randn(Batch, D_H, generator=gen, dtype=torch.float64)
+    u_seq = torch.randn(T, Batch, D_U, generator=gen, dtype=torch.float64)
+
+    h_t, m_t = h0.clone(), torch.zeros(Batch, D_STATE, dtype=torch.float64)
+    manual = []
+    for t in range(T):
+        u_t = u_seq[t]
+        c_t = model.W_c(torch.cat([h_t, m_t], dim=-1))
+        delta_t = torch.clamp(F.softplus(model.W_delta(c_t)), model.delta_min, model.delta_max)
+        a_cont = -torch.exp(model.a_log)
+        A_bar_t = torch.exp(delta_t * a_cont)
+        b_t = model.W_b(c_t)
+        B_bar_t = delta_t * b_t
+        v_t = model.W_in(torch.cat([h_t, u_t], dim=-1))
+        m_next = A_bar_t * m_t + B_bar_t * v_t
+        h_next = h_t + model.W_out(m_next)
+        manual.append(h_next)
+        h_t, m_t = h_next, m_next
+    manual_out = torch.stack(manual, dim=0)
+
+    rollout_out = model.rollout(h0, u_seq)
+    err = (manual_out - rollout_out).abs().max().item()
+    print(f"[hand-rolled recurrence] max abs diff vs rollout = {err:.3e} over T={T} steps")
+    torch.testing.assert_close(manual_out, rollout_out, atol=0.0, rtol=0.0)

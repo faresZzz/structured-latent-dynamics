@@ -126,6 +126,53 @@ def test_exact_gramian_symmetric_pd_and_monotone():
     assert min_eig_growth > -1e-12
 
 
+def test_force_matches_hand_built_physics_with_nonunit_parameters():
+    """Positive (REGLES 7.1 + R2): f(x, u) reconstructed directly from the
+    mass/spring/damper equations of motion in the class docstring --
+        m1*q1_ddot = -k1*q1 - k_c*(q1-q2) - c*q1_dot + u
+        m2*q2_ddot = -k2*q2 - k_c*(q2-q1) - c*q2_dot
+    -- NEVER via system.A_mat. Using A_mat as the reference would validate
+    the object against itself (the exact defect already fixed for the
+    eigenvalues by test_analytic_modes_match_hand_built_state_space above,
+    which this test mirrors for the force instead of the modes). m1 != m2,
+    k1 != k2, k_c != 0, c != 0 are all non-unit and asymmetric, and the
+    state and action are all nonzero.
+
+    Hand arithmetic (independent of CoupledOscillators.f and .A_mat):
+        m1=1.5, m2=2.5, k1=0.8, k2=1.3, k_c=0.6, c=0.25
+        x = (q1, q2, q1_dot, q2_dot) = (0.3, -0.2, 0.5, -0.4), u = 0.7
+        q1_ddot = (-k1*q1 - k_c*(q1-q2) - c*q1_dot + u) / m1
+                = (-0.24 - 0.3 - 0.125 + 0.7) / 1.5 = 0.035 / 1.5
+                = 0.02333333333333328
+        q2_ddot = (-k2*q2 - k_c*(q2-q1) - c*q2_dot) / m2
+                = (0.26 + 0.3 + 0.1) / 2.5 = 0.66 / 2.5 = 0.264
+    (values confirmed by running the arithmetic below, not hand-typed digits).
+    """
+    m1, m2, k1, k2, k_c, c = 1.5, 2.5, 0.8, 1.3, 0.6, 0.25
+    system = CoupledOscillators(m1=m1, m2=m2, k1=k1, k_c=k_c, k2=k2, c=c)
+    q1, q2, q1_dot, q2_dot = 0.3, -0.2, 0.5, -0.4
+    u = 0.7
+
+    q1_ddot_hand = (-k1 * q1 - k_c * (q1 - q2) - c * q1_dot + u) / m1
+    q2_ddot_hand = (-k2 * q2 - k_c * (q2 - q1) - c * q2_dot) / m2
+    f_hand = np.array([q1_dot, q2_dot, q1_ddot_hand, q2_ddot_hand])
+
+    x = np.array([q1, q2, q1_dot, q2_dot])
+    f_impl = system.f(x, np.array([u]))
+    max_abs_error = np.max(np.abs(f_impl - f_hand))
+    print(f"[coupled force nonunit] f_hand={f_hand}, f_impl={f_impl}, max_abs_error={max_abs_error:.3e}")
+    assert max_abs_error < 1e-12  # short float64 algebra, rounding only (R3)
+
+    # Negative: a plausible copy-paste typo -- equation 2 written from
+    # equation 1 but the divisor mass not swapped (m1 instead of m2),
+    # invisible whenever m1 == m2 but a real error here since m1 != m2.
+    q2_ddot_wrong = (-k2 * q2 - k_c * (q2 - q1) - c * q2_dot) / m1
+    f_wrong = np.array([q1_dot, q2_dot, q1_ddot_hand, q2_ddot_wrong])
+    wrong_error = np.max(np.abs(f_wrong - f_hand))
+    print(f"[coupled force nonunit negative] wrong_error={wrong_error:.3e}")
+    assert wrong_error > 1e-12  # same oracle, same tolerance: must fail
+
+
 def test_rk4_matches_exact_linear_propagation():
     system = CoupledOscillators()
     x0 = np.array([0.5, -0.3, 0.1, 0.2])

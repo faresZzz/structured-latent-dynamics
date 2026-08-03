@@ -5,6 +5,7 @@ import numpy as np
 from sld.data.generate import build_dataset
 from sld.data.mixing import SmoothMixing
 from sld.data.regimes import OURegime
+from sld.systems.base import DynamicalSystem
 from sld.systems.damped_pendulum import DampedPendulum
 
 
@@ -34,6 +35,94 @@ def test_splits_disjoint_and_exhaustive():
     assert train_set | val_set | test_set == set(range(n_episodes))
     for name in ("train", "val", "test"):
         assert result[name]["x"].shape[0] == len(splits[name])
+
+
+class _IdentifiableEpisodeSystem(DynamicalSystem):
+    """Deterministic stub for identity-tracing build_dataset's output arrays.
+
+    f == 0 keeps every trajectory constant for its entire length; sample_ic
+    returns a fresh, strictly increasing integer id per call (encoded in
+    x0[0]) via an internal counter. build_dataset calls regime.sample_episode
+    -> system.sample_ic exactly once per episode, in the plain loop order
+    ``for ep in range(n_episodes)`` -- BEFORE the train/val/test shuffle -- so
+    the trajectory recorded for the k-th generated episode is constant and
+    equal to k. This lets a test read episode identity directly out of
+    x/z_true instead of trusting meta["splits"].
+    """
+
+    state_dim = 1
+    action_dim = 1
+    u_max = 1.0
+    partial_indices = (0,)
+
+    def __init__(self):
+        self._next_id = 0
+
+    def f(self, x, u):
+        return np.zeros(1, dtype=np.float64)
+
+    def sample_ic(self, rng, regime="default"):
+        x0 = np.array([self._next_id], dtype=np.float64)
+        self._next_id += 1
+        return x0
+
+
+def test_splits_contain_the_declared_episodes():
+    """Positive (REGLES 7.1): test_splits_disjoint_and_exhaustive above only
+    checks that the INDEX SETS declared in meta["splits"] are disjoint and
+    exhaustive, and that the arrays have the right ROW COUNTS -- it never
+    checks that row k of result[split]["x"] actually IS episode
+    splits[split][k]. A row permutation or an off-by-one between generating
+    x/z_true and slicing by the split indices would pass it unnoticed.
+
+    _IdentifiableEpisodeSystem makes every episode content-identifiable (its
+    trajectory is constant and equal to its generation-order index), so this
+    test reads identity straight out of the array and compares it to the
+    declared split indices -- an independent, content-based check meta alone
+    cannot provide.
+    """
+    system = _IdentifiableEpisodeSystem()
+    regime = OURegime(sigma_stationary=0.1)
+    n_episodes = 12
+    result = build_dataset(system, regime, None, n_episodes, T=5, dt=0.01, seed=9)
+
+    splits = result["meta"]["splits"]
+    for name in ("train", "val", "test"):
+        actual_ids = result[name]["x"][:, 0, 0].astype(int)
+        expected_ids = np.array(splits[name], dtype=int)
+        print(
+            f"[split identity] {name}: actual={actual_ids.tolist()} "
+            f"expected={expected_ids.tolist()}"
+        )
+        assert np.array_equal(actual_ids, expected_ids)  # exact integer ids, no tolerance
+
+
+def test_splits_content_misalignment_is_detected():
+    """Negative (REGLES 7.1, "this is the whole point"): prove the check
+    above actually has teeth. Take the REAL build_dataset output from the
+    same setup and swap two rows within the train split's real x array (a
+    stand-in for a real misalignment bug -- a stray permutation, or an
+    off-by-one between indexing z_true/x and the recorded split index list).
+    The old test (row counts + disjoint declared index sets) would not
+    notice this at all; the identity check above must.
+    """
+    system = _IdentifiableEpisodeSystem()
+    regime = OURegime(sigma_stationary=0.1)
+    n_episodes = 12
+    result = build_dataset(system, regime, None, n_episodes, T=5, dt=0.01, seed=9)
+    splits = result["meta"]["splits"]
+
+    assert len(splits["train"]) >= 2  # need two distinct rows to swap
+    train_x = result["train"]["x"].copy()
+    train_x[[0, 1]] = train_x[[1, 0]]
+
+    actual_ids = train_x[:, 0, 0].astype(int)
+    expected_ids = np.array(splits["train"], dtype=int)
+    print(
+        f"[split identity corrupted] actual={actual_ids.tolist()} "
+        f"expected={expected_ids.tolist()}"
+    )
+    assert not np.array_equal(actual_ids, expected_ids)
 
 
 def test_obs_consistency():

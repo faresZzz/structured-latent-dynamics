@@ -8,7 +8,7 @@ Discipline (REGLES sections 5, 6):
    random tensors; ``torch.manual_seed`` is used solely to make nn.Module
    parameter init reproducible.
  - tolerances tied to the claim: exact steps at 1e-12/1e-14, autograd Jacobians
-   at 1e-10, the gold eigenvalue gate at 1e-2 relative (the wave gate).
+   at 1e-10, the gold eigenvalue gate at 8e-3 relative (the wave gate).
 """
 
 import numpy as np
@@ -22,6 +22,8 @@ from sld.predictors.blocks2x2 import block_diagonal
 from sld.predictors.koopman_ssm import KoopmanSSMPredictor
 from sld.systems.base import DynamicalSystem
 from sld.systems.damped_pendulum import DampedPendulum
+
+GAMMA_OVERFIT = 10.0  # declared before measuring any model, never revised (REGLES 7.2)
 
 DTYPE = torch.float64
 
@@ -216,8 +218,24 @@ class LinearizedPendulum(DynamicalSystem):
     """Linear surrogate dx/dt = A_lin x + B_lin u from the pendulum's Jacobian.
 
     A linear system so the true ZOH discretization lies exactly in the model
-    class -- the gold's identifiability object. RK4 at dt=0.05 is exact on a
-    linear field far beyond the 1e-2 gate.
+    class -- the gold's identifiability object.
+
+    RK4 is NOT exact on a linear field, and an earlier revision of this
+    docstring said it was (A1 item 5, corrected 2026-08-03). On x' = Ax, RK4
+    computes exactly x_{k+1} = R(dt A) x_k with R the stability polynomial
+    R(z) = 1 + z + z^2/2! + z^3/3! + z^4/4! (_rk4_stability_poly below,
+    proven model-free by test_linearized_pendulum_rk4_step_matches_R_
+    not_expm), so its eigenvalues are R(dt L), not exp(dt L) -- the gold
+    below now compares against R(dt L) directly, not exp(dt L). The two
+    differ by the leading truncated term z^5/120: measured here at
+    dt=0.05, L = -0.313209 +/- 3.116392j, the relative gap is 7.951e-07
+    against a |z^5/120| of 7.849e-07 -- the discrepancy IS the order-5
+    truncation, not numerical noise. That is over three decades under the
+    8e-3 gate below (set by this gold's own fit noise, not the reference
+    genus -- see the gold's tolerance comment), which is why using the
+    wrong reference used to still pass; it is not exactness, and calling
+    it exactness is what made the audit flag this gold as validating an
+    operator against a reference of the wrong kind.
     """
 
     state_dim = 2
@@ -235,6 +253,79 @@ class LinearizedPendulum(DynamicalSystem):
         if regime == "default":
             return rng.uniform(-0.5, 0.5, size=2)
         raise ValueError(f"unknown IC regime: {regime!r}")
+
+
+def _rk4_stability_poly(z):
+    """RK4's exact one-step map on ``x' = A x`` is ``R(dt*A)``, NOT
+    ``expm(dt*A)`` -- derived here from RK4's own four stages, not looked
+    up (REGLES 7.2).
+
+    On ``x' = A x`` with step ``h``, each stage is itself a polynomial in
+    ``A`` applied to ``x``:
+        k1 = A x
+        k2 = A x + (h/2) A^2 x
+        k3 = A x + (h/2) A^2 x + (h^2/4) A^3 x
+        k4 = A x + h A^2 x + (h^2/2) A^3 x + (h^3/4) A^4 x
+    Summing with RK4's own weights, ``k1 + 2k2 + 2k3 + k4``, collects to
+    ``6A + 3h A^2 + h^2 A^3 + (h^3/4) A^4`` (coefficients of ``A``:
+    1+2+2+1=6; of ``A^2``: 2(h/2)+2(h/2)+h=3h; of ``A^3``:
+    2(h^2/4)+h^2/2=h^2; of ``A^4``: h^3/4). So one step,
+        x_new = x + (h/6)(k1+2k2+2k3+k4)
+              = (I + hA + (hA)^2/2! + (hA)^3/3! + (hA)^4/4!) x,
+    is exactly ``R(hA) x`` with ``R(z) = 1 + z + z^2/2! + z^3/3! +
+    z^4/4!`` -- the degree-4 truncation of ``exp(z)``'s Taylor series, a
+    MATRIX POLYNOMIAL in ``A``, not the matrix exponential. Because ``R``
+    is a polynomial, spectral mapping is exact regardless of whether ``A``
+    is diagonalizable: the eigenvalues of ``R(hA)`` are ``R(h*lambda)``
+    for each eigenvalue ``lambda`` of ``A``. RK4 is 4th-order accurate, so
+    ``R(z) - exp(z) = O(z^5)``: the two are genuinely different objects,
+    and referencing ``exp(dt*lambda)`` for RK4-generated data validates
+    against a reference of the wrong genus (REGLES 7.1 corollary; audit
+    2026-08-03). Duplicated from ``tests/audit/test_spectral.py`` on
+    purpose -- kept local to each test file, never imported from ``src/``.
+    """
+    return 1.0 + z + z**2 / 2.0 + z**3 / 6.0 + z**4 / 24.0
+
+
+def test_linearized_pendulum_rk4_step_matches_R_not_expm():
+    """Direct, model-free control for the gold below (REGLES 7.1): the
+    gold's data comes from ``system.integrate`` on ``LinearizedPendulum``,
+    i.e. fixed-step RK4. RK4's exact one-step transition on this linear
+    ``A_lin`` is ``R(dt*A_lin)`` (the stability polynomial derived above),
+    NOT ``expm(dt*A_lin)`` -- the continuous flow. One RK4 step from a
+    random ``x0`` must equal ``R(dt*A_lin) @ x0`` to machine precision and
+    must NOT equal ``torch.matrix_exp(dt*A_lin) @ x0`` at that same
+    tolerance (no scipy in this environment). This isolates, without any
+    trained model or optimizer noise, exactly why ``R(dt*lambda)`` rather
+    than ``exp(dt*lambda)`` is the correct reference for
+    ``test_gold_bilinear_koopman_spectrum``'s eigenvalue gate.
+    """
+    dt = 0.05
+    system = LinearizedPendulum()
+    rng = np.random.default_rng(11)
+    x0 = system.sample_ic(rng)
+    traj = system.integrate(x0, np.zeros((1, system.action_dim)), dt)
+    x1_rk4 = traj[1]
+
+    A = torch.tensor(system.A_lin, dtype=DTYPE)
+    x0_t = torch.tensor(x0, dtype=DTYPE)
+    M = dt * A
+    eye = torch.eye(system.state_dim, dtype=DTYPE)
+    R_mat = eye + M + M @ M / 2.0 + M @ M @ M / 6.0 + M @ M @ M @ M / 24.0
+    x1_R = (R_mat @ x0_t).numpy()
+    x1_expm = (torch.matrix_exp(M) @ x0_t).numpy()
+
+    err_R = np.abs(x1_rk4 - x1_R).max()
+    err_expm = np.abs(x1_rk4 - x1_expm).max()
+    print(f"[pendulum rk4 vs R vs expm] err vs R(dt*A_lin) = {err_R:.3e}")
+    print(f"[pendulum rk4 vs R vs expm] err vs expm(dt*A_lin) = {err_expm:.3e}")
+    assert err_R < 1e-12, (
+        f"RK4 step must equal R(dt*A_lin)@x0 to machine precision, got {err_R:.3e}"
+    )
+    assert err_expm > 1e-12, (
+        f"expm(dt*A_lin)@x0 should NOT match the RK4 step at this tolerance "
+        f"(got {err_expm:.3e}) -- RK4 is not the exact continuous flow"
+    )
 
 
 def _make_dataset(system, dt, n_ep, T, rng):
@@ -283,7 +374,7 @@ def test_gold_bilinear_koopman_spectrum():
     # it is not a proof for the actual affine (biased) controlled model with
     # a live bilinear term. The evidence for identification is the assertion
     # below itself: converged fit (checked) + eigenvalues matching the
-    # independent analytic reference at 1e-2.
+    # independent analytic reference at 8e-3.
     x0_win, u_win, tgt_win = _free_running_windows(states, actions, H=10)
 
     torch.manual_seed(0)
@@ -313,15 +404,62 @@ def test_gold_bilinear_koopman_spectrum():
     # learned discrete pair: eigenvalues of the assembled 2x2 A_bar
     A_bar_blocks, _ = model.blocks.discretize_zoh(dt)
     learned = torch.linalg.eigvals(block_diagonal(A_bar_blocks)).detach().numpy()
-    # independent reference: exp(dt * continuous analytic eigenvalues), numpy only
-    expected = np.exp(dt * DampedPendulum().analytic_eigenvalues())
+    # independent reference: R(dt * continuous analytic eigenvalues), numpy
+    # only. The data above comes from system.integrate, i.e. RK4 -- RK4's
+    # exact one-step transition on this linear system is the stability
+    # polynomial R(dt*lambda) (test_linearized_pendulum_rk4_step_matches_R_
+    # not_expm above proves this model-free, on this exact system/dt), NOT
+    # exp(dt*lambda), the CONTINUOUS flow RK4 only approximates to O(dt^5).
+    # Comparing against exp() validated this gold against a reference of
+    # the wrong genus (REGLES 7.1 corollary; audit 2026-08-03).
+    expected = _rk4_stability_poly(dt * DampedPendulum().analytic_eigenvalues())
     learned = learned[np.argsort(learned.imag)]
     expected = expected[np.argsort(expected.imag)]
     rel = np.abs(learned - expected) / np.abs(expected)
-    print(f"[gold] expected pair = {expected}")
-    print(f"[gold] learned  pair = {learned}")
-    print(f"[gold] per-eigenvalue relative error = {rel}")
-    assert np.all(rel < 1e-2), f"gold spectrum gate: rel={rel}"
+    print(f"[gold] expected R(dt*lam) pair = {expected}")
+    print(f"[gold] learned          pair = {learned}")
+    print(f"[gold] per-eigenvalue relative error vs R(dt*lam) = {rel}")
+    # Measured max rel error here is 3.236e-3 (this is a TRAINED model, not
+    # an exact linear fit: Adam + a nonconvex landscape + gauge slack, per
+    # the DEVIATION note above). 8e-3 keeps a ~2.5x margin above that --
+    # real but deliberately looser than the EDMD gold's margin in
+    # test_spectral.py, because here the fit's own optimization noise, not
+    # the reference genus, sets the floor (see the note below). Still 20%
+    # tighter than the old 1e-2, which is the genuine (if modest) gain
+    # available on a learned gold.
+    assert np.all(rel < 8e-3), f"gold spectrum gate: rel={rel}"
+
+    # negative control, honestly scoped (REGLES 7.1 + 7.2): unlike the EDMD
+    # gold in test_spectral.py, this fit's own optimization noise (~3.24e-3,
+    # measured just above) is roughly 4000x LARGER than the R-vs-exp
+    # reference gap itself at this dt (~7.95e-7, see
+    # _rk4_stability_poly's docstring and the direct control test above).
+    # Switching the reference from exp(dt*lambda) to R(dt*lambda) therefore
+    # only moves this gate's measured value in its 5th significant digit
+    # (rel vs exp = 3.236295e-3 vs rel vs R = 3.236054e-3 measured). ANY
+    # tolerance with a sane margin over the fit noise -- the whole point of
+    # this gate -- passes BOTH references identically; forcing a
+    # same-tolerance failure for the old reference here would mean
+    # threading a ~2.4e-7-wide window between two nearly equal numbers,
+    # exactly the tuned-to-fall-right test REGLES 7.2 forbids, and one that
+    # would flip on the next seed/BLAS/torch-version change. The real,
+    # non-fragile negative proof that R (not exp) is the correct reference
+    # genus for THIS system/dt is
+    # test_linearized_pendulum_rk4_step_matches_R_not_expm above, which
+    # isolates the fact from the optimizer's noise entirely. What IS
+    # checked here, non-vacuously, is the quantitative claim just made:
+    expected_exp = np.exp(dt * DampedPendulum().analytic_eigenvalues())
+    expected_exp = expected_exp[np.argsort(expected_exp.imag)]
+    rel_exp = np.abs(learned - expected_exp) / np.abs(expected_exp)
+    reference_gap = np.abs(expected - expected_exp) / np.abs(expected_exp)
+    print(f"[gold] rel error vs OLD exp(dt*lam) reference = {rel_exp}")
+    print(f"[gold] R-vs-exp reference gap itself = {reference_gap}")
+    assert reference_gap.max() * 100 < rel.max(), (
+        "expected the fit's own noise floor to dominate the reference-genus "
+        "gap by orders of magnitude here -- if this fails, the reference "
+        "switch is no longer negligible and this gold needs the "
+        "same-tolerance negative check used in the EDMD gold"
+    )
 
     # on linear data the bilinear coupling must vanish -- compared through its
     # EFFECT on the data, not raw parameter norms: under the prediction-
@@ -372,6 +510,33 @@ def test_overfit_single_trajectory():
         sched.step()
     print(f"[overfit] final one-step MSE = {loss.item():.3e}")
     assert loss.item() < 1e-3
+
+    # --- persistence-relative gate (REGLES 7.1, added 2026-08-03) ------------
+    # The absolute ``loss < 1e-3`` above is unmoored: it says nothing about
+    # whether the model beat doing NOTHING on this trajectory. Measured on the
+    # four families' own trajectories, persistence (h_hat_{t+1} = h_t) scores
+    # mlp 1.8692e-02, transformer 3.8355e-02, min_ssm 1.7737e-03 and
+    # koopman_ssm 9.0675e-04 -- so on koopman_ssm the 1e-3 gate is satisfied by
+    # persistence itself (the test was literally vacuous there), and on min_ssm
+    # it clears it by only 1.77x. GAMMA_OVERFIT is declared here, BEFORE any
+    # model number was looked at, and is not revised afterwards.
+    persistence = F.mse_loss(x_t, x_next).item()
+    factor = persistence / loss.item()
+    print(f"[overfit] persistence MSE = {persistence:.4e} | factor = {factor:.1f}x")
+    # THIS family is the one where the old absolute gate was vacuous:
+    assert persistence < 1e-3, "the 1e-3 gate is satisfied by persistence here"
+    assert loss.item() < persistence / GAMMA_OVERFIT
+
+    with torch.no_grad():
+        h_fr = model.rollout(model.lift(x_t[0].unsqueeze(0)), u_t[:5].unsqueeze(1))
+        fr = model.project(h_fr).squeeze(1)
+    fr_mse = F.mse_loss(fr, x_next[:5]).item()
+    pers_fr = F.mse_loss(x_t[0].unsqueeze(0).expand(5, -1), x_next[:5]).item()
+    print(f"[overfit] free-rollout H=5 MSE = {fr_mse:.4e} (persistence {pers_fr:.4e})")
+    assert torch.isfinite(fr).all()
+    assert fr_mse < pers_fr
+
+    assert not (persistence < persistence / GAMMA_OVERFIT)
 
 
 # ---------------------------------------------------------------------------

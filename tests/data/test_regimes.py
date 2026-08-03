@@ -183,6 +183,80 @@ def test_action_conditioned_correlation():
     assert max_abs_corr > 0.3
 
 
+def test_action_conditioned_policy_matches_gain_value_by_value():
+    """Positive (REGLES 7.1): test_action_conditioned_correlation above only
+    checks max(abs(corr(u, x))) > 0.3 -- a SIGN-FLIPPED policy (u = -K_gain
+    @ x) would pass that check identically, since |corr| is sign-blind.
+    Turn off the noise (sigma=0) and pin K_gain to a signed, non-degenerate
+    matrix (unequal-magnitude, nonzero, mixed-sign entries: [0.6, -0.35] --
+    a sign flip or a coefficient swap would both change the numbers), then
+    compare u_t to K_gain @ x_t AT EVERY STEP t, exactly.
+
+    x_t is recovered by replaying the recorded u_seq through system.integrate
+    (the replay contract itself is already covered by
+    test_replay_contract_action_conditioned), so this needs no access to
+    ActionConditionedRegime internals beyond its public output.
+    """
+    system = DampedPendulum()
+    K_gain = np.array([[0.6, -0.35]])
+    regime = ActionConditionedRegime(K_gain=K_gain, sigma=0.0, ic_regime="default")
+    rng = np.random.default_rng(100)
+    T, dt = 300, 0.01
+    x0, u_seq = regime.sample_episode(system, T, dt, rng)
+
+    z_true = system.integrate(x0, u_seq, dt)
+    x_t = z_true[:-1]  # state fed to the policy at each step t (see _closed_loop_episode)
+    u_expected = x_t @ K_gain.T
+
+    # the clip must never bite here -- otherwise this would be testing
+    # clip(), not the policy's use of K_gain
+    margin = system.u_max - np.max(np.abs(u_expected))
+    max_err = np.max(np.abs(u_seq - u_expected))
+    print(
+        f"[action policy value-by-value] max_err={max_err:.3e} "
+        f"clip_margin={margin:.4f} (u_max={system.u_max})"
+    )
+    assert margin > 1.0  # measured ~1.63 out of u_max=2.0: comfortably interior
+    # short float64 algebra, a 2-term dot product computed two equivalent
+    # ways (batched x_t @ K_gain.T vs per-step K_gain @ x): R3 1e-12
+    assert max_err < 1e-12
+
+
+def test_action_conditioned_wrong_sign_fails_value_check():
+    """Negative (REGLES 7.1, "this is the whole point"): the check above
+    (u_t == K_gain @ x_t) must have teeth against exactly the bug the old
+    abs-correlation test could not see -- a sign-flipped gain. Run the SAME
+    real ActionConditionedRegime/sample_episode code path with -K_gain
+    (identical seed, so identical x0; the trajectories diverge after step 0
+    since the applied torque differs, which is fine -- the question is
+    whether the ORIGINAL K_gain still "explains" what a -K_gain-driven
+    policy actually did) and assert the value-by-value check now FAILS the
+    same 1e-12 tolerance.
+
+    K_gain.T is not additionally checked here: K_gain has shape
+    (action_dim, state_dim) = (1, 2) for DampedPendulum (the only real
+    system usable for this check with action_dim >= 1), and a (2, 1) gain
+    cannot even matmul against a (2,)-shaped state -- numpy raises a shape
+    error rather than silently computing a same-shaped wrong answer. So
+    there is no "transposed" computation to disagree with; the spec's own
+    "si la forme de K_gain le permet" clause does not hold here.
+    """
+    system = DampedPendulum()
+    K_gain = np.array([[0.6, -0.35]])
+    regime_wrong = ActionConditionedRegime(K_gain=-K_gain, sigma=0.0, ic_regime="default")
+    rng = np.random.default_rng(100)
+    T, dt = 300, 0.01
+    x0, u_seq_wrong = regime_wrong.sample_episode(system, T, dt, rng)
+
+    z_true_wrong = system.integrate(x0, u_seq_wrong, dt)
+    x_t_wrong = z_true_wrong[:-1]
+    u_expected_original_sign = x_t_wrong @ K_gain.T
+
+    max_err = np.max(np.abs(u_seq_wrong - u_expected_original_sign))
+    print(f"[action policy wrong sign] max_err={max_err:.3e} (tol 1e-12, must exceed it)")
+    assert max_err > 1e-12
+
+
 def test_narrow_policy_pumps_toward_target_energy():
     system = DampedPendulum()
     E_target = 2.0 * system.m * system.g * system.L

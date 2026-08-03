@@ -17,6 +17,9 @@ from sld.data.regimes import OURegime
 from sld.objectives.jepa import EMATarget, JEPALoss
 from sld.objectives.vicreg import covariance_loss, variance_loss
 from sld.systems.damped_pendulum import DampedPendulum
+from sld.encoders.frame_mlp import FrameMLPEncoder
+from sld.predictors.base import PredictorState
+from sld.predictors.mlp import MLPPredictor
 
 
 def _one_pendulum_trajectory():
@@ -114,6 +117,72 @@ def test_jepa_mlp_overfits_one_trajectory():
     assert pred_shuffled > 3.0 * pred_value
     assert per_dim_std.min().item() > 0.1
     assert participation_ratio.item() > 4.0
+
+
+GAMMA_JEPA = 10.0  # declared before measuring anything (REGLES 7.2), never revised
+
+
+def test_jepa_overfits_one_trajectory_through_production_classes():
+    """Same overfit as ``test_jepa_mlp_overfits_one_trajectory`` above, but
+    through the PRODUCTION classes (REGLES 7.1, gap closed 2026-08-03).
+
+    That test builds ``_Encoder`` and ``_ResidualMLPPredictor`` locally, so it
+    proves the OBJECTIVE is optimizable in principle and nothing about the code
+    path the project actually runs. Here the encoder is
+    ``sld.encoders.frame_mlp.FrameMLPEncoder`` and the predictor is
+    ``sld.predictors.mlp.MLPPredictor``, driven through its real
+    ``step(h, u, PredictorState())`` contract. The local test is kept: it
+    isolates the objective, this one exercises the wiring.
+
+    Gate: the JEPA prediction loss must beat the IDENTITY baseline -- the exact
+    loss of a zero-residual predictor on the same targets -- by GAMMA_JEPA.
+    An absolute threshold would say nothing about whether the model beat doing
+    nothing; the same defect this session found in the four families' overfit
+    gates, where persistence itself cleared the declared bar on koopman_ssm.
+    """
+    torch.manual_seed(0)
+    x, u = _one_pendulum_trajectory()
+
+    encoder = FrameMLPEncoder(d_x=2, d_z=8, hidden=(32,))
+    predictor = MLPPredictor(d_h=8, d_u=1, hidden=(64,))
+    target = EMATarget(encoder, tau=0.99)
+    jepa = JEPALoss()
+    opt = torch.optim.Adam(
+        list(encoder.parameters()) + list(predictor.parameters()), lr=2e-3
+    )
+
+    for _ in range(4000):
+        opt.zero_grad()
+        z = encoder(x)
+        h_hat, _ = predictor.step(z[:-1], u, PredictorState())
+        losses = jepa(h_hat, target(x[1:]))
+        total = losses["total"] + 0.1 * variance_loss(z) + 0.01 * covariance_loss(z)
+        total.backward()
+        opt.step()
+        target.update(encoder)
+
+    with torch.no_grad():
+        z = encoder(x)
+        h_hat, _ = predictor.step(z[:-1], u, PredictorState())
+        pred_value = jepa(h_hat, target(x[1:]))["pred"].item()
+        identity_baseline = jepa(z[:-1], target(x[1:]))["pred"].item()
+        u_shuffled = u[torch.randperm(len(u), generator=torch.Generator().manual_seed(0))]
+        h_shuf, _ = predictor.step(z[:-1], u_shuffled, PredictorState())
+        pred_shuffled = jepa(h_shuf, target(x[1:]))["pred"].item()
+
+    factor = identity_baseline / max(pred_value, 1e-30)
+    print(
+        f"[jepa-production] pred={pred_value:.4e} identity={identity_baseline:.4e} "
+        f"factor={factor:.1f}x shuffled-u={pred_shuffled:.4e}"
+    )
+    assert pred_value < identity_baseline / GAMMA_JEPA
+
+    # Negative 1: the identity baseline itself must FAIL the gate -- it scores
+    # exactly 1x by construction, which is precisely the point.
+    assert not (identity_baseline < identity_baseline / GAMMA_JEPA)
+    # Negative 2: a predictor that ignores u would be insensitive to shuffling
+    # it in time. Degradation proves the action path is live.
+    assert pred_shuffled > pred_value
 
 
 def test_collapse_without_vicreg_is_trivial():

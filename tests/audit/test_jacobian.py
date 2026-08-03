@@ -444,6 +444,57 @@ def test_lipschitz_pi_tanh_bounded():
     assert val > 0.0
 
 
+def test_lipschitz_pi_tanh_exact_value():
+    """Same pi_fn / h_samples as test_lipschitz_pi_tanh_bounded above -- but
+    asserting the EXACT value instead of the unfalsifiable bound ``<= 0.5``
+    (REGLES 7.1: the constant 0.25 satisfies that bound too).
+
+    pi_fn is elementwise (``h -> 0.5*tanh(h)``), so its Jacobian at any row
+    is EXACTLY diagonal, entry j = ``0.5*sech^2(h_j)`` -- verified below by
+    reading jacrev's own output rather than assuming it: the off-diagonal
+    entries come out exactly 0.0 (no cross-dependency exists for autodiff to
+    accumulate rounding into). The spectral norm (largest singular value) of
+    a diagonal matrix is the max absolute diagonal entry, so the per-sample
+    spectral norm is ``0.5 * max_j sech^2(h_i,j)``. ``lipschitz_pi(...,
+    quantile=None)`` takes the MAX over samples
+    (src/sld/audit/jacobian.py:800-801: ``return float(norms.max())`` --
+    confirmed by reading the source, not assumed), so the oracle is
+    ``0.5 * global max of sech^2`` over the whole (20, 4) array, computed
+    here in plain numpy without ever calling lipschitz_pi.
+    """
+    rng = np.random.default_rng(8)
+
+    def pi_fn(h):
+        return 0.5 * torch.tanh(h)
+
+    h_samples = _t(rng.standard_normal((20, 4)))
+
+    # confirm the "exactly diagonal" premise instead of assuming it
+    jac_fn = torch.func.jacrev(pi_fn)
+    J0 = jac_fn(h_samples[0])
+    off_diag = J0 - torch.diag(J0.diagonal())
+    assert off_diag.abs().max().item() == 0.0
+
+    sech2 = 1.0 / np.cosh(h_samples.numpy()) ** 2
+    expected = 0.5 * sech2.max()
+
+    val = lipschitz_pi(pi_fn, h_samples)
+    err = abs(val - expected)
+    print(f"[lipschitz_pi tanh exact] val={val:.12f} expected={expected:.12f} err={err:.3e}")
+    # float64 chain (tanh/cosh -> jacrev -> SVD of an exactly-diagonal 4x4);
+    # measured err running this test is 5.6e-17 -- tolerance is the
+    # eigen/SVD float64 tier, not the short-algebra 1e-12 tier
+    assert err < 1e-10
+
+    wrong = 0.25
+    gap = abs(wrong - expected)
+    print(f"[lipschitz_pi tanh negative] 0.25 vs exact oracle={expected:.12f} gap={gap:.6f}")
+    # 0.25 is exactly the constant REGLES 7.1 names as passing the OLD
+    # bound-only test (test_lipschitz_pi_tanh_bounded above); it must fail
+    # this exact-value oracle -- measured gap is 0.25
+    assert gap > 1e-6
+
+
 def test_lipschitz_pi_rejects_float32_output():
     def pi_fn(h):
         return (2.0 * h.to(torch.float32)).sum().unsqueeze(0)

@@ -140,6 +140,92 @@ def test_state_threading_matches_rollout(family):
 
 
 # ---------------------------------------------------------------------------
+# rollout vs. a hand-recomputed AFFINE predictor (REGLES 7.1: independent
+# reference, not the object against itself)
+# ---------------------------------------------------------------------------
+def test_affine_predictor_rollout_matches_hand_computed_dynamics():
+    """``test_state_threading_matches_rollout`` above is an INTERNAL
+    consistency check: it compares ``rollout`` to a loop of ``step`` calls on
+    the SAME model, so a bug shared by both code paths (e.g. an off-by-one
+    on the input index baked into ``step`` itself) would not be caught.
+
+    Here the model is forced to realize an EXACT affine map
+    ``h_next = A h + B u + c`` with ``A``, ``B``, ``c`` posed by hand
+    (``A`` non-diagonal, ``c != 0``, ``B != 0``), then ``rollout`` is checked
+    against a loop written INDEPENDENTLY in this test -- it never calls
+    ``model.step`` or ``model.rollout`` for the reference side.
+
+    Construction: ``MLPPredictor(hidden=())`` collapses ``net`` to a SINGLE
+    ``nn.Linear`` with no activation -- confirmed by inspection below
+    (mlp.py builds ``dims = (d_h+d_u, d_h)``, and the ``if i < len(dims)-2``
+    guard that appends ``GELU`` is never true for a 1-layer stack). With
+    weights set by hand, ``step``'s ``h_next = h + net(cat([h, u]))``
+    becomes EXACTLY ``h_next = (I + W_h) h + W_u u + bias``, i.e.
+    ``A = I + W_h``, ``B = W_u``, ``c = bias``.
+
+    ``A`` is upper-bidiagonal, hence triangular: its eigenvalues are its
+    diagonal entries (all ``0.5``), so its spectral radius is EXACTLY
+    ``0.5 < 1`` (computed below, not just claimed) -- the ``H = 40``-step
+    trajectory is guaranteed bounded, not "happened not to overflow".
+    """
+    A = torch.tensor(
+        [
+            [0.5, 0.1, 0.0, 0.0],
+            [0.0, 0.5, 0.1, 0.0],
+            [0.0, 0.0, 0.5, 0.1],
+            [0.0, 0.0, 0.0, 0.5],
+        ],
+        dtype=torch.float64,
+    )
+    B = torch.tensor(
+        [[0.3, -0.2], [0.1, 0.4], [-0.3, 0.2], [0.2, -0.1]], dtype=torch.float64
+    )
+    c = torch.tensor([0.05, -0.05, 0.02, -0.02], dtype=torch.float64)
+    spectral_radius = torch.linalg.eigvals(A).abs().max().item()
+    assert spectral_radius == pytest.approx(0.5, abs=1e-12)
+
+    model = MLPPredictor(d_h=D_H, d_u=D_U, hidden=()).double()
+    assert len(model.net) == 1 and isinstance(model.net[0], torch.nn.Linear)
+    linear = model.net[0]
+    with torch.no_grad():
+        linear.weight[:, :D_H].copy_(A - torch.eye(D_H, dtype=torch.float64))
+        linear.weight[:, D_H:].copy_(B)
+        linear.bias.copy_(c)
+
+    Batch, H = 3, 40
+    gen = torch.Generator().manual_seed(2024)
+    h0 = torch.randn(Batch, D_H, generator=gen, dtype=torch.float64)
+    u_seq = torch.randn(H, Batch, D_U, generator=gen, dtype=torch.float64)
+
+    # independent hand loop -- NOT model.step, NOT model.rollout
+    manual = []
+    h = h0.clone()
+    for t in range(H):
+        h = h @ A.T + u_seq[t] @ B.T + c
+        manual.append(h)
+    manual_out = torch.stack(manual, dim=0)
+
+    rollout_out = model.rollout(h0, u_seq)
+    assert torch.isfinite(rollout_out).all()  # the H=40 trajectory stays bounded
+    err = (manual_out - rollout_out).abs().max().item()
+    print(f"[contract] affine rollout vs hand loop: max abs err = {err:.3e} over H={H} steps")
+    assert err < 1e-12  # short float64 algebra, R3
+
+    # Negative: shift the recomposition by one input index (u_{t+1} instead
+    # of u_t) -- the actual off-by-one failure mode this test guards
+    # against. Must be REJECTED by the same tolerance.
+    manual_shifted = []
+    h = h0.clone()
+    for t in range(H - 1):
+        h = h @ A.T + u_seq[t + 1] @ B.T + c
+        manual_shifted.append(h)
+    manual_shifted_out = torch.stack(manual_shifted, dim=0)
+    err_shifted = (manual_shifted_out - rollout_out[: H - 1]).abs().max().item()
+    print(f"[contract] shifted-index negative: max abs err = {err_shifted:.3e}")
+    assert err_shifted > 1e-3  # order-one mismatch, nowhere near the tolerance
+
+
+# ---------------------------------------------------------------------------
 # local_operator: None for the generic families
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("family", ["mlp", "transformer"])
@@ -225,9 +311,46 @@ def test_local_operator_coherence(name):
     worst = 0.0
     for b in range(B):
         jac_h = torch.func.jacrev(frozen_step, argnums=0)(h[b], u[b], c[b])
-        worst = max(worst, _rel_err(jac_h, A[b]))
+        # B = dh+/du at fixed c (REGLES 7.1 gap closed): B_bar_t is a real,
+        # nontrivial quantity in this regime (koopman_ssm.py:268-271), not
+        # structurally empty, so it needs the same independent-jacobian
+        # coverage as A above and as the constant/bilinear branch already has
+        jac_u = torch.func.jacrev(frozen_step, argnums=1)(h[b], u[b], c[b])
+        worst = max(worst, _rel_err(jac_h, A[b]), _rel_err(jac_u, Bm[b]))
     print(f"[coherence] {name} worst rel err = {worst:.3e}")
     assert worst < 1e-5
+
+
+# ---------------------------------------------------------------------------
+# negative counterpart (REGLES 7.1) to the koopman_selective B-branch just
+# added above: B_bar_t is real and nontrivial here, so a broken
+# implementation that silently flips its sign (a plausible wiring bug --
+# same "denied input term" failure mode the packet names) must be REJECTED
+# by the same coherence comparison, at the same tolerance. Negating (rather
+# than zeroing) keeps the perturbed candidate at Bm's own scale, so
+# _rel_err's normalization (divides by the candidate's own norm) stays
+# well-conditioned instead of blowing up against a near-zero denominator.
+# ---------------------------------------------------------------------------
+def test_local_operator_coherence_selective_negative_negated_b():
+    model = _make(_operator_builder("koopman_selective"), seed=8).double()
+    B = 3
+    gen = torch.Generator().manual_seed(9)
+    h = torch.randn(B, D_H, generator=gen, dtype=torch.float64)
+    u = torch.randn(B, D_U, generator=gen, dtype=torch.float64)
+
+    _, Bm = model.local_operator(h, u, PredictorState())
+    c = model.W_c(torch.cat([h, u], dim=-1)).detach()
+
+    def frozen_step(h_b, u_b, c_b):
+        return model._frozen_step(h_b.unsqueeze(0), u_b.unsqueeze(0), c_b.unsqueeze(0)).squeeze(0)
+
+    Bm_negated = -Bm  # the bug: input term present but sign-flipped/denied
+    worst = 0.0
+    for b in range(B):
+        jac_u = torch.func.jacrev(frozen_step, argnums=1)(h[b], u[b], c[b])
+        worst = max(worst, _rel_err(jac_u, Bm_negated[b]))
+    print(f"[coherence-negative] koopman_selective negated-B worst rel err = {worst:.3e}")
+    assert worst > 1e-5  # must be REJECTED by the exact tolerance the positive uses
 
 
 # ---------------------------------------------------------------------------

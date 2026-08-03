@@ -1,3 +1,6 @@
+import math
+
+import pytest
 import torch
 
 from sld.predictors.blocks2x2 import RotationScalingBlocks, block_diagonal
@@ -26,6 +29,141 @@ def test_zoh_closed_form_matches_matrix_exp():
             worst = max(worst, err)
             assert err < 1e-6, f"constrained={constrained} delta={delta} err={err:.3e}"
     print(f"[test_zoh_closed_form] max abs error over all draws/deltas = {worst:.3e}")
+
+
+def test_zoh_hand_built_generator_pins_sign_and_layout():
+    """Positive (REGLES 7.1 + R2): test_zoh_closed_form_matches_matrix_exp
+    above builds A = blocks.continuous_blocks() and compares
+    discretize_zoh(delta) to torch.matrix_exp(delta * A) -- an independent
+    EXPONENTIAL (torch.matrix_exp), but applied to a generator A that is
+    the implementation's OWN continuous_blocks() output. A sign convention
+    flip applied consistently to both continuous_blocks() and
+    discretize_zoh() (e.g. J -> -J everywhere) would still pass that test,
+    since both sides would agree on the same wrong convention -- neither
+    side is tied to the convention actually DECLARED in the module
+    docstring.
+
+    Here the block's parameter tensors are set BY HAND, without going
+    through continuous_blocks() at all: alpha=0, omega=pi/2, delta=1.
+    alpha=0 needs mode='free' (constrained=False): with constrained=True,
+    alpha = -exp(nu) < 0 always (RotationScalingBlocks._alpha), so alpha=0
+    is unreachable there; in free mode alpha = nu directly, so nu=0 gives
+    alpha=0 exactly.
+
+    Declared convention (module docstring): A = alpha*I + omega*J with
+    J = [[0,-1],[1,0]], so A_bar = exp(delta*A) = exp(delta*alpha)*R(delta*omega).
+    At alpha=0, delta=1, omega=pi/2:
+        R(pi/2) = [[cos(pi/2), -sin(pi/2)], [sin(pi/2), cos(pi/2)]]
+                = [[0, -1], [1, 0]]
+    (value independently confirmed by the supervisor). This single 2x2
+    number pins down BOTH the sign of the rotation (rotating the other way
+    gives [[0,1],[-1,0]]) AND the row/column layout (a transposed layout
+    swaps which off-diagonal entry is +1 and which is -1) in one check.
+    """
+    blocks = RotationScalingBlocks(1, constrained=False, mode="continuous", dtype=DTYPE)
+    with torch.no_grad():
+        blocks.nu[0] = 0.0  # free mode: alpha = nu -> alpha = 0 exactly
+        blocks.omega[0] = math.pi / 2.0
+    delta = 1.0
+
+    A_bar, _ = blocks.discretize_zoh(delta)
+    oracle = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=DTYPE)
+    err = (A_bar[0] - oracle).abs().max().item()
+    print(f"[zoh sign+layout positive] A_bar={A_bar[0].tolist()} err={err:.3e}")
+    assert err < 1e-12  # short float64 algebra: cos/sin of one fixed angle
+
+
+def test_zoh_oracle_discriminates_opposite_rotation_sense():
+    """Negative (REGLES 7.1, "the whole point"): the SAME oracle as the test
+    above, [[0,-1],[1,0]] at (alpha=0, omega=pi/2, delta=1), compared to the
+    matrix a J -> -J sign convention would produce at the identical
+    parameters (equivalent to evaluating the declared closed form
+    exp(delta*alpha)*R(delta*omega) with omega negated, since
+    alpha*I + omega*(-J) = alpha*I + (-omega)*J). Demonstrates the oracle
+    actually discriminates rotation sense rather than passing regardless of
+    it -- the same tolerance that admits the correct answer above rejects
+    this one.
+
+    Hardened by the supervisor: the wrong matrix is not hand-typed here, it is
+    produced by running the REAL discretize_zoh under the mirrored parameter.
+    Since alpha*I + omega*(-J) = alpha*I + (-omega)*J, driving the actual
+    implementation at omega = -pi/2 yields exactly the matrix a J -> -J
+    convention would produce at omega = +pi/2. So this executes the production
+    code path and asserts the oracle rejects its output -- rather than asserting
+    that a matrix the test itself typed differs from another matrix the test
+    itself typed, which would prove nothing about the implementation.
+    """
+    oracle = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=DTYPE)
+
+    mirrored = RotationScalingBlocks(1, constrained=False, mode="continuous", dtype=DTYPE)
+    with torch.no_grad():
+        mirrored.nu[0] = 0.0
+        mirrored.omega[0] = -(math.pi / 2.0)  # J -> -J at the declared omega
+    opposite, _ = mirrored.discretize_zoh(1.0)
+
+    err = (opposite[0] - oracle).abs().max().item()
+    print(f"[zoh sign+layout negative] opposite={opposite[0].tolist()} err={err:.3e}")
+    assert err > 1e-12  # same oracle, same tolerance: must fail
+    # and it must fail by the full swing of the off-diagonal, not by rounding:
+    # +1 against -1 in both off-diagonal entries
+    assert abs(err - 2.0) < 1e-12
+
+
+def test_b_bar_hand_built_oracle_pins_the_zoh_input_integral():
+    """Positive (REGLES 7.1 + R2), added by the supervisor after A2 review.
+
+    test_b_bar_matches_direct_solve below builds its reference from
+    A = blocks.continuous_blocks(), so it carries the SAME generator
+    circularity the two tests above just closed for A_bar: a sign convention
+    flipped consistently in continuous_blocks() and in discretize_zoh()'s
+    (I, J) coefficient algebra would leave both sides of that test equal.
+    Closing it for A_bar does not close it for B_bar: the B_bar path
+    evaluates its own coefficients (a_cf, b_cf / a_ser, b_ser) and could
+    carry an independent layout error.
+
+    Hand oracle, derived without touching the implementation. With
+    Phi = int_0^delta exp(tA) dt = A^{-1}(A_bar - I) and, at
+    (alpha, omega, delta) = (0, pi/2, 1), A = (pi/2) J, A_bar = [[0,-1],[1,0]]:
+
+        A^{-1} = (2/pi) J^{-1} = -(2/pi) J
+        A_bar - I = [[-1,-1],[1,-1]]
+        J (A_bar - I) = [[-1, 1],[-1,-1]]
+        Phi = -(2/pi) [[-1, 1],[-1,-1]] = (2/pi) [[1,-1],[1,1]]
+
+    so with B_cont = I the expected B_bar is (2/pi)[[1,-1],[1,1]], i.e.
+    0.6366197723675814 * [[1,-1],[1,1]]. Verified independently by the
+    supervisor against numpy's solve on the same hand-built A.
+
+    Note this point sits in the CLOSED-FORM branch: delta^2 (alpha^2 +
+    omega^2) = (pi/2)^2 = 2.47 > 1e-6, so it exercises a_cf/b_cf. The series
+    branch keeps its own gradient/continuity coverage elsewhere; a hand
+    oracle for it belongs to A4's branch-gradient item, not here.
+    """
+    blocks = RotationScalingBlocks(1, constrained=False, mode="continuous", dtype=DTYPE)
+    with torch.no_grad():
+        blocks.nu[0] = 0.0
+        blocks.omega[0] = math.pi / 2.0
+
+    B_cont = torch.eye(2, dtype=DTYPE)
+    _, B_bar = blocks.discretize_zoh(1.0, B_cont=B_cont)
+
+    oracle = (2.0 / math.pi) * torch.tensor([[1.0, -1.0], [1.0, 1.0]], dtype=DTYPE)
+    err = (B_bar.reshape(2, 2) - oracle).abs().max().item()
+    print(f"[b_bar hand oracle] B_bar={B_bar.reshape(2, 2).tolist()} err={err:.3e}")
+    assert err < 1e-12  # short float64 algebra on one fixed angle
+
+    # Negative: the mirrored convention (J -> -J, i.e. omega negated) must be
+    # REJECTED by the same oracle at the same tolerance. Phi's off-diagonal is
+    # odd in omega, so the mirrored run flips it -- run through the real code
+    # path, not hand-typed.
+    mirrored = RotationScalingBlocks(1, constrained=False, mode="continuous", dtype=DTYPE)
+    with torch.no_grad():
+        mirrored.nu[0] = 0.0
+        mirrored.omega[0] = -(math.pi / 2.0)
+    _, B_bar_wrong = mirrored.discretize_zoh(1.0, B_cont=B_cont)
+    err_wrong = (B_bar_wrong.reshape(2, 2) - oracle).abs().max().item()
+    print(f"[b_bar hand oracle negative] err={err_wrong:.3e}")
+    assert err_wrong > 1e-12
 
 
 def test_b_bar_matches_direct_solve():
@@ -162,6 +300,109 @@ def test_b_bar_is_entire_through_zero():
         B_bar[0], delta * B_cont.reshape(6, 2, 3)[0], rtol=0.0, atol=1e-14
     )
     print(f"[test_b_bar_entire] max abs error across branch switch = {worst:.3e}")
+
+
+# ---------------------------------------------------------------------------
+# gradients across the series/closed-form branch switch (A4 gap: the tests
+# above check VALUES only -- test_b_bar_is_entire_through_zero across
+# magnitudes, and the grad-finiteness check in
+# test_off_cell_can_be_unstable_with_finite_gradients at one random point --
+# neither differentiates AT or straddling the branch switch itself)
+# ---------------------------------------------------------------------------
+def _blocks_at(alpha_val: float, omega_val: float) -> RotationScalingBlocks:
+    # constrained=False: alpha = nu directly (RotationScalingBlocks._alpha),
+    # an IDENTITY map, so nu.grad IS d(loss)/d(alpha) exactly -- no extra
+    # chain-rule factor to carry by hand. Same construction idiom as
+    # test_zoh_hand_built_generator_pins_sign_and_layout above.
+    b = RotationScalingBlocks(1, constrained=False, mode="continuous", dtype=torch.float64)
+    with torch.no_grad():
+        b.nu[0] = alpha_val
+        b.omega[0] = omega_val
+    return b
+
+
+@pytest.mark.parametrize(
+    "alpha0,omega0",
+    [
+        (0.0, 0.0),  # exactly the removable-singularity point
+        (5e-4, 5e-4),  # series branch, near the switch (denom=5e-7 < 1e-6 at delta=1)
+        (1e-3, 1e-3),  # closed-form branch, near the switch (denom=2e-6 > 1e-6 at delta=1)
+    ],
+)
+def test_discretize_zoh_gradients_finite_and_match_finite_differences(alpha0, omega0):
+    """Backprop through ``discretize_zoh`` at ``(alpha, omega) = (0, 0)`` and
+    on either side of the ``small`` branch switch (``delta**2 * (alpha**2 +
+    omega**2) <= 1e-6``, blocks2x2.py:201; ``delta=1`` here puts the switch
+    exactly at ``alpha**2 + omega**2 == 1e-6``).
+
+    Fact this locks in (module docstring): ``Phi = int_0^delta exp(tA) dt``
+    is an ENTIRE function of ``A``, equal to ``delta*I`` at ``A=0`` -- the
+    ``A^{-1}(A_bar - I)`` closed form has a REMOVABLE singularity there, so
+    gradients must exist and stay finite/continuous through it. That is
+    what this test demonstrates by MEASUREMENT, not by assertion of the
+    docstring's claim alone.
+
+    Reference: central finite differences on the scalar loss
+    ``A_bar.sum() + B_bar.sum()``, step ``h=1e-5`` -- picked empirically as
+    the float64 sweet spot (truncation ~h^2, rounding ~eps/h, both ~1e-10 to
+    1e-11 here); the worst-case relative error measured against autograd
+    over these three points at this h was ~3.8e-9. Tolerance 1e-6 relative
+    leaves ~1000x margin over that measurement. This is a genuinely
+    independent reference -- repeated forward evaluations only, autograd is
+    never called on the reference side.
+    """
+    delta = 1.0
+    B_cont = torch.tensor([[0.7], [-0.3]], dtype=torch.float64)
+
+    blocks = _blocks_at(alpha0, omega0)
+    A_bar, B_bar = blocks.discretize_zoh(delta, B_cont)
+    loss = A_bar.sum() + B_bar.sum()
+    loss.backward()
+    grad_alpha, grad_omega = blocks.nu.grad.item(), blocks.omega.grad.item()
+    assert math.isfinite(grad_alpha) and math.isfinite(grad_omega)
+
+    def loss_at(a: float, o: float) -> float:
+        b = _blocks_at(a, o)
+        with torch.no_grad():
+            A_bar_, B_bar_ = b.discretize_zoh(delta, B_cont)
+            return (A_bar_.sum() + B_bar_.sum()).item()
+
+    h = 1e-5
+    fd_alpha = (loss_at(alpha0 + h, omega0) - loss_at(alpha0 - h, omega0)) / (2 * h)
+    fd_omega = (loss_at(alpha0, omega0 + h) - loss_at(alpha0, omega0 - h)) / (2 * h)
+
+    rel_alpha = abs(grad_alpha - fd_alpha) / (abs(grad_alpha) + 1e-30)
+    rel_omega = abs(grad_omega - fd_omega) / (abs(grad_omega) + 1e-30)
+    print(
+        f"[zoh grad @ ({alpha0},{omega0})] autograd=({grad_alpha:.6e},{grad_omega:.6e}) "
+        f"fd=({fd_alpha:.6e},{fd_omega:.6e}) rel=({rel_alpha:.3e},{rel_omega:.3e})"
+    )
+    assert rel_alpha < 1e-6
+    assert rel_omega < 1e-6
+
+
+def test_where_without_denom_safe_guard_produces_nan_gradient():
+    """Negative: demonstrates the ``denom_safe`` guard (blocks2x2.py:205) is
+    not decorative. Reproduces, LOCALLY (src untouched), the exact
+    ``torch.where`` pattern at ``denom = 0``: the untaken branch's LOCAL
+    derivative (``1/denom``) is infinite, and IEEE ``0 * inf = nan`` poisons
+    the gradient of the branch that WAS selected -- even though the FORWARD
+    value is perfectly finite (the selected branch's own value is what
+    comes out). This is exactly the trap
+    ``denom_safe = torch.where(small, ones, denom)`` exists to avoid before
+    ever dividing.
+    """
+    alpha = torch.tensor(0.0, dtype=torch.float64, requires_grad=True)
+    denom = alpha**2  # mirrors denom = alpha**2 + omega**2 at alpha=omega=0
+    small = denom <= 1e-6  # mirrors the src guard condition; True here
+    unguarded = alpha / denom  # the closed-form branch WITHOUT denom_safe
+    safe_branch = torch.zeros_like(denom)  # stands in for the series branch
+    out = torch.where(small, safe_branch, unguarded)
+
+    assert torch.isfinite(out)  # forward: fine, the safe branch is selected
+    out.backward()
+    print(f"[where-NaN-trap] out={out.item()}, alpha.grad={alpha.grad.item()}")
+    assert torch.isnan(alpha.grad)  # but the gradient is poisoned regardless
 
 
 def test_nonpositive_delta_rejected():

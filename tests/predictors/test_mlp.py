@@ -7,6 +7,8 @@ from sld.predictors.base import PredictorState
 from sld.predictors.mlp import MLPPredictor
 from sld.systems.damped_pendulum import DampedPendulum
 
+GAMMA_OVERFIT = 10.0  # declared before measuring any model, never revised (REGLES 7.2)
+
 D_H, D_U = 2, 1
 
 
@@ -90,6 +92,33 @@ def test_overfit_one_trajectory():
 
     print(f"[overfit-mlp] final teacher-forced one-step MSE = {loss.item():.3e}")
     assert loss.item() < 1e-3
+
+    # --- persistence-relative gate (REGLES 7.1, added 2026-08-03) ------------
+    # The absolute ``loss < 1e-3`` above is unmoored: it says nothing about
+    # whether the model beat doing NOTHING on this trajectory. Measured on the
+    # four families' own trajectories, persistence (h_hat_{t+1} = h_t) scores
+    # mlp 1.8692e-02, transformer 3.8355e-02, min_ssm 1.7737e-03 and
+    # koopman_ssm 9.0675e-04 -- so on koopman_ssm the 1e-3 gate is satisfied by
+    # persistence itself (the test was literally vacuous there), and on min_ssm
+    # it clears it by only 1.77x. GAMMA_OVERFIT is declared here, BEFORE any
+    # model number was looked at, and is not revised afterwards.
+    persistence = torch.mean((h[:-1] - h[1:]) ** 2).item()
+    factor = persistence / loss.item()
+    print(f"[overfit-mlp] persistence MSE = {persistence:.4e} | factor = {factor:.1f}x")
+    assert loss.item() < persistence / GAMMA_OVERFIT
+
+    # composition: teacher forcing alone never exercises error compounding
+    with torch.no_grad():
+        fr = model.rollout(h[0].unsqueeze(0), u[:5].unsqueeze(1)).squeeze(1)
+    fr_mse = torch.mean((fr - h[1:6]) ** 2).item()
+    pers_fr = torch.mean((h[0].unsqueeze(0) - h[1:6]) ** 2).item()
+    print(f"[overfit-mlp] free-rollout H=5 MSE = {fr_mse:.4e} (persistence {pers_fr:.4e})")
+    assert torch.isfinite(fr).all()
+    assert fr_mse < pers_fr
+
+    # Negative: persistence itself must FAIL the new gate -- by construction it
+    # scores exactly 1x, not 10x, which is the point.
+    assert not (persistence < persistence / GAMMA_OVERFIT)
 
 
 if __name__ == "__main__":

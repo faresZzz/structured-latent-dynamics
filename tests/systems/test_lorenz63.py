@@ -57,6 +57,47 @@ def test_sample_ic_on_attractor_deterministic_and_bounded():
         pass
 
 
+def test_force_matches_hand_computation_with_nonunit_parameters():
+    """Positive (REGLES 7.1): every test above uses the classic default
+    parameters (sigma=10, rho=28, beta=8/3), so a hardcoded literal
+    replacing self.sigma/self.rho/self.beta anywhere in f would pass
+    unnoticed. Here sigma, rho, beta are all away from their defaults, at a
+    nontrivial, off-attractor point (not the origin, not near the classic
+    attractor's typical range).
+
+    Hand arithmetic, independent of Lorenz63.f (only the equations of
+    motion from the class docstring are used):
+        sigma=12.0, rho=20.0, beta=2.5, x=(2.0, -1.0, 30.0)
+        x_dot = sigma*(y-x) = 12.0*(-1.0-2.0) = 12.0*(-3.0) = -36.0
+        y_dot = x*(rho-z) - y = 2.0*(20.0-30.0) - (-1.0) = -20.0+1.0 = -19.0
+        z_dot = x*y - beta*z = 2.0*(-1.0) - 2.5*30.0 = -2.0-75.0 = -77.0
+    (values confirmed by running the arithmetic below, not hand-typed digits).
+    """
+    sigma, rho, beta = 12.0, 20.0, 2.5
+    system = Lorenz63(sigma=sigma, rho=rho, beta=beta)
+    x, y, z = 2.0, -1.0, 30.0
+
+    x_dot_hand = sigma * (y - x)
+    y_dot_hand = x * (rho - z) - y
+    z_dot_hand = x * y - beta * z
+    f_hand = np.array([x_dot_hand, y_dot_hand, z_dot_hand])
+
+    f_impl = system.f(np.array([x, y, z]), np.zeros(0))
+    max_abs_error = np.max(np.abs(f_impl - f_hand))
+    print(f"[lorenz force nonunit] f_hand={f_hand}, f_impl={f_impl}, max_abs_error={max_abs_error:.3e}")
+    assert max_abs_error < 1e-12  # short float64 algebra, rounding only (R3)
+
+    # Negative: a plausible typo drops the beta scaling in the z equation
+    # (x*y - z instead of x*y - beta*z) -- invisible at nothing (there is
+    # no default that collapses beta to 1), but beta=2.5 here versus
+    # beta=1 implied by the typo is a large, easily-detected error.
+    z_dot_wrong = x * y - z
+    f_wrong = np.array([x_dot_hand, y_dot_hand, z_dot_wrong])
+    wrong_error = np.max(np.abs(f_wrong - f_hand))
+    print(f"[lorenz force nonunit negative] wrong_error={wrong_error:.3e}")
+    assert wrong_error > 1e-12  # same oracle, same tolerance: must fail
+
+
 def test_integrate_deterministic():
     system = Lorenz63()
     rng = np.random.default_rng(3)

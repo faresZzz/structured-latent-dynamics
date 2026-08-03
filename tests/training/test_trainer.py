@@ -22,7 +22,11 @@ import torch
 
 from sld.data.generate import build_dataset
 from sld.data.regimes import OURegime
+from sld.encoders.frame_mlp import FrameMLPEncoder
 from sld.objectives.jac_reg import Gauge, gauge_digest
+from sld.objectives.jepa import EMATarget, JEPALoss
+from sld.objectives.vicreg import covariance_loss, variance_loss
+from sld.predictors.mlp import MLPPredictor
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training.trainer import Trainer
 
@@ -138,6 +142,165 @@ def test_train_loss_decreases(tmp_path):
     losses = result["history"]["train_loss"]
     print(f"[trainer] train_loss trajectory = {losses}")
     assert losses[-1] < losses[0]
+
+
+def test_composite_loss_matches_hand_derived_scalar():
+    """``Trainer._composite_loss`` (trainer.py:404) assembles (trainer.py:
+    493-499)::
+
+        total = w_tf*tf_out['total'] + w_fr*fr_out['total']
+              + w_var*var + w_cov*cov + mu_j*jac_pen
+
+    ``test_train_loss_decreases`` above only asserts a scalar goes down --
+    any optimized scalar does that; it proves nothing about which targets or
+    actions actually fed it. This test recomputes ``total`` term-by-term
+    from the equations, on ONE call, with no optimizer step.
+
+    The predictor is ``MLPPredictor(d_z, d_u, hidden=())``: ``dims =
+    (d_h+d_u, d_h)`` collapses to a SINGLE ``nn.Linear`` with no activation
+    (``len(model.net) == 1``, asserted below), so ``step`` is exactly the
+    affine map ``h_next = h + net(cat(h, u)) = h @ (I + W_h).T + u @ W_u.T +
+    b``, with weights set by hand under ``torch.no_grad()``. This test
+    recomputes ``h_hat_tf`` (teacher-forced: conditioned on the TRUE
+    ``h_true_t = z_t`` at every step) and ``h_hat_fr`` (free-running:
+    conditioned on its OWN previous prediction) via this affine formula
+    directly with tensor ops -- never by calling ``predictor.step`` /
+    ``.rollout`` -- then the MSE against the EMA target at the correct
+    shifted indices (``z_tgt[1:]`` for TF, ``z_tgt[1:h_fr+1]`` for FR), then
+    applies the configured weights. ``mu_j`` is left at its default (0.0),
+    so ``jac_pen`` is the fixed zero placeholder and is not evaluated at all
+    (trainer.py's disabled-branch doctrine) -- out of scope here.
+    """
+    torch.manual_seed(0)
+    d_x, d_z, d_u = 3, 2, 1
+    T, B, h_fr = 6, 3, 4
+
+    config = {
+        "exp_name": "test_composite_loss",
+        "seed": 0,
+        "family": "mlp",
+        "d_x": d_x,
+        "d_z": d_z,
+        "d_u": d_u,
+        "h_fr": h_fr,
+        "w_tf": 2.0,
+        "w_fr": 3.0,
+        "w_var": 0.5,
+        "w_cov": 0.25,
+    }
+    trainer = Trainer(config)
+
+    encoder = FrameMLPEncoder(d_x, d_z, hidden=(5,))
+    predictor = MLPPredictor(d_z, d_u, hidden=())
+    assert len(predictor.net) == 1  # a single nn.Linear, no activation
+
+    gen = torch.Generator().manual_seed(1)
+    W = torch.randn(d_z, d_z + d_u, generator=gen, dtype=torch.float32) * 0.3
+    b = torch.randn(d_z, generator=gen, dtype=torch.float32) * 0.1
+    with torch.no_grad():
+        predictor.net[0].weight.copy_(W)
+        predictor.net[0].bias.copy_(b)
+    W_h, W_u = W[:, :d_z], W[:, d_z:]
+
+    def affine_step(h, u):
+        return h + h @ W_h.T + u @ W_u.T + b
+
+    ema = EMATarget(encoder, tau=0.99)
+    jepa = JEPALoss(lambda_c=0.0)
+    lifted = hasattr(predictor, "lift")
+    assert not lifted  # mlp is unlifted -> lift_fn/project_fn below are identity
+    lift_fn = predictor.lift if lifted else (lambda zz: zz)
+    project_fn = predictor.project if lifted else (lambda h: h)
+
+    gen_x = torch.Generator().manual_seed(2)
+    x_bt = torch.randn(T + 1, B, d_x, generator=gen_x, dtype=torch.float32)
+    u_bt = torch.randn(T, B, d_u, generator=gen_x, dtype=torch.float32)
+
+    with torch.no_grad():
+        z = encoder(x_bt)  # same deterministic forward _composite_loss runs internally
+        z_tgt = ema(x_bt)
+
+        h_true = z[:T]
+        h_hat_tf = torch.stack([affine_step(h_true[t], u_bt[t]) for t in range(T)], dim=0)
+        tf_pred = torch.nn.functional.mse_loss(h_hat_tf, z_tgt[1:])
+
+        h = z[0]
+        fr_steps = []
+        for t in range(h_fr):
+            h = affine_step(h, u_bt[t])
+            fr_steps.append(h)
+        h_hat_fr = torch.stack(fr_steps, dim=0)
+        fr_pred = torch.nn.functional.mse_loss(h_hat_fr, z_tgt[1 : h_fr + 1])
+
+        var = variance_loss(z)
+        cov = covariance_loss(z)
+
+        expected_total = (
+            config["w_tf"] * tf_pred
+            + config["w_fr"] * fr_pred
+            + config["w_var"] * var
+            + config["w_cov"] * cov
+        ).item()
+
+    actual_total, diag = trainer._composite_loss(
+        encoder, predictor, ema, jepa, x_bt, u_bt, lifted, lift_fn, project_fn, h_fr
+    )
+    actual_total = actual_total.item()
+    err = abs(actual_total - expected_total)
+    print(f"[composite_loss exact] actual={actual_total:.9f} expected={expected_total:.9f} err={err:.3e}")
+    print(f"[composite_loss exact] diag={diag}")
+    # float32 chain (encoder MLP + affine predictor recurrence + 2 MSEs +
+    # VICReg, summed) computed via a DIFFERENT operation order than the
+    # source (h@W_h.T + u@W_u.T here vs. cat(h,u)@W.T internally): measured
+    # err running this test is exactly 0.0; 1e-5 leaves headroom for a
+    # different BLAS backend without hiding a real assembly bug (the three
+    # negatives below measure gaps >= 2.8e-2, three orders of magnitude above)
+    assert err < 1e-5
+
+    # -- negatives: each is a plausible wiring bug, must NOT match actual_total --
+
+    # (a) wrong weighting: w_tf/w_fr swapped
+    wrong_weight_total = (
+        config["w_fr"] * tf_pred
+        + config["w_tf"] * fr_pred
+        + config["w_var"] * var
+        + config["w_cov"] * cov
+    ).item()
+    gap = abs(wrong_weight_total - actual_total)
+    print(f"[composite_loss negative: swapped w_tf/w_fr] {wrong_weight_total:.9f} gap={gap:.3e}")
+    assert gap > 1e-3
+
+    # (b) FR's own target replaced by TF's (copy-paste bug: w_fr * tf_out['total'])
+    wrong_tf_for_fr_total = (
+        config["w_tf"] * tf_pred
+        + config["w_fr"] * tf_pred
+        + config["w_var"] * var
+        + config["w_cov"] * cov
+    ).item()
+    gap = abs(wrong_tf_for_fr_total - actual_total)
+    print(f"[composite_loss negative: TF target reused for FR] {wrong_tf_for_fr_total:.9f} gap={gap:.3e}")
+    assert gap > 1e-3
+
+    # (c) actions ignored (both rollouts forced to u=0)
+    with torch.no_grad():
+        u_zero = torch.zeros_like(u_bt)
+        h_hat_tf0 = torch.stack([affine_step(h_true[t], u_zero[t]) for t in range(T)], dim=0)
+        tf_pred0 = torch.nn.functional.mse_loss(h_hat_tf0, z_tgt[1:])
+        h0 = z[0]
+        fr_steps0 = []
+        for t in range(h_fr):
+            h0 = affine_step(h0, u_zero[t])
+            fr_steps0.append(h0)
+        fr_pred0 = torch.nn.functional.mse_loss(torch.stack(fr_steps0, dim=0), z_tgt[1 : h_fr + 1])
+        wrong_noaction_total = (
+            config["w_tf"] * tf_pred0
+            + config["w_fr"] * fr_pred0
+            + config["w_var"] * var
+            + config["w_cov"] * cov
+        ).item()
+    gap = abs(wrong_noaction_total - actual_total)
+    print(f"[composite_loss negative: actions ignored] {wrong_noaction_total:.9f} gap={gap:.3e}")
+    assert gap > 1e-3
 
 
 def test_ema_target_excluded_from_optimizer(tmp_path):
