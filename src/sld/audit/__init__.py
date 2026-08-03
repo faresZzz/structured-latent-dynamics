@@ -31,6 +31,7 @@ from sld.audit.invariance import (
     check_shear_breaks_invariance,
     diagonal_gauges,
 )
+from sld.audit.rollout import VPTResult, vpt
 from sld.audit.spectral import (
     edmd_fit,
     local_spectra_field,
@@ -42,6 +43,7 @@ from sld.audit.spectral import (
 __all__ = [
     "ExcludedAugmentedJacobian",
     "GaugeCheckResult",
+    "VPTResult",
     "assert_diagonal_gauge_invariant",
     "augmented_jacobian_excluding_identity",
     "augmented_sigma_max_normalized",
@@ -59,4 +61,5 @@ __all__ = [
     "operator_spectrum",
     "pseudospectrum_grid",
     "total_jacobian",
+    "vpt",
 ]
