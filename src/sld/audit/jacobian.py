@@ -145,6 +145,18 @@ def total_jacobian(step_fn: Callable[[Tensor, Tensor], Tensor], q: Tensor, u: Te
     return J
 
 
+# STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+# This section (ExcludedAugmentedJacobian, augmented_jacobian_excluding_identity,
+# augmented_sigma_max_normalized, down to jacobian_products below) is the
+# quantitative counterpart of the retired mu_J Gauge line (PROTOCOL.md
+# section 10.3): it computes and normalizes the identity-excluded Jacobian
+# ``objectives.jac_reg`` shaped during training. Remains available and
+# tested (tests/audit/test_jacobian.py, tests/audit/test_invariance.py);
+# blocks NO gate of phases C-E. The REST of this module (total_jacobian,
+# jacobian_products, fr_drift_curve, fr_lyapunov_exponents, lipschitz_pi,
+# conditional_jacobian) is UNCHANGED, PRIMARY infrastructure -- it supports
+# Fig. 1's mandated closure/Lip(pi) reporting (REGLES section 3) and is not
+# part of this demotion.
 class ExcludedAugmentedJacobian(NamedTuple):
     """What ``augmented_jacobian_excluding_identity`` reports.
 
@@ -497,8 +509,10 @@ def augmented_sigma_max_normalized(
     Args:
         step_fn, h, m, u, identity_atol: as
             ``augmented_jacobian_excluding_identity``.
-        gauge: the frozen reference scale (``experiments.selection``
-            estimates it -- PROTOCOL section 10.3's "Reference scales").
+        gauge: the frozen reference scale (estimated by the now-retired
+            mu_J selection campaign -- PROTOCOL section 10.3's "Reference
+            scales"; see ``reports/historical/mu_j/`` for how it was
+            estimated).
 
     Returns:
         ``sigma_max`` of the gauge-normalized excluded Jacobian.

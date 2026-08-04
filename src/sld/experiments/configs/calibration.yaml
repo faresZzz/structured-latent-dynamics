@@ -1,3 +1,11 @@
+# HISTORIQUE -- config de la campagne mu_J, SUPERSEDED, non executable par
+# `sld-factorial` (phase B1 : l'axe family/constraint est retire du schema
+# actif, remplace par backbone/structure -- voir factorial.py). Cette config
+# garde volontairement l'ancien schema `family`/`constraint` : c'est ce qui
+# la fait refuser par le nouveau validateur (test de non-executabilite dans
+# tests/experiments/test_factorial.py). Trace conservee dans
+# reports/historical/mu_j/. Ne pas migrer, ne pas executer.
+#
 # Pre-registered seed-0 selection/calibration manifest (PROTOCOL.md §§2, 5).
 # This is deliberately a separate run namespace from pendulum_core.yaml:
 # every resolved selection or calibration candidate MUST retain

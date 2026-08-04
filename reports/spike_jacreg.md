@@ -1,5 +1,13 @@
 # Spike report — `TotalJacobianPenalty` (Wave 2, S1)
 
+> **STATUS (jalon B2, démotion explicite) — SECONDARY -- not primary thesis.**
+> Historical spike report for the mu_J penalty line, which failed and was
+> withdrawn from the thesis (now the backbone × structure factorial). The
+> measurements below are unchanged and unrepudiated — **0,315 %** and
+> **1,36×** remain the measured numbers — this banner only marks the
+> report's status; it blocks no gate of phases C-E. See
+> `reports/historical/mu_j/` for the full historical trace.
+
 De-risks the single most technically risky component of the repo: the
 common-constraint-factor penalty on the total Jacobian, estimated by JVP
 probes during training rollouts. Evidence from `scripts/spike_jacreg.py`

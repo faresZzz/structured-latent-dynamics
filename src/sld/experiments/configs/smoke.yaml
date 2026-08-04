@@ -1,6 +1,8 @@
 # Smoke config: 1 dataset x 2 arms x 1 seed = 2 runs, must finish in << 5 min
-# (Makefile `smoke` target). Exercises the two cheapest-to-verify cells: mlp
-# off and koopman_ssm on (the two ends of the family/constraint axes).
+# (Makefile `smoke` target). Exercises the two cheapest-to-verify cells: the
+# mlp/off backbone and the ssm/on (koopman_ssm) structured backbone -- the
+# two ends of the backbone x structure axis (phase B1: structure is
+# architectural, mu_j is not part of this axis at all).
 exp_name: smoke
 datasets:
   ou:
@@ -20,10 +22,10 @@ base:
   target_params: 2000
   lr: 0.001
 arms:
-  - family: mlp
-    constraint: "off"
-    overrides: {mu_j: 0.0}
-  - family: koopman_ssm
-    constraint: "on"
-    overrides: {mu_j: 0.01, constrained: true, delta: 0.05, n_pairs: 2}
+  - backbone: mlp
+    structure: "off"
+    overrides: {}
+  - backbone: ssm
+    structure: "on"
+    overrides: {constrained: true, delta: 0.05, n_pairs: 2}
 seeds: [0]

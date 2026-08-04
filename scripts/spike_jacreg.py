@@ -1,5 +1,9 @@
 """SPIKE (throwaway): total-Jacobian penalty via JVP probes.
 
+STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+This spike produced the numbers in reports/spike_jacreg.md for the
+now-retired mu_J penalty line. Historical trace: reports/historical/mu_j/.
+
 De-risks `TotalJacobianPenalty(k_probes=2, step_subsample=0.25)`: a training-time
 regularizer that estimates ||J^q||_F^2 of a rollout step function w.r.t. the augmented
 state q = (h, m), using `torch.func.jvp` probes.

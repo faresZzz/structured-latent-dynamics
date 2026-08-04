@@ -36,7 +36,14 @@ _REGIME_REGISTRY: dict[str, type] = {
     "ActionConditionedRegime": ActionConditionedRegime,
 }
 
-_INDEX_COLUMNS = ("run_dir", "regime", "family", "constraint", "seed", "status", "final_val_loss")
+# "structure" is the canonical name (phase B1: backbone x structure replaces
+# family x constraint) -- but index.csv files written before this rename
+# (results/, results_amended/, reports/historical/mu_j/traces/) carry
+# "constraint" instead, and those traces are frozen, never rewritten.
+_INDEX_COLUMNS = ("run_dir", "regime", "family", "structure", "seed", "status", "final_val_loss")
+# ponytail: legacy column name tolerated on read only; drop once no pre-B4
+# index.csv (frozen trace) is read anymore.
+_LEGACY_STRUCTURE_COLUMN = "constraint"
 
 
 def load_run(run_dir: str | Path) -> dict:
@@ -142,11 +149,19 @@ def read_index(results_root: str | Path, exp_name: str) -> list[dict]:
     index is a clear "run the sweep first" error, not a raw traceback or a
     reconstructed-from-directory-listing guess.
 
+    ``structure`` is the canonical column name (phase B1); an index.csv
+    written under the pre-B4 name ``constraint`` is tolerated as a legacy
+    alias (frozen traces under ``results/``, ``results_amended/``, and
+    ``reports/historical/mu_j/traces/`` are never rewritten) -- every
+    returned row carries a ``structure`` key regardless of which name the
+    file on disk used.
+
     Raises:
         FileNotFoundError: ``index.csv`` does not exist.
         ValueError: ``index.csv`` is missing one of the required columns
-            (``run_dir, regime, family, constraint, seed, status,
-            final_val_loss`` -- the ``sld-factorial`` contract).
+            (``run_dir, regime, family, structure, seed, status,
+            final_val_loss`` -- the ``sld-factorial`` contract -- accepting
+            the legacy ``constraint`` name in place of ``structure``).
     """
     index_path = Path(results_root) / exp_name / "index.csv"
     if not index_path.exists():
@@ -157,12 +172,17 @@ def read_index(results_root: str | Path, exp_name: str) -> list[dict]:
         )
     with open(index_path, newline="") as f:
         reader = csv.DictReader(f)
-        missing = [c for c in _INDEX_COLUMNS if c not in (reader.fieldnames or [])]
+        fieldnames = reader.fieldnames or []
+        legacy_structure = "structure" not in fieldnames and _LEGACY_STRUCTURE_COLUMN in fieldnames
+        required = [c for c in _INDEX_COLUMNS if c != "structure" or not legacy_structure]
+        missing = [c for c in required if c not in fieldnames]
         if missing:
             raise ValueError(f"{index_path} is missing required columns {missing}")
         rows = []
         for row in reader:
             row = dict(row)
+            if legacy_structure:
+                row["structure"] = row[_LEGACY_STRUCTURE_COLUMN]
             row["seed"] = int(row["seed"])
             try:
                 row["final_val_loss"] = float(row["final_val_loss"])

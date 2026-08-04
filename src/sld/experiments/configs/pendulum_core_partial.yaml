@@ -1,28 +1,47 @@
-# Staged execution of the PRE-REGISTERED core grid -- OFF cells only.
+# PARTIAL core grid under the backbone x structure factorial (phase B1
+# replaces the old family x constraint / mu_J axis -- see factorial.py).
+# `structure` is architectural, never a numeric penalty: `structure: on`
+# means `constrained: true` in koopman_ssm.py (see KoopmanSSMPredictor,
+# koopman_ssm.py:78 -- "constrained: True is the ON cell (alpha = -exp(nu),
+# contractive stability axis)"). mu_j stays 0 in every arm below, including
+# the `on` one. "Partial": 6 (backbone, structure) pairs are possible in the
+# full design, and only 4 are valid TODAY --
+# {(mlp,off),(transformer,off),(ssm,off),(ssm,on)} -- because `(mlp,on)`
+# and `(transformer,on)` need the `mlp_k`/`transformer_k` structured
+# variants that phase C builds.
 #
-# This is NOT a new run category (PROTOCOL.md section 9 taxonomy): every cell
-# here is a `pendulum_core` cell, byte-identical to its counterpart in
-# `pendulum_core.yaml`. `expand()` resolves a cell's identity from
-# `base + {exp_name, seed, family} + overrides` alone (factorial.py:256), so
-# `exp_name`, `base`, `datasets` and `seeds` are copied VERBATIM below and the
-# resulting run_dirs are the same ones the full 80-run grid will claim. When the
-# ON cells become runnable, `pendulum_core.yaml` resumes these 40 by sentinel
-# instead of retraining them.
-#
-# Why a separate file: `expand()` raises on ANY null override before building
-# anything (factorial.py:249), so the two un-calibrated ON arms (transformer,
-# min_ssm) currently block the whole grid, OFF cells included. Dropping the four
-# ON arms here is the only change.
-#
-# 2 datasets x 4 arms (4 families, constraint=off) x 5 seeds = 40 runs.
+# 2 datasets x 4 arms (the 4 valid backbone/structure pairs) x 5 seeds = 40
+# declared cells. Only 30 of them have been executed: the (mlp,off),
+# (transformer,off) and (ssm,off) arms (3 arms x 2 datasets x 5 seeds) are
+# the runs from 2026-07-31 below, filed in `results_amended/pendulum_core/`
+# under the pre-migration `family`/`constraint` naming (this file's
+# predecessor, `pendulum_core_off.yaml`, had a 4th arm
+# `{family: koopman_ssm, constraint: 'off', constrained: false}` -- the
+# Koopman architecture WITHOUT its contraction, not the structured cell;
+# see git history for `pendulum_core_off.yaml` for that arm). The
+# migration replaced that unconstrained ablation with the real (ssm, on)
+# structured cell, which has never been run: its 10 cells (1 arm x 2
+# datasets x 5 seeds) have no data anywhere in this repo. The unconstrained
+# Koopman ablation no longer has a cell in the backbone x structure axis.
 #
 # `results_root: results_amended` (PROTOCOL.md section 11.5, review round 2
-# BLOCKER 1): the first execution of these 40 cells ran at 17:14 on 2026-07-31,
-# and the amendment authorizing their 200-update budget was committed at 18:48
-# the same day. Later commitment does not retroactively pre-register a run --
-# section 11.2 states that rule and it applies to this repo's own convenience.
-# The pre-amendment artifacts stay under `results/` as post-hoc diagnostics; a
-# SEPARATE root is required so resume sentinels cannot silently adopt them.
+# BLOCKER 1): for the 30 cells above, the first execution ran at 17:14 on
+# 2026-07-31, and the amendment authorizing their 200-update budget was
+# committed at 18:48 the same day. Later commitment does not retroactively
+# pre-register a run -- section 11.2 states that rule and it applies to this
+# repo's own convenience. The pre-amendment artifacts stay under `results/`
+# as post-hoc diagnostics; a SEPARATE root is required so resume sentinels
+# cannot silently adopt them.
+#
+# WARNING -- unresolved before the (ssm,on) cells are run: writing the 10
+# new (ssm,on) cells into `results_root: results_amended` below would mix a
+# cell that was never pre-registered against this root into the amended
+# grid that PROTOCOL.md section 11.5 covers -- the exact risk that section
+# names in requiring a separate root, so resume sentinels cannot silently
+# adopt artifacts across pre-registration boundaries. Whether `(ssm,on)`
+# gets its own root, or a fresh amendment covering it, is a decision the
+# project owner has not yet made; it is due before phase C/E executes these
+# cells, not encoded here.
 exp_name: pendulum_core
 datasets:
   ou:
@@ -63,26 +82,26 @@ base:
   step_subsample: 1.0
   results_root: results_amended
 arms:
-- family: mlp
-  constraint: 'off'
+- backbone: mlp
+  structure: 'off'
   overrides:
     mu_j: 0.0
     lr: 0.0001
-- family: transformer
-  constraint: 'off'
+- backbone: transformer
+  structure: 'off'
   overrides:
     mu_j: 0.0
     lr: 0.0001
-- family: min_ssm
-  constraint: 'off'
+- backbone: ssm
+  structure: 'off'
   overrides:
     mu_j: 0.0
     lr: 0.0003
-- family: koopman_ssm
-  constraint: 'off'
+- backbone: ssm
+  structure: 'on'
   overrides:
     mu_j: 0.0
-    constrained: false
+    constrained: true
     delta: 0.02
     lr: 0.0003
 seeds:

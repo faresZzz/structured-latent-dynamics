@@ -1,13 +1,16 @@
 """Factorial runner: dataset x arm x seed grid -> ``Trainer`` runs (REGLES section 6).
 
-A YAML config declares a dataset axis (regime), an arm axis (family x
-constraint, cells named explicitly -- no cross-product magic), and a seed
-list. ``expand`` turns that into a deterministic list of run cells
-(datasets in YAML order, then arms, then seeds); ``main`` builds each
-dataset once, resolves every cell's run identity up front (preflight:
-collision check, F8), runs (or resumes/skips) every cell through
-``Trainer``, and regenerates ``results/<exp_name>/index.csv`` at the end
--- covering the FULL expected grid even if the run stopped early (F17).
+A YAML config declares a dataset axis (regime), an arm axis (backbone x
+structure, cells named explicitly -- no cross-product magic), and a seed
+list. ``structure`` is an ARCHITECTURAL property (the Koopman-structured
+variant of a backbone), not a numeric penalty -- it selects a predictor
+family, it does not tune ``mu_j``. ``expand`` turns that into a
+deterministic list of run cells (datasets in YAML order, then arms, then
+seeds); ``main`` builds each dataset once, resolves every cell's run
+identity up front (preflight: collision check, F8), runs (or
+resumes/skips) every cell through ``Trainer``, and regenerates
+``results/<exp_name>/index.csv`` at the end -- covering the FULL expected
+grid even if the run stopped early (F17).
 
 v0 scope: full-state observation only (``obs: null`` in every dataset
 entry); non-null ``obs`` is rejected -- the windowed-observation path
@@ -33,7 +36,6 @@ from sld.data.regimes import (
     NarrowPolicyRegime,
     OURegime,
 )
-from sld.predictors.registry import FAMILIES
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training import trainer as trainer_mod
 from sld.training.trainer import FAILURE_FILENAME, RUN_COMPLETE_FILENAME, Trainer
@@ -53,11 +55,24 @@ _TOP_KEYS = frozenset({"exp_name", "datasets", "base", "arms", "seeds"})
 _REQUIRED_TOP_KEYS = frozenset({"exp_name", "datasets", "arms", "seeds"})
 _DATASET_KEYS = frozenset({"system", "regime", "obs", "n_episodes", "T", "dt", "seed"})
 _NAME_PARAMS_KEYS = frozenset({"name", "params"})
-_ARM_KEYS = frozenset({"family", "constraint", "overrides"})
+_ARM_KEYS = frozenset({"backbone", "structure", "overrides"})
+
+_BACKBONES = ("mlp", "transformer", "ssm")
+_STRUCTURES = ("off", "on")
+
+# backbone x structure -> predictor family (see registry.FAMILIES). Only 4
+# pairs exist today; the 2 missing "on" backbones (mlp_k, transformer_k)
+# arrive in phase C -- looked up in _validate_arm, never silently defaulted.
+_FAMILY_BY_PAIR: dict[tuple[str, str], str] = {
+    ("mlp", "off"): "mlp",
+    ("transformer", "off"): "transformer",
+    ("ssm", "off"): "min_ssm",
+    ("ssm", "on"): "koopman_ssm",
+}
 
 # keys the RUNNER injects into every cell's config (exp_name from the top
-# level, seed from the seed axis, family from the arm) -- never settable by
-# the user in base/overrides, the runner owns them (F7)
+# level, seed from the seed axis, family derived from backbone/structure) --
+# never settable by the user in base/overrides, the runner owns them (F7)
 _RUNNER_OWNED_KEYS = frozenset({"exp_name", "seed", "family"})
 
 
@@ -103,21 +118,36 @@ def _validate_dataset_entry(name: str, ds_cfg: dict) -> None:
         )
 
 
-def _validate_arm(idx: int, arm: dict) -> None:
+def _validate_arm(idx: int, arm: dict) -> str:
+    """Validate arm ``idx`` and return its derived predictor family.
+
+    ``backbone`` and ``structure`` are the axis (F8): ``structure`` is a
+    treatment LABEL, not free text -- an unrecognized value would sail
+    through undetected. The pair is then looked up in ``_FAMILY_BY_PAIR``;
+    a pair not in that table is a backbone whose structured ("on") variant
+    does not exist YET -- refused by name, naming the phase that builds it,
+    never silently ignored or misrouted to an unrelated family.
+    """
     unknown = sorted(set(arm) - _ARM_KEYS)
     if unknown:
         raise ValueError(f"arms[{idx}]: unknown keys {unknown}")
-    missing = sorted({"family", "constraint"} - set(arm))
+    missing = sorted({"backbone", "structure"} - set(arm))
     if missing:
         raise ValueError(f"arms[{idx}]: missing keys {missing}")
-    if arm["family"] not in FAMILIES:
-        raise ValueError(f"arms[{idx}]: unknown family {arm['family']!r}, expected one of {FAMILIES}")
-    # F8: constraint is a treatment LABEL, not free text -- an unrecognized
-    # value would sail through and never be checked against mu_j below
-    if arm["constraint"] not in ("off", "on"):
+    if arm["backbone"] not in _BACKBONES:
+        raise ValueError(f"arms[{idx}]: unknown backbone {arm['backbone']!r}, expected one of {_BACKBONES}")
+    if arm["structure"] not in _STRUCTURES:
         raise ValueError(
-            f"arms[{idx}]: constraint must be 'off' or 'on', got {arm['constraint']!r}"
+            f"arms[{idx}]: structure must be 'off' or 'on', got {arm['structure']!r}"
         )
+    pair = (arm["backbone"], arm["structure"])
+    if pair not in _FAMILY_BY_PAIR:
+        raise ValueError(
+            f"arms[{idx}]: backbone={arm['backbone']!r} structure='on' has no predictor "
+            "family yet -- the structured (Koopman) variant of this backbone is built in "
+            "phase C, it does not exist today"
+        )
+    return _FAMILY_BY_PAIR[pair]
 
 
 def _trainer_allowed_keys(families: set[str]) -> frozenset[str]:
@@ -173,49 +203,25 @@ def _validate_trainer_keys(location: str, keys: set[str], allowed: frozenset[str
         raise ValueError(f"{location}: unknown Trainer config keys {unknown}")
 
 
-def _validate_constraint_semantics(arm: dict, base: dict) -> None:
-    """F8: ``constraint`` names a treatment -- 'off' <=> mu_j == 0, 'on' <=>
-    mu_j > 0 -- checked on mu_j RESOLVED from base + this arm's overrides,
-    so a mismatched label can never train the wrong treatment under the
-    right name (two arms sharing ``mu_j: 0`` under 'off' and 'on' would
-    otherwise resolve to the identical config and collide on one run_dir).
-    Skipped when mu_j is still null: nothing resolved yet to check in
-    ``--dry-run``, and in run mode the null-override check below raises
-    separately (PROTOCOL.md section 5: filled by calibration).
-    """
-    overrides = arm.get("overrides", {})
-    mu_j = overrides["mu_j"] if "mu_j" in overrides else base.get("mu_j", trainer_mod._DEFAULTS["mu_j"])
-    if mu_j is None:
-        return
-    constraint = arm["constraint"]
-    if constraint == "off" and mu_j != 0:
-        raise ValueError(
-            f"arm family={arm['family']!r} constraint='off': mu_j must be 0, got {mu_j!r}"
-        )
-    if constraint == "on" and not (isinstance(mu_j, (int, float)) and mu_j > 0):
-        raise ValueError(
-            f"arm family={arm['family']!r} constraint='on': mu_j must be > 0, got {mu_j!r}"
-        )
-
-
 def expand(config: dict, dry_run: bool = False) -> list[dict]:
     """Validate ``config`` and expand it into the deterministic list of run cells.
 
     Order: datasets in YAML insertion order, then arms in list order, then
-    seeds in list order. Each cell carries ``dataset``/``family``/
-    ``constraint``/``seed``/``mu_j`` (display convenience) and the resolved
-    ``Trainer`` config (``base + {exp_name, seed, family} + arm overrides``).
+    seeds in list order. Each cell carries ``dataset``/``backbone``/
+    ``structure``/``family`` (derived)/``seed``/``mu_j`` (display
+    convenience) and the resolved ``Trainer`` config (``base + {exp_name,
+    seed, family} + arm overrides``).
 
     Validation runs BEFORE any dataset is built or any model is
     constructed. A closed schema rejects an unknown key at any level,
     including inside ``base`` and every arm's ``overrides`` (F7) -- the
     Trainer's own accepted key sets are the reference of truth, not a
-    duplicated list. ``constraint`` must be 'off'/'on' and its declared
-    semantics (mu_j == 0 / mu_j > 0) are checked on the resolved value
-    (F8). A ``null`` arm override (e.g. an un-calibrated ``mu_j``) is a
-    ``ValueError`` UNLESS ``dry_run`` is set, in which case the cell is
-    still listed with the null displayed (PROTOCOL.md section 5: filled by
-    calibration).
+    duplicated list. ``structure`` is architectural (F8): it selects a
+    predictor family via ``_FAMILY_BY_PAIR``, never a numeric penalty.
+    ``mu_j`` is no longer an axis -- any cell resolving ``mu_j > 0`` is
+    refused (see below). A ``null`` arm override is a ``ValueError``
+    UNLESS ``dry_run`` is set, in which case the cell is still listed with
+    the null displayed.
     """
     _validate_top(config)
     exp_name = config["exp_name"]
@@ -226,45 +232,36 @@ def expand(config: dict, dry_run: bool = False) -> list[dict]:
 
     for ds_name, ds_cfg in datasets_cfg.items():
         _validate_dataset_entry(ds_name, ds_cfg)
-    for i, arm in enumerate(arms):
-        _validate_arm(i, arm)
+    families = [_validate_arm(i, arm) for i, arm in enumerate(arms)]
 
     # F7: closed schema over base AND every arm's overrides
-    families_used = {arm["family"] for arm in arms}
-    _validate_trainer_keys("base", set(base), _trainer_allowed_keys(families_used))
-    for i, arm in enumerate(arms):
-        arm_allowed = _trainer_allowed_keys({arm["family"]})
+    _validate_trainer_keys("base", set(base), _trainer_allowed_keys(set(families)))
+    for i, (arm, family) in enumerate(zip(arms, families)):
+        arm_allowed = _trainer_allowed_keys({family})
         _validate_trainer_keys(f"arms[{i}].overrides", set(arm.get("overrides", {})), arm_allowed)
-
-    # F8: constraint label <-> mu_j semantics, on the resolved value
-    for arm in arms:
-        _validate_constraint_semantics(arm, base)
 
     cells = []
     idx = 0
     for ds_name in datasets_cfg:
-        for arm in arms:
+        for arm, family in zip(arms, families):
             overrides = arm.get("overrides", {})
             null_keys = sorted(k for k, v in overrides.items() if v is None)
             if null_keys and not dry_run:
                 raise ValueError(
-                    f"arm family={arm['family']!r} constraint={arm['constraint']!r}: "
+                    f"arm backbone={arm['backbone']!r} structure={arm['structure']!r}: "
                     f"overrides {null_keys} are null -- value to be filled by "
                     "calibration (PROTOCOL.md section 5)"
                 )
-            # PROTOCOL.md section 10.3: the declared metric is the
-            # GAUGE-NORMALIZED Jacobian norm, and training on it requires the
-            # frozen gauge to reach ``Trainer`` out-of-band (see
-            # ``sld.experiments.selection._fit_and_load``). This runner never
-            # constructs or threads one -- ``Trainer(cell["config"])`` in
+            # mu_j is no longer an experimental axis (structure is
+            # architectural now) -- but the Trainer still accepts a mu_j
+            # knob, and training on a resolved mu_j > 0 would require the
+            # frozen gauge (PROTOCOL.md section 10.3) that this runner never
+            # threads into Trainer (``Trainer(cell["config"])`` in
             # ``_preflight_resolve_and_check_collisions`` always passes
-            # ``gauge=None`` -- so any ON cell (``mu_j > 0``) trained through
-            # here would silently fall back to Trainer's undeclared RAW
-            # pre-amendment estimator instead of the declared one. Refused
-            # here, before any dataset is built, same convention as the
-            # null-override refusal above: ``--dry-run`` still lists the
-            # cell (the null is displayed there too), only the run path
-            # refuses.
+            # ``gauge=None``). Refused here, before any dataset is built,
+            # same convention as the null-override refusal above:
+            # ``--dry-run`` still lists the cell (the null is displayed
+            # there too), only the run path refuses.
             resolved_mu_j = (
                 overrides["mu_j"] if "mu_j" in overrides
                 else base.get("mu_j", trainer_mod._DEFAULTS["mu_j"])
@@ -275,27 +272,27 @@ def expand(config: dict, dry_run: bool = False) -> list[dict]:
                 and resolved_mu_j > 0
             ):
                 raise ValueError(
-                    f"arm family={arm['family']!r} constraint={arm['constraint']!r}: "
-                    f"mu_j={resolved_mu_j!r} > 0 -- ON cells require the frozen gauge "
-                    "declared in PROTOCOL.md section 10.3, sld-factorial cannot yet "
-                    "supply one to Trainer, and running this cell would silently train "
-                    "against the superseded raw Jacobian estimator instead of the "
-                    "declared metric"
+                    f"arm backbone={arm['backbone']!r} structure={arm['structure']!r}: "
+                    f"mu_j={resolved_mu_j!r} > 0 -- mu_j is not an experimental axis, "
+                    "structure is architectural, and this runner cannot supply the "
+                    "frozen gauge PROTOCOL.md section 10.3 requires to train on a "
+                    "positive mu_j"
                 )
             for seed in seeds:
                 run_config = {
                     **base,
                     "exp_name": exp_name,
                     "seed": seed,
-                    "family": arm["family"],
+                    "family": family,
                     **overrides,
                 }
                 cells.append(
                     {
                         "index": idx,
                         "dataset": ds_name,
-                        "family": arm["family"],
-                        "constraint": arm["constraint"],
+                        "backbone": arm["backbone"],
+                        "structure": arm["structure"],
+                        "family": family,
                         "seed": seed,
                         "mu_j": overrides.get("mu_j"),
                         "config": run_config,
@@ -337,7 +334,7 @@ def _preflight_resolve_and_check_collisions(cells: list[dict], datasets: dict) -
         lines = [
             f"{run_dir}: "
             + ", ".join(
-                f"[{c['index']}] {c['dataset']} {c['family']} {c['constraint']} seed={c['seed']}"
+                f"[{c['index']}] {c['dataset']} {c['backbone']} {c['structure']} {c['family']} seed={c['seed']}"
                 for c in cs
             )
             for run_dir, cs in sorted(collisions.items())
@@ -667,16 +664,23 @@ def _write_index(results_root: Path, exp_name: str, cells: list[dict]) -> None:
     so every cell in the grid appears -- ``missing`` if nothing usable is
     on disk -- even when the run stopped partway through the grid.
     """
+    # Column layout matches the phase B4 contract (``sld.experiments.loading
+    # ._INDEX_COLUMNS``): the column is named "structure" (not "constraint"
+    # -- that name lied about what it carried after B1 repointed the axis)
+    # and holds ``cell["structure"]``'s value ("off"/"on"). Indices already
+    # on disk under the old "constraint" name (results/, results_amended/,
+    # reports/historical/mu_j/traces/) are frozen and never rewritten;
+    # ``loading.read_index`` tolerates that legacy name on read.
     index_dir = results_root / exp_name
     index_dir.mkdir(parents=True, exist_ok=True)
     with open(index_dir / "index.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["run_dir", "regime", "family", "constraint", "seed", "status", "final_val_loss"])
+        writer.writerow(["run_dir", "regime", "family", "structure", "seed", "status", "final_val_loss"])
         for cell in cells:
             run_dir = cell["run_dir"]
             status, val_loss = _cell_status(run_dir)
             writer.writerow(
-                [run_dir, cell["dataset"], cell["family"], cell["constraint"], cell["seed"], status, val_loss]
+                [run_dir, cell["dataset"], cell["family"], cell["structure"], cell["seed"], status, val_loss]
             )
 
 
@@ -693,8 +697,8 @@ def main(argv: list[str] | None = None) -> int:
         cells = expand(config, dry_run=True)
         for cell in cells:
             print(
-                f"[{cell['index']}] {cell['dataset']} {cell['family']} "
-                f"{cell['constraint']} seed={cell['seed']} mu_j={cell['mu_j']}"
+                f"[{cell['index']}] {cell['dataset']} {cell['backbone']} {cell['structure']} "
+                f"{cell['family']} seed={cell['seed']} mu_j={cell['mu_j']}"
             )
         print(f"total: {len(cells)} runs")
         return 0
@@ -719,8 +723,8 @@ def main(argv: list[str] | None = None) -> int:
             run_dir = cell["run_dir"]
             data = datasets[cell["dataset"]]
             label = (
-                f"[{cell['index'] + 1}/{n}] {cell['dataset']} {cell['family']} "
-                f"{cell['constraint']} seed={cell['seed']}"
+                f"[{cell['index'] + 1}/{n}] {cell['dataset']} {cell['backbone']} "
+                f"{cell['structure']} {cell['family']} seed={cell['seed']}"
             )
             if _validate_completion_sentinel(run_dir) is not None:
                 print(f"{label} -> {run_dir} (SKIP, resume)")

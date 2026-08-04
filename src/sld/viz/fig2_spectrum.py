@@ -1,5 +1,11 @@
 """Fig. 2 -- spectral display/screening across families (v0, D1 pendulum).
 
+STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+Fig. 2 is a secondary regression/screening display, tied to the retired
+mu_J line's diagnostic tooling; it blocks NO gate of phases C-E and is
+never a stability certificate (see the doctrine paragraph below, which
+already says so). Remains available and tested (tests/viz/test_viz.py).
+
 REGLES sections 2/3/5 discipline, restated at the point of use: a displayed
 spectrum is a SCREENING tool, NEVER a stability certificate. Only
 ``koopman_ssm`` in its ``constant``/``bilinear`` regimes exposes a genuine
@@ -71,7 +77,7 @@ def _select_cell_run(rows: list[dict], family: str) -> tuple[dict | None, str | 
             if (
                 row["family"] == family
                 and row["regime"] == "ou"
-                and row["constraint"] == constraint
+                and row["structure"] == constraint  # index.csv column: "structure" (phase B4, legacy "constraint" aliased by read_index)
                 and row["seed"] == 0
             ):
                 return row, constraint

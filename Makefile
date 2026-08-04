@@ -1,7 +1,7 @@
-.PHONY: setup test smoke grid-core fig1 fig2 fig3 fig4 fig5 calibrate reproduce-all clean-nb
+.PHONY: setup test smoke grid-core fig1 fig2 fig3 fig4 fig5 reproduce-all clean-nb
 
 CONFIGS := src/sld/experiments/configs
-CORE_CONFIGS := pendulum_core oscillators lorenz cartpole encoder_axis koopman_ablations
+CORE_CONFIGS := pendulum_core_partial oscillators lorenz cartpole encoder_axis koopman_ablations
 
 # --- Bootstrap ------------------------------------------------------------
 
@@ -41,12 +41,6 @@ grid-core:
 		uv run sld-factorial --config $(CONFIGS)/$$cfg.yaml || exit 1; \
 	done
 
-calibrate:
-	$(call require_module,experiments.factorial)
-	@test -f $(CONFIGS)/calibration.yaml \
-		|| (echo "$(CONFIGS)/calibration.yaml not written yet — nothing to calibrate." && exit 1)
-	uv run sld-factorial --config $(CONFIGS)/calibration.yaml
-
 # --- Figures (each regenerates from results/, never retrains — REGLES §2) --
 
 fig1:
@@ -69,7 +63,7 @@ fig5:
 	$(call require_module,viz.fig5_instrument)
 	uv run python -m sld.viz.fig5_instrument
 
-reproduce-all: grid-core fig1 fig2 fig3 fig4 fig5 calibrate
+reproduce-all: grid-core fig1 fig2 fig3 fig4 fig5
 
 # --- Notebook hygiene (relies on nb-clean, already a dev dependency and   --
 # --- pre-commit hook — no bespoke check script, cf. _publication's own    --

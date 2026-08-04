@@ -1,5 +1,13 @@
 """Spectral-separation regularizer for the rotation-scaling predictor family.
 
+STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+Verified unwired: 0 references from ``training/trainer.py``, and its target
+family ``blocks2x2`` is absent from the active registry
+(``predictors/registry.py`` FAMILIES = mlp/transformer/min_ssm/koopman_ssm).
+This module REMAINS AVAILABLE and REMAINS TESTED
+(tests/objectives/test_spectral_reg.py, 6 tests) as a secondary regression;
+it blocks NO gate of phases C-E.
+
 This regularizer is an ABLATION of the spectral predictor family only: it
 must never enter the common constraint factor shared across families (that
 factor is the total-Jacobian penalty), and a spectrum shaped by it is a

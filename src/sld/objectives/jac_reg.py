@@ -1,5 +1,12 @@
 """Total-Jacobian penalty: the common constraint factor mu_J.
 
+STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+The mu_J penalty line failed and was withdrawn from the thesis, which is
+now the backbone x structure factorial (MASTER-plan.md). This module
+REMAINS AVAILABLE and REMAINS TESTED (tests/objectives/test_jac_reg.py,
+26 tests) for regression/secondary-study purposes only; it blocks NO gate
+of phases C-E. Historical trace of the campaign: reports/historical/mu_j/.
+
 Hutchinson-style estimator of ||J^q||_F^2 along training rollouts, where
 J^q is the Jacobian of the predictor step with respect to the AUGMENTED
 state q = (h, m) — never the conditional block alone. This penalty is the
@@ -106,11 +113,12 @@ class Gauge:
     (PROTOCOL.md section 10.3): ``sigma_max(S_out^-1 . J_t^{q,excl} . S_in)``.
 
     Estimation (the family-aware part: which reference rollout, which
-    trained checkpoint, how ``m``'s axes map to cache positions) lives in
-    ``experiments.selection`` -- this class only STORES and APPLIES the
-    frozen result, generically, without ever inspecting which family it
-    came from (mirrors the audit's own "no special path per predictor"
-    doctrine, REGLES.md section 2).
+    trained checkpoint, how ``m``'s axes map to cache positions) was done by
+    the now-retired mu_J selection campaign (SECONDARY -- not primary
+    thesis; see ``reports/historical/mu_j/`` for how it was estimated) --
+    this class only STORES and APPLIES the frozen result, generically,
+    without ever inspecting which family it came from (mirrors the audit's
+    own "no special path per predictor" doctrine, REGLES.md section 2).
 
     Every tensor stored here is broadcastable against the leaf it scales:
     the coordinate axes match that leaf's own shape, every other axis --

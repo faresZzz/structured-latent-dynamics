@@ -42,18 +42,46 @@ def _minimal_dataset_entry(**overrides) -> dict:
     return entry
 
 
-def test_pendulum_core_dry_run_expands_to_80():
-    config = yaml.safe_load((_CONFIGS / "pendulum_core.yaml").read_text())
+def test_expand_produces_exactly_the_four_valid_backbone_structure_pairs():
+    # phase B1: backbone x structure replaces the retired family x
+    # constraint / mu_J axis. Exactly 4 pairs are valid today (the 2
+    # missing structured backbones arrive in phase C -- see
+    # test_mlp_and_transformer_on_rejected_naming_phase_c below).
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "arms": [
+            {"backbone": "mlp", "structure": "off", "overrides": {}},
+            {"backbone": "transformer", "structure": "off", "overrides": {}},
+            {"backbone": "ssm", "structure": "off", "overrides": {}},
+            {"backbone": "ssm", "structure": "on", "overrides": {"constrained": True, "delta": 0.02}},
+        ],
+        "seeds": [0],
+    }
     cells = expand(config, dry_run=True)
-    assert len(cells) == 80  # 2 datasets x 8 arms (4 families x off/on) x 5 seeds
-    # deterministic order: datasets in YAML order, then arms, then seeds
-    # (seed is the innermost loop -- 5 consecutive cells per (dataset, arm))
-    assert [c["dataset"] for c in cells[:40]] == ["ou"] * 40
-    assert [c["dataset"] for c in cells[40:]] == ["action_conditioned"] * 40
-    assert [c["seed"] for c in cells[:5]] == [0, 1, 2, 3, 4]
-    first_cell = (cells[0]["family"], cells[0]["constraint"])
-    assert all((c["family"], c["constraint"]) == first_cell for c in cells[:5])
-    assert (cells[5]["family"], cells[5]["constraint"]) != first_cell
+    assert len(cells) == 4
+    pairs = [(c["backbone"], c["structure"]) for c in cells]
+    assert set(pairs) == {("mlp", "off"), ("transformer", "off"), ("ssm", "off"), ("ssm", "on")}
+    assert len(set(pairs)) == 4  # no duplicates
+    expected_family = {
+        ("mlp", "off"): "mlp",
+        ("transformer", "off"): "transformer",
+        ("ssm", "off"): "min_ssm",
+        ("ssm", "on"): "koopman_ssm",
+    }
+    for cell in cells:
+        assert cell["family"] == expected_family[(cell["backbone"], cell["structure"])]
+
+
+@pytest.mark.parametrize("config_name", ("calibration.yaml", "pendulum_core.yaml"))
+def test_historical_mu_j_configs_are_no_longer_executable(config_name):
+    # phase B1: these 2 configs are the frozen trace of the retired mu_J
+    # campaign (reports/historical/mu_j/) -- kept on the OLD family/
+    # constraint schema ON PURPOSE, which is exactly what makes the new
+    # backbone/structure validator refuse them before anything is built.
+    config = yaml.safe_load((_CONFIGS / config_name).read_text())
+    with pytest.raises(ValueError):
+        expand(config, dry_run=False)
 
 
 def test_unknown_top_level_key_raises():
@@ -72,7 +100,7 @@ def test_unknown_registry_name_raises():
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry(system={"name": "NotASystem", "params": {}})},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="unknown system"):
@@ -83,7 +111,7 @@ def test_null_override_raises_in_run_mode_but_not_dry_run():
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "on", "overrides": {"mu_j": None}}],
+        "arms": [{"backbone": "ssm", "structure": "on", "overrides": {"mu_j": None}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="calibration"):
@@ -101,7 +129,7 @@ def test_empty_datasets_axis_raises():
     config = {
         "exp_name": "x",
         "datasets": {},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="datasets"):
@@ -123,7 +151,7 @@ def test_empty_seeds_axis_raises():
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [],
     }
     with pytest.raises(ValueError, match="seeds"):
@@ -152,7 +180,7 @@ def test_end_to_end_resume_and_index(tmp_path):
             "target_params": 200,
             "results_root": str(results_root),
         },
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     config_path = tmp_path / "mini.yaml"
@@ -196,7 +224,7 @@ def _mini_run_config(results_root: Path, **arm_overrides) -> dict:
             "target_params": 200,
             "results_root": str(results_root),
         },
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0, **arm_overrides}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0, **arm_overrides}}],
         "seeds": [0],
     }
 
@@ -209,7 +237,7 @@ def test_unknown_key_in_base_raises():
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
         "base": {"lrr": 0.1},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="lrr"):
@@ -220,7 +248,7 @@ def test_unknown_key_in_overrides_raises():
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0, "mu_jj": 1.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0, "mu_jj": 1.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="mu_jj"):
@@ -234,7 +262,7 @@ def test_runner_owned_keys_rejected_in_base_and_overrides():
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
         "base": {"seed": 5},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="injected by the runner"):
@@ -243,7 +271,7 @@ def test_runner_owned_keys_rejected_in_base_and_overrides():
     overrides_leak = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0, "family": "mlp"}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0, "family": "mlp"}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="injected by the runner"):
@@ -257,7 +285,7 @@ def test_budget_owned_and_derived_keys_rejected_in_base_and_overrides():
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
         "base": {"hidden": [32, 32]},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="capacity"):
@@ -266,56 +294,61 @@ def test_budget_owned_and_derived_keys_rejected_in_base_and_overrides():
     derived_in_overrides = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0, "d_h": 4}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0, "d_h": 4}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="derived or policy"):
         expand(derived_in_overrides)
 
 
-# -- F8: constraint label semantics + run-identity collision preflight -------
+# -- F8: backbone/structure schema + run-identity collision preflight -------
 
 
-def test_invalid_constraint_value_raises():
+def test_invalid_structure_value_raises():
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "maybe", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "maybe", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="structure"):
+        expand(config)
+
+
+def test_old_constraint_field_rejected():
+    # phase B1: the retired family/constraint schema must be refused
+    # outright, never silently accepted or misread as backbone/structure.
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="constraint"):
         expand(config)
 
 
-def test_constraint_mu_j_semantic_mismatch_raises():
-    # 'off' with a positive mu_j -- the exact scenario the reviewer used to
-    # make two arms collide (F8's repro): off/on both effectively mu_j=0
-    off_with_positive_mu_j = {
-        "exp_name": "x",
-        "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.5}}],
-        "seeds": [0],
-    }
-    with pytest.raises(ValueError, match="'off'"):
-        expand(off_with_positive_mu_j)
-
-    on_with_zero_mu_j = {
-        "exp_name": "x",
-        "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "on", "overrides": {"mu_j": 0.0}}],
-        "seeds": [0],
-    }
-    with pytest.raises(ValueError, match="'on'"):
-        expand(on_with_zero_mu_j)
+def test_mlp_and_transformer_on_rejected_naming_phase_c():
+    # only (ssm, on) has a predictor family (koopman_ssm) today -- (mlp, on)
+    # and (transformer, on) are refused, by name, until phase C builds
+    # mlp_k/transformer_k.
+    for backbone in ("mlp", "transformer"):
+        config = {
+            "exp_name": "x",
+            "datasets": {"d1": _minimal_dataset_entry()},
+            "arms": [{"backbone": backbone, "structure": "on", "overrides": {}}],
+            "seeds": [0],
+        }
+        with pytest.raises(ValueError, match="phase C"):
+            expand(config, dry_run=True)
 
 
 def test_run_identity_collision_raises(tmp_path):
-    # both arms are legitimately 'off' (mu_j=0.0, F8b is satisfied -- 'on'
-    # would now be refused in run mode by the mu_j > 0 gauge-preflight check,
-    # see test_on_cell_run_mode_refuses_mu_j_positive_but_dry_run_lists_it)
-    # -- but the 2nd arm's explicit lr equals the Trainer's own default, so
-    # BOTH resolve to the byte-identical hashed config: a real collision the
-    # F8b semantic check does NOT catch, caught by the preflight instead
+    # both arms resolve to the SAME (backbone, structure) pair -- (mlp,
+    # off) twice -- but the 2nd arm's explicit lr equals the Trainer's own
+    # default, so BOTH resolve to the byte-identical hashed config: a real
+    # collision, caught by the run-identity preflight (never silently
+    # trained twice into the same run_dir).
     results_root = tmp_path / "results"
     config = {
         "exp_name": "collide",
@@ -330,8 +363,8 @@ def test_run_identity_collision_raises(tmp_path):
             "results_root": str(results_root),
         },
         "arms": [
-            {"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}},
-            {"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0, "lr": 1e-3}},
+            {"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}},
+            {"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0, "lr": 1e-3}},
         ],
         "seeds": [0],
     }
@@ -345,17 +378,18 @@ def test_run_identity_collision_raises(tmp_path):
 
 
 def test_on_cell_run_mode_refuses_mu_j_positive_but_dry_run_lists_it():
-    # sld-factorial never threads a gauge into Trainer (unlike
-    # sld.experiments.selection._fit_and_load, which does), so any ON cell
-    # (mu_j > 0) trained through here would silently fall back to Trainer's
-    # undeclared raw Jacobian estimator instead of the PROTOCOL.md section
-    # 10.3 declared, gauge-normalized one. The run path must refuse before
-    # touching a dataset or a Trainer; --dry-run must still list the cell,
-    # same convention as the null-override case above.
+    # mu_j is no longer an experimental axis (structure is architectural),
+    # but Trainer still accepts a mu_j knob, and sld-factorial never
+    # threads a gauge into it -- so any cell resolving mu_j > 0 trained
+    # through here would silently fall back to Trainer's undeclared raw
+    # Jacobian estimator instead of the PROTOCOL.md section 10.3 declared,
+    # gauge-normalized one. The run path must refuse before touching a
+    # dataset or a Trainer; --dry-run must still list the cell, same
+    # convention as the null-override case above.
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
-        "arms": [{"family": "mlp", "constraint": "on", "overrides": {"mu_j": 0.05}}],
+        "arms": [{"backbone": "ssm", "structure": "on", "overrides": {"mu_j": 0.05}}],
         "seeds": [0],
     }
     with pytest.raises(ValueError, match="gauge"):
@@ -951,7 +985,7 @@ def test_index_covers_full_grid_despite_uncaught_exception_mid_grid(tmp_path, mo
             "target_params": 200,
             "results_root": str(results_root),
         },
-        "arms": [{"family": "mlp", "constraint": "off", "overrides": {"mu_j": 0.0}}],
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
         "seeds": [0, 1, 2],
     }
     config_path = tmp_path / "resilience.yaml"

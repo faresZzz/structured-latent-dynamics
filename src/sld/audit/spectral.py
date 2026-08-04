@@ -1,6 +1,14 @@
 """Display-only spectral objects for the audit: EDMD baseline, pseudospectra,
 and state-dependent "local spectra" fields.
 
+STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+Every entry point here is display-only by the doctrine below ("A displayed
+spectrum is NEVER a stability object") and feeds either the demoted Fig. 2
+(``viz/fig2_spectrum.py``: ``operator_spectrum``, ``local_spectra_field``)
+or the retired mu_J gauge calibration (``operator_norm``, consumed only by
+``audit.jacobian.augmented_sigma_max_normalized``). Remains available and
+tested (tests/audit/test_spectral.py); blocks NO gate of phases C-E.
+
 REGLES doctrine (sections 3, 5) enforced here:
 
 - A displayed spectrum is NEVER a stability object. Every quantitative

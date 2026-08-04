@@ -132,6 +132,16 @@ FAILURE_FILENAME = "failure.json"
 # not just column presence) by the factorial validator's sentinel-binding
 # check (M3, round 4) -- one shared constant so the two can never drift apart
 #
+# STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
+# Every mu_j hook in this file (config validation below, the "jac_pen"
+# column, _composite_loss's mu_j branch, _jac_state_penalty) is the
+# now-retired mu_J penalty's training-side wiring. It REMAINS FUNCTIONAL
+# and REMAINS TESTED (tests/training/test_trainer.py, 44 tests) as a
+# secondary regression path -- never a gate of phases C-E. Removing these
+# hooks would still break any config that sets mu_j > 0 (mu_j defaults to
+# 0.0 and is a no-op then, per the "OFF cell" doctrine below); this is
+# exactly why the verdict here is DEMOTE, not delete.
+#
 # CONTRACT NOTE: "jac_pen" is the TRAIN-side mu_j diagnostic only. "val_loss"
 # does NOT include mu_j * jac_pen -- the penalty is not evaluated on the val
 # split at all (Trainer._composite_loss(..., compute_jac_penalty=False)),
@@ -512,6 +522,10 @@ class Trainer:
         self, predictor, jac_steps: list[tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]]
     ) -> torch.Tensor:
         """Dispatch the mu_j penalty by presence of a threaded state ``m``.
+
+        SECONDARY -- not primary thesis (jalon B2 demotion): this is the
+        branch point of the retired mu_J penalty's training-side wiring
+        (module CONTRACT NOTE above). Functional and tested, never a gate.
 
         Family-agnostic (``predictors.base`` doctrine): reads what each
         captured step ACTUALLY carries, never the family name. Every

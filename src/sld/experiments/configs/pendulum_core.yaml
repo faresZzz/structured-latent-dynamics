@@ -1,3 +1,11 @@
+# HISTORIQUE -- config de la campagne mu_J, SUPERSEDED, non executable par
+# `sld-factorial` (phase B1 : l'axe family/constraint est retire du schema
+# actif, remplace par backbone/structure -- voir factorial.py). Cette config
+# garde volontairement l'ancien schema `family`/`constraint` : c'est ce qui
+# la fait refuser par le nouveau validateur (test de non-executabilite dans
+# tests/experiments/test_factorial.py). Trace conservee dans
+# reports/historical/mu_j/. Ne pas migrer, ne pas executer.
+#
 # Grille D1 pre-enregistree (PROTOCOL.md): 2 datasets x 8 arms (4 families x
 # off/on) x 5 seeds (PROTOCOL.md section 3) = 80 runs.
 # Core cells retain `exp_name: pendulum_core`; selection/calibration uses the

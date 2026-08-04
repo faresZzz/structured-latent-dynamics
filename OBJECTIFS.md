@@ -34,8 +34,12 @@ et y reconnaître exactement le programme du research statement.
    absolus, CEM vs planning par gradient, 4 familles de predictors à budgets
    strictement appariés. Une taille core — pas de claim de pente (≥ 3 tailles =
    Année 2, dit dans le README).
-2. **Le protocole factorial qui tourne** : architecture × contrainte commune μ_J
-   × encodeur (2 axes), multi-seed, pré-enregistré.
+2. **Le protocole factorial qui tourne** : backbone × structure (l'axe
+   primaire depuis la phase B1 ; `structure` est architectural, jamais une
+   pénalité numérique) × encodeur (2 axes), multi-seed, pré-enregistré.
+   L'ancien axe architecture × contrainte commune μ_J a échoué et est
+   retiré au rang d'étude secondaire (`README.md`, section Statut ; trace
+   complète `reports/historical/mu_j/`).
 3. **L'instrument calibré** : audit en 5 familles, formes invariantes, stress
    test de reparamétrisation, calibration fault-injection timeboxée avec
    précision de triage mesurée contre une baseline val-loss.
@@ -120,7 +124,9 @@ structured-latent-dynamics/
 
 ## 4. Taxonomie détaillée du package
 
-Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user.
+Statuts : ⬜ à faire · 🟨 en cours · ✅ fait · 🔁 révisé user · 🔴 retirée
+(code + tests existent mais l'entrée publique refuse délibérément de
+tourner, ex. `NotImplementedError`).
 
 ### 4.1 `systems/` — les vérités terrain
 
@@ -177,8 +183,8 @@ Vérifié 2026-07-21 : `frame_mlp.py` 5/5, `window_mlp.py` 6/6, tests verts.
 |---|---|---|---|
 | `jepa.py` | `JEPALoss` | prédiction latente + EMA target + stop-grad ; consistance liftée λ_c ($\hat h \approx \mathrm{sg}[\psi(z)]$) ; horizons TF/FR déclarés | ✅ |
 | `vicreg.py` | `variance_loss`, `covariance_loss` | anti-collapse sur ψ(z), appliqué à tous les bras | ✅ |
-| `jac_reg.py` | `TotalJacobianPenalty` | facteur contrainte commun μ_J : pénalité sur $\lVert J^q \rVert$ (état augmenté) par sondes JVP/Hutchinson, pas sous-échantillonnés — LE point techniquement risqué (spike S1) | ✅ |
-| `spectral_reg.py` | `SpectralSeparationReg` | hinge + double-puits log-module — **ablation de la famille spectrale seulement**, jamais dans le facteur commun | ✅ |
+| `jac_reg.py` | `TotalJacobianPenalty` | facteur contrainte commun μ_J : pénalité sur $\lVert J^q \rVert$ (état augmenté) par sondes JVP/Hutchinson, pas sous-échantillonnés — LE point techniquement risqué (spike S1). **Jalon B2 : démoté SECONDARY, hors thèse primaire** (échec de la campagne μ_J, `README.md`) — module conservé et testé pour la régression uniquement | ✅ |
+| `spectral_reg.py` | `SpectralSeparationReg` | hinge + double-puits log-module — **ablation de la famille spectrale seulement**, jamais dans le facteur commun. **Jalon B2 : démoté SECONDARY** (même statut que `jac_reg.py` ci-dessus) | ✅ |
 
 ### 4.6 `training/`
 
@@ -197,14 +203,21 @@ Vérifié 2026-07-21 : `frame_mlp.py` 5/5, `window_mlp.py` 6/6, tests verts.
 | `gramians.py` | `reachability_gramian`, `observability_gramian`, `free_evolution_displacement` | $W_c$ LTV avec $R_u$ déclaré ; $C_k := J_\pi(h_k)$ ; gramien conditionnel vs système complet ; Δh relatif à l'évolution libre | ⬜ |
 | `alignment.py` | `r_ctrl`, `e_ctrl`, `pushforward_gramian`, `cost_gradient_pullback` | formes invariantes : $r_{\mathrm{ctrl}} = \frac{g^\top W_c g}{g^\top \Sigma_h g}$ ; $E_{\mathrm{ctrl}} = g^\top \Sigma_h (W_c + \lambda\Sigma_h)^{-1} \Sigma_h g$ ; $W_c^z = J_\pi W_c J_\pi^\top$ | ⬜ |
 | `identifiability.py` | `linear_recovery_r2`, `procrustes_error`, `orthogonality_error`, `covariance_anisotropy` | panel LeJEPA contre l'état vrai | ⬜ |
-| `invariance.py` | `stress_test` | reparamétrisations compensées aléatoires → chaque diagnostic bouge < tolérance déclarée ; **gate avant toute lecture scientifique** | ⬜ |
+| `invariance.py` | `GaugeCheckResult`, `diagonal_gauges`, `check_diagonal_gauge_invariance`, `assert_diagonal_gauge_invariant`, `check_shear_breaks_invariance` | stress test de reparamétrisation diagonale (REGLES section 4) : check positif (la mesure ne bouge pas sous `D` diagonale finie inversible, y compris échelles extrêmes) + check négatif déclaré (la même mesure DOIT bouger sous un shear) ; **gate avant toute lecture scientifique** | ✅ |
 | `dsa.py` | `dsa_similarity` | optionnel v1.5, jamais bloquant | ⬜ |
 
-Vérifié 2026-07-21 : `spectral.py` 40/40, `jacobian.py` 48/48, tous verts (le
-seul `NotImplementedError` de `jacobian.py` est une garde documentée sur un
-chemin de spectre partiel non supporté, pas un stub). `gramians.py`,
-`alignment.py`, `identifiability.py`, `invariance.py`, `dsa.py` confirmés
-absents — `audit/__init__.py` n'exporte que spectral/jacobian.
+Vérifié 2026-08-04 (jalon B4, corrige la ligne `invariance.py` ci-dessus,
+mesurée fausse par la brief B4 et revérifiée ici avant correction) :
+`spectral.py` 40/40, `jacobian.py` 48/48, tous verts (le seul
+`NotImplementedError` de `jacobian.py` est une garde documentée sur un
+chemin de spectre partiel non supporté, pas un stub). **`invariance.py`
+EXISTE et est primaire** — `tests/audit/test_invariance.py`, 9/9 verts,
+et il n'exporte pas `stress_test` (ce nom n'existe nulle part dans le
+fichier) mais les 5 symboles listés ci-dessus, tous ré-exportés par
+`audit/__init__.py`. `gramians.py`, `alignment.py`, `identifiability.py`,
+`dsa.py` restent confirmés absents — `audit/__init__.py` exporte
+spectral/jacobian/invariance/rollout (`vpt`, `VPTResult`), pas seulement
+spectral/jacobian.
 
 ### 4.8 `calibration/`
 
@@ -235,9 +248,10 @@ Vérifié 2026-07-21 : `src/sld/planning/` **n'existe pas du tout**.
 |---|---|---|---|
 | `factorial.py` | CLI `sld-factorial` | expansion YAML → runs (config + seed → dossier déterministe) ; resume | ✅ |
 | `loading.py` | (non listé initialement, module réel) | chargement/résolution des artefacts de run | ✅ |
-| `configs/pendulum_core.yaml` | config core D1 | ✅ |
+| `configs/pendulum_core.yaml` | config core, gelée/historique | **✅ (mais non exécutable)** |
+| `configs/pendulum_core_partial.yaml` | config core active | ✅ |
 | `configs/smoke.yaml` | config smoke test | ✅ |
-| `configs/calibration.yaml` | config sélection μ_J | ✅ |
+| `configs/calibration.yaml` | config sélection μ_J, gelée/historique | **✅ (mais non exécutable)** |
 | `configs/oscillators.yaml` | — | ⬜ |
 | `configs/lorenz.yaml` | — | ⬜ |
 | `configs/cartpole.yaml` | — | ⬜ |
@@ -249,29 +263,53 @@ cette section était marquée ⬜ en bloc alors que `factorial.py` et 3 des 8
 configs existent et passent leurs tests — corrigé ici. Les 5 configs restantes
 (oscillators/lorenz/cartpole/encoder_axis/koopman_ablations) n'existent pas du
 tout, cohérent avec l'absence de câblage des systèmes correspondants notée en
-§4.1. **Aucune grille n'a encore tourné** avec `pendulum_core.yaml` — le ✅ ne
-couvre que « le runner et la config existent et sont testés », pas « la
-science a été produite ».
+§4.1.
+
+Mise à jour jalon B4 (2026-08-04) : `pendulum_core.yaml` et `calibration.yaml`
+portent toujours le schéma retiré `family`/`constraint` (l'ère μ_J) et sont
+désormais des configs gelées/historiques — le validateur `backbone`/`structure`
+les refuse explicitement (`expand(..., dry_run=False)` lève `ValueError`,
+`tests/experiments/test_factorial.py::test_historical_mu_j_configs_are_no_longer_executable`).
+**Aucune grille n'a jamais tourné avec le fichier `pendulum_core.yaml`
+lui-même** — le ✅ historique couvrait seulement « le runner et la config
+existent et sont testés », jamais « la science a été produite » avec CE
+fichier. Les 40 cellules OFF publiées (`README.md`, section Résultats)
+viennent du fichier alors nommé `pendulum_core_off.yaml` (renommé
+`pendulum_core_partial.yaml` en B4) — qui partage `exp_name: pendulum_core`
+avec le fichier ci-dessus, d'où le nom identique du dossier de résultats ;
+ce n'est pas le même fichier qui a tourné. `pendulum_core_partial.yaml` est
+la config core active aujourd'hui (4 des 6 paires `backbone`/`structure`
+valides ; `mlp_k`/`transformer_k` de la phase C complètent les 2 restantes) ;
+`experiments/selection.py` (le sélecteur μ_J) n'existe plus dans `src/` —
+historique seulement, trace complète sous `reports/historical/mu_j/traces/`
+(922 fichiers, 5 043 481 octets, 228 checkpoints `.pt` volontairement
+exclus).
 
 ### 4.11 `viz/`
 
 | Fichier | Responsabilité | Statut |
 |---|---|---|
 | `style.py` | palette, bandes ±1 SE, tailles — cohérence des 5 figures | ✅ |
-| `fig1_rollout.py` | Fig 1 (rollout + Lorenz VPT + démo contraction-améliore-MSE) | 🟨 |
-| `fig2_spectrum.py` | Fig 2 (spectre vs champ local, eigvals analytiques superposées) | 🟨 |
+| `fig1_rollout.py` | Fig 1 (rollout + Lorenz VPT + démo contraction-améliore-MSE). **Jalon B : `make_fig1` retirée, lève `NotImplementedError`** — le readout OLS par run est un paramètre libre par bras, pas une comparaison à armes égales ; remplacé en phase D par un readout partagé gelé | 🔴 retirée (phase D) |
+| `fig2_spectrum.py` | Fig 2 (spectre vs champ local, eigvals analytiques superposées). **Jalon B2 : démotée SECONDARY**, hors thèse primaire (liée à la campagne μ_J retirée) | 🟨 |
 | `fig3_panel.py` | Fig 3 (panel factorial : drift FR, marge $J^q$, R², r_ctrl, Lip(π)) | ⬜ |
 | `fig4_bill.py` | Fig 4 (succès vs compute/décision, CEM vs gradient ; encadré FLOPs(H)) | ⬜ |
 | `fig5_instrument.py` | Fig 5 (confusion de triage + intervention P4) | ⬜ |
 
-Vérifié 2026-07-21 : `tests/viz/test_viz.py` — 32/32 verts pour style.py +
-fig1_rollout.py + fig2_spectrum.py. **fig1/fig2 marqués 🟨 (en cours) et pas
-✅** volontairement : le code passe ses tests unitaires sur données
-synthétiques, mais **aucune figure réelle n'a jamais été produite sur disque**
-— recherche de `*.png`/`*.svg` dans tout le repo (y compris
+Vérifié 2026-07-21 (figure produite : encore vrai le 2026-08-04, revérifié
+avant B4) : **aucune figure réelle n'a jamais été produite sur disque** —
+recherche de `*.png`/`*.svg` dans tout le repo (y compris
 `results/smoke/*/figs/` et `assets/`) : zéro fichier trouvé. `assets/`
 n'existe même pas encore. Distinction délibérée entre « code testé » et
-« artefact produit » — ce dernier reste à faire avant de clore D1.
+« artefact produit ».
+
+Mise à jour jalon B (2026-08-04) : `fig1_rollout.py`'s `make_fig1` now
+refuses to run at all (`NotImplementedError`, 🔴 retirée ci-dessus) rather
+than being merely "in progress" — this is a deliberate design decision
+(equal-footing readout is a phase-D dependency), not a regression.
+`fig2_spectrum.py` stays 🟨: its unit tests on synthetic data still pass
+(`tests/viz/test_viz.py`), but it is now SECONDARY (jalon B2 demotion),
+tied to the retired μ_J campaign, and blocks no gate.
 
 ---
 
