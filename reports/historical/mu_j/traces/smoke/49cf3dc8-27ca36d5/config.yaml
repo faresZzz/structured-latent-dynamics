@@ -1,0 +1,22 @@
+batch_episodes: 4
+d_u: 1
+d_x: 2
+d_z: 4
+encoder_hidden:
+- 64
+- 64
+epochs: 3
+exp_name: smoke
+family: mlp
+h_fr: 5
+lambda_c: 0.0
+lr: 0.001
+mu_j: 0.0
+seed: 0
+target_params: 2000
+tau_ema: 0.99
+w_cov: 1.0
+w_fr: 1.0
+w_tf: 1.0
+w_var: 1.0
+weight_decay: 0.0

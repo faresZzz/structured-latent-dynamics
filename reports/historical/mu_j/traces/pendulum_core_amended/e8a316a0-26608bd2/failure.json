@@ -1,0 +1,1 @@
+{"config_hash": "e8a316a0", "data_hash": "26608bd2", "epoch": 46, "reason": "non-finite loss", "nonfinite_fields": ["train_loss", "val_loss"], "train_loss": "inf", "val_loss": "nan", "exception_class": "RuntimeError"}
