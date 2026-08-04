@@ -21,6 +21,26 @@ def test_manifest_verifies_and_covers_every_traced_file():
     assert len(manifest_lines) == len(files_on_disk)
 
 
+def test_every_traced_file_is_actually_tracked_by_git():
+    """« Publié » se vérifie contre Git, pas contre le disque.
+
+    Le check ci-dessus portait sur le mauvais objet : il passait au vert pendant
+    que `.gitignore`'s `*.csv` écartait silencieusement les 234 CSV du paquet —
+    228 `metrics.csv` (les courbes d'entraînement), les `index.csv` et le rapport
+    de sélection. Un fichier présent sur le disque et absent de Git n'est pas
+    publié, et c'est précisément ce que le mot prétend.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "reports/historical/mu_j/traces"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    on_disk = [
+        str(p.relative_to(REPO_ROOT)) for p in TRACES.rglob("*") if p.is_file()
+    ]
+    untracked = sorted(set(on_disk) - set(tracked))
+    assert not untracked, f"{len(untracked)} fichier(s) de trace non suivis par Git : {untracked[:5]}"
+
+
 def test_single_byte_alteration_is_caught_as_exactly_one_mismatch(tmp_path):
     """Check négatif : un octet altéré dans une copie doit produire exactement 1 FAILED."""
     copy_traces = tmp_path / "traces"

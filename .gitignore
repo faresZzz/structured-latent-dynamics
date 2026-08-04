@@ -32,6 +32,10 @@ weights/
 /datasets/
 /dataset/
 *.csv
+# ...sauf la trace historique publiee : ses metrics.csv/index.csv/rapport de
+# selection SONT la donnee mesuree, et "publie" ne veut rien dire si Git ne les
+# suit pas (tests/test_historical_manifest.py le verifie desormais).
+!reports/historical/**/*.csv
 *.tar
 *.tar.gz
 *.zip

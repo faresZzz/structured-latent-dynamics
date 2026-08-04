@@ -1,0 +1,3 @@
+run_dir,regime,family,constraint,seed,status,final_val_loss
+results/smoke/49cf3dc8-27ca36d5,ou,mlp,off,0,complete,0.9816271662712097
+results/smoke/a668a5c3-27ca36d5,ou,koopman_ssm,on,0,complete,1.293235182762146
