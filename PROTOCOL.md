@@ -1765,3 +1765,33 @@ would be a contract about an execution nobody performed.
   likely divergence candidates in D4. This is declared in advance so that a divergence there is
   read as a known risk realized, not as a surprise — and 11.7 already says what happens: cell
   level, no inference.
+
+### 14.9 The pretraining objective of the shared representation (added 2026-08-06)
+
+Phase D freezes one encoder and one state readout per stratum, shared by all six arms
+(section 12.3's `e_recon` is measured on that readout, and `tau_1 = 3 * e_recon` depends on
+it). The plan named the artifact and its manifest but never named the objective that produces
+it, and the objective is a fairness decision, not an implementation detail: an encoder
+pretrained with a predictor in the loop carries that arm's inductive bias into all six cells.
+
+**Declared: the representation is pretrained with no predictor in the loop.** The objective is
+the two terms the existing trainer already applies to the embedding itself — the VICReg
+variance and covariance terms — plus the linear state readout's reconstruction error. Nothing
+that depends on a transition model enters it. Consequences, stated rather than discovered
+later:
+
+- The latent is **not** shaped by any dynamics objective. It is a well-conditioned,
+  decodable coordinate system, and that is all this phase claims for it. An encoder trained
+  jointly with a predictor would very likely produce a latent on which prediction is easier;
+  the number this phase reports is therefore a **lower** bound on what a jointly-trained
+  system would reach, not an estimate of it.
+- The comparison the grid exists to make is unaffected, because the handicap is identical for
+  the six arms by construction — that is the entire reason for freezing.
+- A later study with a jointly trained per-arm encoder is a different experiment. It would
+  have to match total capacity across arms or declare that it does not, since section 14.2's
+  scope exemption for the encoder rests on the encoder being shared and frozen.
+
+**Decided, not derived.** No measurement informs this choice; it is taken for arm-neutrality
+and recorded before the artifact exists. The alternative considered and rejected was
+pretraining on one declared reference arm, which is cheaper and produces a better latent, and
+which would have privileged one backbone inside a comparison of backbones.
