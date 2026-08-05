@@ -18,6 +18,14 @@ grid even if the run stopped early (F17).
 v0 scope: full-state observation only (``obs: null`` in every dataset
 entry); non-null ``obs`` is rejected -- the windowed-observation path
 arrives with Wave 6 (see ``Trainer.fit`` docstring).
+
+``--shard i/k`` (PROTOCOL.md section 14.7) runs 2-3 concurrent processes
+each on a stride-partitioned subset of the run loop -- expansion and the
+collision preflight stay global, and ``index.csv`` is written atomically and
+always covers the full grid regardless of which shard wrote it. Nothing here
+calls ``torch.set_num_threads``: concurrent shards on one box contend for
+CPU cores, so set ``OMP_NUM_THREADS`` per shard process rather than relying
+on a knob this runner does not provide.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -690,7 +699,19 @@ def _write_index(results_root: Path, exp_name: str, cells: list[dict]) -> None:
     Idempotent and resilient (F17a): ``cells`` is expected to be the FULL
     expansion with ``run_dir`` already resolved for every cell (preflight),
     so every cell in the grid appears -- ``missing`` if nothing usable is
-    on disk -- even when the run stopped partway through the grid.
+    on disk -- even when the run stopped partway through the grid, and even
+    when THIS process only ran a shard of it (PROTOCOL.md section 14.7):
+    callers must pass the full expanded grid here regardless of what the run
+    loop itself iterated over, never the shard's own subset -- a shard
+    writing only its own cells would silently drop the other shards'
+    completed runs from the index, which is exactly the defect this function
+    exists to prevent.
+
+    Atomic write (14.7): a temp file in the SAME directory (same filesystem,
+    so ``os.replace`` is atomic on POSIX) renamed onto ``index.csv`` --
+    same discipline as ``run_complete.json``/``failure.json`` in
+    ``trainer.py`` -- so two concurrent shards racing to regenerate the
+    index never leave a torn/half-written file for a third reader.
     """
     # Column layout matches the phase B4 contract (``sld.experiments.loading
     # ._INDEX_COLUMNS``): the column is named "structure" (not "constraint"
@@ -701,7 +722,9 @@ def _write_index(results_root: Path, exp_name: str, cells: list[dict]) -> None:
     # ``loading.read_index`` tolerates that legacy name on read.
     index_dir = results_root / exp_name
     index_dir.mkdir(parents=True, exist_ok=True)
-    with open(index_dir / "index.csv", "w", newline="") as f:
+    final_path = index_dir / "index.csv"
+    tmp_path = final_path.with_name(final_path.name + ".tmp")
+    with open(tmp_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["run_dir", "regime", "family", "structure", "seed", "status", "final_val_loss"])
         for cell in cells:
@@ -710,12 +733,58 @@ def _write_index(results_root: Path, exp_name: str, cells: list[dict]) -> None:
             writer.writerow(
                 [run_dir, cell["dataset"], cell["family"], cell["structure"], cell["seed"], status, val_loss]
             )
+    os.replace(tmp_path, final_path)
+
+
+def _parse_shard(value: str) -> tuple[int, int]:
+    """Parse ``--shard i/k`` (1-indexed shard ``i`` of ``k``) into ``(i, k)``.
+
+    Reuses argparse's own ``type=`` mechanism (``ArgumentTypeError`` ->
+    ``parser.error`` -> ``SystemExit(2)``) -- same pattern as ``--config``'s
+    ``type=Path`` -- so a malformed value exits with one clear line on
+    stderr, never a Python traceback.
+    """
+    parts = value.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise argparse.ArgumentTypeError(f"--shard must be i/k (e.g. 1/3), got {value!r}")
+    try:
+        i, k = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--shard i/k requires integers, got {value!r}")
+    if k < 1 or not (1 <= i <= k):
+        raise argparse.ArgumentTypeError(
+            f"--shard i/k requires 1 <= i <= k and k >= 1, got {value!r}"
+        )
+    return (i, k)
+
+
+def _shard_cells(cells: list[dict], shard: tuple[int, int] | None) -> list[dict]:
+    """The subset of ``cells`` this shard runs -- a deterministic stride
+    partition (``cells[i-1::k]``) so the union over ``i in 1..k`` is exactly
+    ``cells`` and shards are pairwise disjoint by construction (PROTOCOL.md
+    section 14.7). ``shard is None`` (the flag absent) returns ``cells``
+    unchanged -- default behaviour stays byte-for-byte today's."""
+    if shard is None:
+        return cells
+    i, k = shard
+    return cells[i - 1 :: k]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sld-factorial")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--shard",
+        type=_parse_shard,
+        default=None,
+        metavar="i/k",
+        help=(
+            "run only cells i-1::k of the grid (1<=i<=k); expansion and the collision "
+            "preflight stay global (PROTOCOL.md 14.7). Concurrent shards on one box "
+            "contend for CPU cores -- set OMP_NUM_THREADS per shard process."
+        ),
+    )
     args = parser.parse_args(argv)
 
     with open(args.config) as f:
@@ -723,12 +792,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         cells = expand(config, dry_run=True)
-        for cell in cells:
+        shown = _shard_cells(cells, args.shard)
+        for cell in shown:
             print(
                 f"[{cell['index']}] {cell['dataset']} {cell['backbone']} {cell['structure']} "
                 f"{cell['family']} seed={cell['seed']} mu_j={cell['mu_j']}"
             )
-        print(f"total: {len(cells)} runs")
+        print(f"total: {len(shown)} runs")
         return 0
 
     cells = expand(config, dry_run=False)
@@ -740,13 +810,18 @@ def main(argv: list[str] | None = None) -> int:
     # collision rejected before touching disk (F8c) -- nothing has been
     # attempted yet at this point, so no index is written on this path,
     # same as any other pre-training config error (expand() already
-    # behaves this way)
+    # behaves this way). GLOBAL over the full grid even under sharding
+    # (14.7): the uniqueness check must keep seeing every cell, not just
+    # this shard's, so disjointness across shards is guaranteed by
+    # construction rather than by a human hand-editing several configs.
     _preflight_resolve_and_check_collisions(cells, datasets)
+
+    run_cells = _shard_cells(cells, args.shard)
 
     any_failed = False
     n = len(cells)
     try:
-        for cell in cells:
+        for cell in run_cells:
             trainer = cell["trainer"]
             run_dir = cell["run_dir"]
             data = datasets[cell["dataset"]]

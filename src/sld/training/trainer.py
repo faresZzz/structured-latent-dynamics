@@ -12,15 +12,20 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
 import math
 import os
+import random
 import shutil
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
 from torch import nn
+from tqdm import tqdm
 
 from sld.encoders.frame_mlp import FrameMLPEncoder
 from sld.objectives.jac_reg import Gauge, TotalJacobianPenalty, gauge_digest
@@ -136,6 +141,137 @@ RUN_COMPLETE_FILENAME = "run_complete.json"
 # silently retrying a divergence. ``sld-factorial`` (``factorial.py``)
 # checks for it before ever calling ``fit`` again on this identity.
 FAILURE_FILENAME = "failure.json"
+
+# PROTOCOL.md section 14.7: crash-resume. A snapshot (model + optimizer +
+# scheduler + RNG state) written atomically every this many optimizer
+# updates -- and in this repo epochs ARE updates, one batch/one
+# optimizer.step() per epoch (Trainer docstring). A MODULE CONSTANT, never a
+# config key: only results_root is excluded from the config hash, so a
+# config key for this would move every config_hash, therefore every run
+# directory, therefore make every sentinel already on disk unreachable.
+RESUME_CHECKPOINT_INTERVAL = 100
+
+# Deliberately NOT ckpt.pt: this is a different object with a different
+# lifetime -- a rolling mid-run snapshot, overwritten every
+# RESUME_CHECKPOINT_INTERVAL updates and DELETED entirely on successful
+# completion (a finished run leaves no resume state), whereas ckpt.pt is the
+# final weights, written once at the very end and -- like this file -- never
+# itself a completion signal (RUN_COMPLETE_FILENAME is).
+RESUME_CHECKPOINT_FILENAME = "resume_ckpt.pt"
+
+# a resume checkpoint missing any of these is corrupt/truncated and must be
+# REFUSED -- never silently adopted, never silently deleted (section 14.7)
+_RESUME_REQUIRED_KEYS = frozenset(
+    {
+        "config_hash",
+        "epoch",
+        "encoder",
+        "predictor",
+        "ema_target",
+        "optimizer",
+        "scheduler",
+        "torch_rng_state",
+        "numpy_rng_state",
+        "python_rng_state",
+    }
+)
+
+# per-run progress log (section 14.7): resolved config + config_hash + run
+# dir + budget first, then one line per epoch. Joins the fresh-start cleanup
+# list below -- a killed run's log must not survive into the next attempt at
+# the same identity.
+TRAIN_LOG_FILENAME = "train.log"
+
+
+def _save_resume_checkpoint(
+    path: Path,
+    config_hash: str,
+    epoch: int,
+    encoder: nn.Module,
+    predictor: nn.Module,
+    ema: EMATarget,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+) -> None:
+    """Atomic write (temp file + ``os.replace`` in the same directory --
+    identical discipline to ``RUN_COMPLETE_FILENAME``/``FAILURE_FILENAME``)
+    of everything needed to resume training bit-identically from the END of
+    ``epoch``: model/optimizer/scheduler state, and every RNG global
+    ``fit``'s loop draws from -- torch, numpy, and python's ``random``
+    (``set_seed`` seeds all three; a resume that restores only some of them
+    is not bit-identical resume, it is a second, undeclared experiment)."""
+    state = {
+        "config_hash": config_hash,
+        "epoch": epoch,
+        "encoder": encoder.state_dict(),
+        "predictor": predictor.state_dict(),
+        "ema_target": ema.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "torch_rng_state": torch.get_rng_state(),
+        "numpy_rng_state": np.random.get_state(),
+        "python_rng_state": random.getstate(),
+    }
+    tmp_path = path.with_name(path.name + ".tmp")
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _load_resume_checkpoint(path: Path, config_hash: str) -> dict:
+    """Load and validate a resume checkpoint, or refuse it loudly.
+
+    Two distinct refusals, per PROTOCOL.md section 14.7 -- neither is ever
+    silently adopted nor silently deleted: unreadable/missing-key ("corrupt
+    or unreadable" / "corrupt: missing keys" in the message) and identity
+    mismatch ("identity mismatch" in the message, when the checkpoint's own
+    ``config_hash`` disagrees with this run's).
+    """
+    try:
+        # weights_only=False is required, not a default left unexamined: the
+        # payload carries optimizer/scheduler state and numpy's RNG state
+        # tuple, none of which is a bare tensor. Trust boundary: this file is
+        # written ONLY by _save_resume_checkpoint above, into a run directory
+        # this Trainer instance owns -- never sourced from a peer, a
+        # download, or any other untrusted origin.
+        state = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        raise RuntimeError(
+            f"resume checkpoint at {path} is corrupt or unreadable ({exc!r}) -- "
+            "refusing to adopt or silently discard it"
+        ) from exc
+    missing = _RESUME_REQUIRED_KEYS - set(state) if isinstance(state, dict) else _RESUME_REQUIRED_KEYS
+    if missing:
+        raise RuntimeError(
+            f"resume checkpoint at {path} is corrupt: missing keys {sorted(missing)} -- "
+            "refusing to adopt or silently discard it"
+        )
+    if state["config_hash"] != config_hash:
+        raise RuntimeError(
+            f"resume checkpoint identity mismatch: checkpoint config_hash="
+            f"{state['config_hash']!r} != this run's config_hash={config_hash!r} -- "
+            "refusing to adopt or silently discard it"
+        )
+    return state
+
+
+def _truncate_metrics_csv(path: Path, n_rows: int) -> None:
+    """Truncate ``metrics.csv`` to its header plus exactly ``n_rows`` data rows.
+
+    Resume-only: a process killed between a resume checkpoint save and the
+    next several epoch writes leaves rows the checkpoint does not cover,
+    possibly with a torn last row. ``n_rows`` is the checkpoint's own epoch
+    count, so this discards exactly what the checkpoint cannot vouch for,
+    torn or not, and never more or less.
+    """
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        rows = list(reader)[:n_rows]
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+
 
 # metrics.csv's exact header, written by fit() below and re-checked (schema,
 # not just column presence) by the factorial validator's sentinel-binding
@@ -678,6 +814,25 @@ class Trainer:
         sentinel, never ``ckpt.pt`` alone. Any stale sentinel from a
         PREVIOUS run at this identity is removed up front, alongside
         ``ckpt.pt``/``audit.json``.
+
+        Crash-resume (PROTOCOL.md section 14.7): every ``RESUME_CHECKPOINT_
+        INTERVAL`` updates, ``fit`` atomically writes ``run_dir /
+        RESUME_CHECKPOINT_FILENAME`` -- model, optimizer, scheduler, epoch
+        counter, and torch/numpy/python RNG state. On entry, if that file
+        exists and its ``config_hash`` matches this run's, ``fit`` loads it
+        and continues from the next epoch, truncating ``metrics.csv`` to
+        exactly the rows the checkpoint covers first; a MISMATCHED or
+        corrupt/truncated file is refused with ``RuntimeError``, never
+        adopted and never silently deleted. The bit-identity requirement:
+        a run of N updates killed at N/2 and resumed produces a
+        ``metrics.csv`` byte-identical to an uninterrupted run of N
+        updates. ``ckpt.pt`` and ``run_complete.json`` keep their existing
+        meanings unchanged -- a checkpoint is still not a completion
+        signal. The resume checkpoint is deleted on successful completion
+        (a finished run leaves no resume state) and is one of the stale
+        artifacts a fresh start clears, alongside the new per-run
+        ``train.log`` (config, ``config_hash``, run dir, budget, then one
+        line per epoch).
         """
         cfg = self.config
         # dataset spec enters the run identity BEFORE anything is written
@@ -723,135 +878,260 @@ class Trainer:
         val_idx = np.arange(val_split["x"].shape[0])
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        # Every artifact this fit writes is cleared up front.  Besides
-        # preventing stale success artifacts from certifying an aborted
-        # rerun, this makes a validator-requested retrain recover if a
-        # corrupt artifact is a directory: writing config.yaml/metrics.csv
-        # would otherwise raise IsADirectoryError, as would recreating figs/
-        # if it had become a regular file.  Remove each stale path however it
-        # exists: shutil.rmtree for a directory, unlink otherwise.
-        # FAILURE_FILENAME is DELIBERATELY absent from this list (PROTOCOL.md
-        # section 11.7): a divergence is a terminal result, not a partial
-        # artifact to be wiped and silently retried -- see FAILURE_FILENAME's
-        # docstring above.
-        for stale in (
-            "config.yaml",
-            "metrics.csv",
-            "ckpt.pt",
-            "audit.json",
-            RUN_COMPLETE_FILENAME,
-            "figs",
-        ):
-            stale_path = self.run_dir / stale
-            if stale_path.is_dir():
-                shutil.rmtree(stale_path)
-            else:
-                stale_path.unlink(missing_ok=True)
-        (self.run_dir / "figs").mkdir()
+
+        resume_path = self.run_dir / RESUME_CHECKPOINT_FILENAME
+        complete_path = self.run_dir / RUN_COMPLETE_FILENAME
+        # A resume checkpoint coexisting with a completion sentinel is
+        # STALE, not a run to continue: the only way both exist together is
+        # the narrow window between writing run_complete.json and deleting
+        # the resume checkpoint at the very end of a successful fit (below)
+        # being interrupted mid-way. Treated as a fresh start, which wipes
+        # both -- resuming a run that has already certified itself complete
+        # would silently re-extend a finished result.
+        resuming = resume_path.exists() and not complete_path.exists()
+
+        if resuming:
+            # PROTOCOL.md section 14.7: identity MATCH -> continue; identity
+            # MISMATCH or an unreadable/truncated file -> refuse loudly
+            # (RuntimeError from _load_resume_checkpoint), never adopted and
+            # never silently deleted.
+            resume_state = _load_resume_checkpoint(resume_path, self.config_hash)
+            encoder.load_state_dict(resume_state["encoder"])
+            predictor.load_state_dict(resume_state["predictor"])
+            ema.load_state_dict(resume_state["ema_target"])
+            optimizer.load_state_dict(resume_state["optimizer"])
+            scheduler.load_state_dict(resume_state["scheduler"])
+            torch.set_rng_state(resume_state["torch_rng_state"])
+            np.random.set_state(resume_state["numpy_rng_state"])
+            random.setstate(resume_state["python_rng_state"])
+            start_epoch = resume_state["epoch"] + 1
+        else:
+            # Every artifact this fit writes is cleared up front.  Besides
+            # preventing stale success artifacts from certifying an aborted
+            # rerun, this makes a validator-requested retrain recover if a
+            # corrupt artifact is a directory: writing config.yaml/metrics.csv
+            # would otherwise raise IsADirectoryError, as would recreating figs/
+            # if it had become a regular file.  Remove each stale path however it
+            # exists: shutil.rmtree for a directory, unlink otherwise.
+            # FAILURE_FILENAME is DELIBERATELY absent from this list (PROTOCOL.md
+            # section 11.7): a divergence is a terminal result, not a partial
+            # artifact to be wiped and silently retried -- see FAILURE_FILENAME's
+            # docstring above. RESUME_CHECKPOINT_FILENAME and TRAIN_LOG_FILENAME
+            # join this list (section 14.7): a killed run's resume state and log
+            # must not survive into the next attempt at the same identity.
+            for stale in (
+                "config.yaml",
+                "metrics.csv",
+                "ckpt.pt",
+                "audit.json",
+                RUN_COMPLETE_FILENAME,
+                "figs",
+                RESUME_CHECKPOINT_FILENAME,
+                TRAIN_LOG_FILENAME,
+            ):
+                stale_path = self.run_dir / stale
+                if stale_path.is_dir():
+                    shutil.rmtree(stale_path)
+                else:
+                    stale_path.unlink(missing_ok=True)
+            (self.run_dir / "figs").mkdir()
+            start_epoch = 0
+
         config_path = self.run_dir / "config.yaml"
         config_path.write_text(self._canonical_yaml)
 
+        # Per-run log (section 14.7). A logger unique to this run directory,
+        # with its OWN FileHandler removed in `finally`: a shared/global
+        # logger would leak every subsequent fit() call's lines into every
+        # earlier run's train.log, since repeated fit() calls happen
+        # in-process (this test suite is the proof).
+        logger = logging.getLogger(f"sld.training.trainer.run.{self.run_dir}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        log_handler = logging.FileHandler(
+            self.run_dir / TRAIN_LOG_FILENAME, mode="a" if resuming else "w"
+        )
+        log_handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(log_handler)
+
         history = {k: [] for k in ("epoch", "train_loss", "val_loss", *_HISTORY_DIAGNOSTIC_KEYS)}
         metrics_path = self.run_dir / "metrics.csv"
-        with open(metrics_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(list(METRICS_HEADER))
 
-            for epoch in range(cfg["epochs"]):
-                # one sampled train batch per epoch (v0 scale, declared above)
-                batch_size = min(cfg["batch_episodes"], n_train)
-                idx = np.random.choice(n_train, size=batch_size, replace=False)
-                x_bt, u_bt = _time_major(train_split, idx)
+        try:
+            logger.info(
+                "config_hash=%s data_hash=%s run_dir=%s", self.config_hash, self.data_hash, self.run_dir
+            )
+            logger.info(
+                "budget: epochs=%d (resume checkpoint every %d updates)",
+                cfg["epochs"],
+                RESUME_CHECKPOINT_INTERVAL,
+            )
+            logger.info("config:\n%s", self._canonical_yaml.rstrip())
 
-                optimizer.zero_grad()
-                train_total, diag = self._composite_loss(
-                    encoder, predictor, ema, jepa, x_bt, u_bt, lifted, lift_fn, project_fn, h_fr
+            if resuming:
+                # metrics.csv may hold rows the checkpoint does not cover
+                # (possibly a torn last row) -- truncate to exactly what it
+                # certifies, then rebuild `history` from what remains so
+                # epochs_completed/final_*_loss/best_*_loss reflect the
+                # WHOLE run, not just the resumed tail.
+                _truncate_metrics_csv(metrics_path, start_epoch)
+                with open(metrics_path, newline="") as f:
+                    for row in csv.DictReader(f):
+                        history["epoch"].append(int(row["epoch"]))
+                        history["train_loss"].append(float(row["train_loss"]))
+                        history["val_loss"].append(float(row["val_loss"]))
+                        for key in _HISTORY_DIAGNOSTIC_KEYS:
+                            history[key].append(None)  # never recomputed, see Wave 4 note above
+                logger.info(
+                    "resuming from epoch %d (%d rows kept in metrics.csv)", start_epoch, start_epoch
                 )
-                train_total.backward()
-                lr_used = optimizer.param_groups[0]["lr"]  # rate actually used for this step
-                optimizer.step()
-                ema.update(encoder)  # EMA target refreshed after EVERY optimizer step
-                scheduler.step()
+                metrics_mode = "a"
+            else:
+                metrics_mode = "w"
 
-                with torch.no_grad():
-                    x_v, u_v = _time_major(val_split, val_idx)
-                    # mu_j is NOT evaluated on val (see METRICS_HEADER note
-                    # and _composite_loss docstring): unused downstream and
-                    # 23-38% of epoch time when it was
-                    val_total, _ = self._composite_loss(
-                        encoder,
-                        predictor,
-                        ema,
-                        jepa,
-                        x_v,
-                        u_v,
-                        lifted,
-                        lift_fn,
-                        project_fn,
-                        h_fr,
-                        compute_jac_penalty=False,
+            t_start = time.monotonic()
+            with open(metrics_path, metrics_mode, newline="") as f:
+                writer = csv.writer(f)
+                if not resuming:
+                    writer.writerow(list(METRICS_HEADER))
+
+                epoch_iter = tqdm(
+                    range(start_epoch, cfg["epochs"]),
+                    total=cfg["epochs"],
+                    initial=start_epoch,
+                    file=sys.stderr,
+                    disable=None,  # auto: disabled whenever stderr is not a TTY
+                    desc=f"{cfg['exp_name']} {self.config_hash}",
+                )
+                for epoch in epoch_iter:
+                    # one sampled train batch per epoch (v0 scale, declared above)
+                    batch_size = min(cfg["batch_episodes"], n_train)
+                    idx = np.random.choice(n_train, size=batch_size, replace=False)
+                    x_bt, u_bt = _time_major(train_split, idx)
+
+                    optimizer.zero_grad()
+                    train_total, diag = self._composite_loss(
+                        encoder, predictor, ema, jepa, x_bt, u_bt, lifted, lift_fn, project_fn, h_fr
                     )
+                    train_total.backward()
+                    lr_used = optimizer.param_groups[0]["lr"]  # rate actually used for this step
+                    optimizer.step()
+                    ema.update(encoder)  # EMA target refreshed after EVERY optimizer step
+                    scheduler.step()
 
-                train_loss, val_loss = float(train_total.item()), float(val_total.item())
-                # finite-metrics law (REGLES section 6): a nonfinite loss is a
-                # bug, never a result -- abort loudly instead of writing a
-                # completed-looking run (adversarial review round 1)
-                if not (math.isfinite(train_loss) and math.isfinite(val_loss)):
-                    # PROTOCOL.md section 11.7: the divergence is reported,
-                    # not just raised -- failure.json is this run's terminal
-                    # sentinel, written atomically (temp file + os.replace,
-                    # same discipline as RUN_COMPLETE_FILENAME) BEFORE the
-                    # abort. The offending values are recorded HERE, as
-                    # strings ("nan"/"inf"/"-inf") rather than raw floats --
-                    # json.dumps would otherwise emit the bare NaN/Infinity
-                    # literals Python's own json module accepts but strict
-                    # JSON does not -- since this row is never written to
-                    # metrics.csv (metrics.csv only ever carries finite
-                    # values; this is the recovery path for it, chosen over
-                    # writing the nonfinite row into metrics.csv itself).
-                    nonfinite_fields = [
-                        name
-                        for name, value in (("train_loss", train_loss), ("val_loss", val_loss))
-                        if not math.isfinite(value)
-                    ]
-                    failure = {
-                        "config_hash": self.config_hash,
-                        "data_hash": self.data_hash,
-                        "epoch": epoch,
-                        "reason": "non-finite loss",
-                        "nonfinite_fields": nonfinite_fields,
-                        "train_loss": str(train_loss),
-                        "val_loss": str(val_loss),
-                        "exception_class": "RuntimeError",
-                    }
-                    failure_path = self.run_dir / FAILURE_FILENAME
-                    failure_tmp = failure_path.with_name(failure_path.name + ".tmp")
-                    failure_tmp.write_text(json.dumps(failure))
-                    os.replace(failure_tmp, failure_path)
-                    raise RuntimeError(
-                        f"nonfinite loss at epoch {epoch}: train={train_loss}, "
-                        f"val={val_loss} -- run aborted, artifacts incomplete "
-                        f"(terminal failure recorded at {failure_path})"
+                    with torch.no_grad():
+                        x_v, u_v = _time_major(val_split, val_idx)
+                        # mu_j is NOT evaluated on val (see METRICS_HEADER note
+                        # and _composite_loss docstring): unused downstream and
+                        # 23-38% of epoch time when it was
+                        val_total, _ = self._composite_loss(
+                            encoder,
+                            predictor,
+                            ema,
+                            jepa,
+                            x_v,
+                            u_v,
+                            lifted,
+                            lift_fn,
+                            project_fn,
+                            h_fr,
+                            compute_jac_penalty=False,
+                        )
+
+                    train_loss, val_loss = float(train_total.item()), float(val_total.item())
+                    # finite-metrics law (REGLES section 6): a nonfinite loss is a
+                    # bug, never a result -- abort loudly instead of writing a
+                    # completed-looking run (adversarial review round 1)
+                    if not (math.isfinite(train_loss) and math.isfinite(val_loss)):
+                        # PROTOCOL.md section 11.7: the divergence is reported,
+                        # not just raised -- failure.json is this run's terminal
+                        # sentinel, written atomically (temp file + os.replace,
+                        # same discipline as RUN_COMPLETE_FILENAME) BEFORE the
+                        # abort. The offending values are recorded HERE, as
+                        # strings ("nan"/"inf"/"-inf") rather than raw floats --
+                        # json.dumps would otherwise emit the bare NaN/Infinity
+                        # literals Python's own json module accepts but strict
+                        # JSON does not -- since this row is never written to
+                        # metrics.csv (metrics.csv only ever carries finite
+                        # values; this is the recovery path for it, chosen over
+                        # writing the nonfinite row into metrics.csv itself).
+                        nonfinite_fields = [
+                            name
+                            for name, value in (("train_loss", train_loss), ("val_loss", val_loss))
+                            if not math.isfinite(value)
+                        ]
+                        failure = {
+                            "config_hash": self.config_hash,
+                            "data_hash": self.data_hash,
+                            "epoch": epoch,
+                            "reason": "non-finite loss",
+                            "nonfinite_fields": nonfinite_fields,
+                            "train_loss": str(train_loss),
+                            "val_loss": str(val_loss),
+                            "exception_class": "RuntimeError",
+                        }
+                        failure_path = self.run_dir / FAILURE_FILENAME
+                        failure_tmp = failure_path.with_name(failure_path.name + ".tmp")
+                        failure_tmp.write_text(json.dumps(failure))
+                        os.replace(failure_tmp, failure_path)
+                        raise RuntimeError(
+                            f"nonfinite loss at epoch {epoch}: train={train_loss}, "
+                            f"val={val_loss} -- run aborted, artifacts incomplete "
+                            f"(terminal failure recorded at {failure_path})"
+                        )
+                    history["epoch"].append(epoch)
+                    history["train_loss"].append(train_loss)
+                    history["val_loss"].append(val_loss)
+                    for key in _HISTORY_DIAGNOSTIC_KEYS:
+                        history[key].append(None)  # arrives with the Wave 4 audit, never omitted
+
+                    writer.writerow(
+                        [
+                            epoch,
+                            train_loss,
+                            val_loss,
+                            lr_used,
+                            diag["pred"],
+                            diag["consistency"],
+                            diag["var"],
+                            diag["cov"],
+                            diag["jac_pen"],
+                        ]
                     )
-                history["epoch"].append(epoch)
-                history["train_loss"].append(train_loss)
-                history["val_loss"].append(val_loss)
-                for key in _HISTORY_DIAGNOSTIC_KEYS:
-                    history[key].append(None)  # arrives with the Wave 4 audit, never omitted
+                    f.flush()  # live progress feed: today's buffering hides it entirely
 
-                writer.writerow(
-                    [
+                    elapsed = time.monotonic() - t_start
+                    progress = (epoch + 1 - start_epoch) / max(cfg["epochs"] - start_epoch, 1)
+                    eta = elapsed / progress - elapsed if progress > 0 else float("nan")
+                    logger.info(
+                        "epoch=%d train_loss=%.6g val_loss=%.6g lr=%.6g elapsed=%.2fs ETA=%.2fs",
                         epoch,
                         train_loss,
                         val_loss,
                         lr_used,
-                        diag["pred"],
-                        diag["consistency"],
-                        diag["var"],
-                        diag["cov"],
-                        diag["jac_pen"],
-                    ]
-                )
+                        elapsed,
+                        eta,
+                    )
+
+                    # crash-resume checkpoint (section 14.7): every
+                    # RESUME_CHECKPOINT_INTERVAL updates, strictly AFTER this
+                    # epoch's metrics row is written -- so the checkpoint's
+                    # epoch count and metrics.csv's row count always agree,
+                    # which is what makes the truncate-on-resume above exact.
+                    if (epoch + 1) % RESUME_CHECKPOINT_INTERVAL == 0:
+                        _save_resume_checkpoint(
+                            resume_path,
+                            self.config_hash,
+                            epoch,
+                            encoder,
+                            predictor,
+                            ema,
+                            optimizer,
+                            scheduler,
+                        )
+        finally:
+            logger.removeHandler(log_handler)
+            log_handler.close()
 
         ckpt_path = self.run_dir / "ckpt.pt"
         torch.save(
@@ -892,6 +1172,12 @@ class Trainer:
         tmp_path = complete_path.with_name(complete_path.name + ".tmp")
         tmp_path.write_text(json.dumps(completion))
         os.replace(tmp_path, complete_path)
+
+        # section 14.7: a finished run leaves no resume state. Deleted LAST,
+        # strictly after the completion sentinel above -- the narrow window
+        # this leaves (sentinel written, resume checkpoint not yet deleted)
+        # is exactly the race `resuming`'s definition above accounts for.
+        resume_path.unlink(missing_ok=True)
 
         paths = {
             "config": str(config_path.resolve()),

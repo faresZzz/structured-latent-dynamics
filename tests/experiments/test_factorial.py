@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ import yaml
 from sld.experiments.factorial import (
     _cell_status,
     _final_val_loss,
+    _parse_shard,
+    _shard_cells,
     _validate_completion_sentinel,
     expand,
     main,
@@ -26,6 +29,15 @@ from sld.experiments.factorial import (
 from sld.training.trainer import Trainer
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "src" / "sld" / "experiments" / "configs"
+
+# The deliberately-frozen historical trace (phase B1): kept on the OLD
+# family/constraint schema ON PURPOSE, so it must be REFUSED by the current
+# validator, never expand cleanly. Named explicitly -- this is the one
+# hardcoded list that is allowed, because it is a documented, deliberate
+# choice, not "the configs someone has gotten around to fixing". Shared by
+# both tests below so the frozen set can never silently drift between what
+# "must fail" and what "must pass" each believes it is.
+_FROZEN_HISTORICAL_CONFIGS = frozenset({"calibration.yaml", "pendulum_core.yaml"})
 
 
 def _minimal_dataset_entry(**overrides) -> dict:
@@ -89,7 +101,7 @@ def test_factorial_pair_table_is_exactly_the_declared_cross_product():
     assert _FAMILY_BY_PAIR == _SIX_CELLS
 
 
-@pytest.mark.parametrize("config_name", ("calibration.yaml", "pendulum_core.yaml"))
+@pytest.mark.parametrize("config_name", sorted(_FROZEN_HISTORICAL_CONFIGS))
 def test_historical_mu_j_configs_are_no_longer_executable(config_name):
     # phase B1: these 2 configs are the frozen trace of the retired mu_J
     # campaign (reports/historical/mu_j/) -- kept on the OLD family/
@@ -98,6 +110,61 @@ def test_historical_mu_j_configs_are_no_longer_executable(config_name):
     config = yaml.safe_load((_CONFIGS / config_name).read_text())
     with pytest.raises(ValueError):
         expand(config, dry_run=False)
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    sorted(p.name for p in _CONFIGS.glob("*.yaml") if p.name not in _FROZEN_HISTORICAL_CONFIGS),
+)
+def test_every_non_frozen_config_expands_cleanly(config_name):
+    # the complement of the test above, and the actual guard this wave adds:
+    # every config under configs/ that is NOT in the deliberately-frozen
+    # historical set must expand() cleanly under the CURRENT schema, in run
+    # mode (dry_run=False -- the stricter of the two: it also refuses null
+    # overrides and a resolved mu_j > 0). smoke.yaml went stale after
+    # Amendment 4 remapped (ssm, on) from koopman_ssm to ssm_k --
+    # koopman_ssm's constrained/n_pairs keys are not ssm_k's -- and nothing
+    # in the suite noticed until someone ran it by hand. The parametrize
+    # list is DISCOVERED from the directory (glob), never hardcoded: a
+    # hardcoded "known-good" list would have passed right through that
+    # staleness, and would miss the next config anyone adds the same way.
+    config = yaml.safe_load((_CONFIGS / config_name).read_text())
+    cells = expand(config, dry_run=False)
+    print(f"[factorial] {config_name}: expands to {len(cells)} cells")
+    assert len(cells) > 0
+
+
+def test_smoke_config_runs_end_to_end(tmp_path):
+    # smoke.yaml's ENTIRE purpose is to be the cheap end-to-end check
+    # (Makefile `smoke` target, README.md `make smoke`) -- "expands
+    # cleanly" (test_every_non_frozen_config_expands_cleanly, above) is the
+    # wrong bar for this ONE config specifically: a dataset/regime param
+    # invalid only at BUILD time, or a Trainer crash, sails straight
+    # through expand()'s schema check and is only ever caught by actually
+    # training. Kept to this one config -- forcing every non-frozen config
+    # through main() would be a slow test for no gain; the other configs
+    # are not the smoke path's job.
+    results_root = tmp_path / "results"
+    config = yaml.safe_load((_CONFIGS / "smoke.yaml").read_text())
+    config["base"]["results_root"] = str(results_root)
+    config_path = tmp_path / "smoke.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    rc = main(["--config", str(config_path)])
+    assert rc == 0
+
+    index_path = results_root / "smoke" / "index.csv"
+    rows = list(csv.DictReader(index_path.open()))
+    print(f"[factorial] smoke.yaml e2e: {[(r['family'], r['structure'], r['status']) for r in rows]}")
+    assert len(rows) == 2  # the 2 arms the Makefile/README `make smoke` target expects
+    for row in rows:
+        assert row["status"] == "complete"
+        run_dir = Path(row["run_dir"])
+        # the public artifact contract (REGLES section 6), same set
+        # factorial.py's own _REQUIRED_ARTIFACTS/_REQUIRED_DIRECTORIES check
+        for artifact in ("ckpt.pt", "metrics.csv", "config.yaml", "audit.json", "run_complete.json"):
+            assert (run_dir / artifact).exists(), f"{run_dir}/{artifact} missing"
+        assert (run_dir / "figs").is_dir()
 
 
 def test_unknown_top_level_key_raises():
@@ -1205,3 +1272,221 @@ def test_original_exception_not_masked_by_index_write_failure(tmp_path, monkeypa
 
     with pytest.raises(ValueError, match="boom-from-fit"):
         main(["--config", str(config_path)])
+
+
+# -- D1.5b: sharded concurrent execution (PROTOCOL.md section 14.7) ---------
+
+
+def _linear_config(n_seeds: int) -> dict:
+    """1 dataset x 1 arm x ``n_seeds`` seeds -- cell index == seed, so
+    partition/shard assertions below can compare index sets directly."""
+    return {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": list(range(n_seeds)),
+    }
+
+
+def test_parse_shard_accepts_valid_i_of_k():
+    assert _parse_shard("2/3") == (2, 3)
+    assert _parse_shard("1/1") == (1, 1)
+
+
+def test_shard_cells_none_is_identity():
+    cells = expand(_linear_config(3), dry_run=True)
+    assert _shard_cells(cells, None) is cells
+
+
+def test_shard_partition_covers_and_is_disjoint():
+    # the property the whole design rests on: for k in {2, 3}, the union of
+    # shards 1..k is exactly the full grid, and every pair of shards is
+    # disjoint -- by construction (stride partition), never by convention.
+    # 7 cells (prime) stresses uneven strides.
+    cells = expand(_linear_config(7), dry_run=True)
+    all_indices = {c["index"] for c in cells}
+    assert all_indices == set(range(7))
+
+    for k in (2, 3):
+        shard_index_sets = [
+            {c["index"] for c in _shard_cells(cells, (i, k))} for i in range(1, k + 1)
+        ]
+        union = set().union(*shard_index_sets)
+        print(
+            f"[factorial] k={k}: shard sizes={[len(s) for s in shard_index_sets]}, "
+            f"union size={len(union)} (full grid = {len(all_indices)})"
+        )
+        assert union == all_indices  # every cell is covered by exactly one shard's union
+        for a in range(len(shard_index_sets)):
+            for b in range(a + 1, len(shard_index_sets)):
+                inter = shard_index_sets[a] & shard_index_sets[b]
+                print(f"[factorial] k={k}: shard {a + 1} n shard {b + 1} intersection={len(inter)}")
+                assert inter == set()  # pairwise disjoint
+
+
+def test_shard_flag_absent_dry_run_output_unchanged(tmp_path, capsys):
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text(yaml.safe_dump(_linear_config(3)))
+
+    assert main(["--config", str(config_path), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("\n") == 4  # 3 cell lines + the "total" line
+    assert "total: 3 runs" in out
+    for seed in (0, 1, 2):
+        assert f"seed={seed}" in out
+
+
+def test_dry_run_shard_narrows_the_listing(tmp_path, capsys):
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text(yaml.safe_dump(_linear_config(3)))
+
+    assert main(["--config", str(config_path), "--dry-run", "--shard", "2/3"]) == 0
+    out = capsys.readouterr().out
+    print(f"[factorial] dry-run --shard 2/3 output:\n{out}")
+    assert out.count("\n") == 2  # 1 cell (index 1, seed=1) + total line
+    assert "seed=1" in out
+    assert "seed=0" not in out
+    assert "seed=2" not in out
+    assert "total: 1 runs" in out
+
+
+def test_sharded_run_writes_full_grid_index_not_just_its_shard(tmp_path):
+    # the regression this wave exists to prevent: a shard writing only its
+    # own subset would silently drop the OTHER shards' completed runs from
+    # the index -- artifacts that exist on disk but that the index denies.
+    results_root = tmp_path / "results"
+    config = {
+        "exp_name": "mini",
+        "datasets": {"ou": _minimal_dataset_entry(n_episodes=10, T=10)},
+        "base": {
+            "d_x": 2,
+            "d_z": 2,
+            "d_u": 1,
+            "epochs": 2,
+            "batch_episodes": 2,
+            "target_params": 200,
+            "results_root": str(results_root),
+        },
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0, 1, 2],
+    }
+    config_path = tmp_path / "shard_index.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    # shard 1/3 runs ONLY the seed=0 cell -- seeds 1 and 2 are never touched
+    # by THIS process at all
+    rc = main(["--config", str(config_path), "--shard", "1/3"])
+    assert rc == 0
+
+    index_path = results_root / "mini" / "index.csv"
+    rows = list(csv.DictReader(index_path.open()))
+    print(f"[factorial] shard 1/3 index rows: {[(r['seed'], r['status']) for r in rows]}")
+    assert len(rows) == 3  # the FULL declared grid, not just this shard's 1 cell
+    by_seed = {r["seed"]: r for r in rows}
+    assert by_seed["0"]["status"] == "complete"
+    # seeds 1 and 2 belong to OTHER shards -- never run by this process, but
+    # present with their proper non-complete status, never absent
+    assert by_seed["1"]["status"] == "missing"
+    assert by_seed["2"]["status"] == "missing"
+
+
+def test_collision_across_shards_caught_by_global_preflight(tmp_path):
+    # both arms resolve to the byte-identical hashed config (same pattern as
+    # test_run_identity_collision_raises), landing the 2 colliding cells in
+    # DIFFERENT shards under k=2 -- a preflight run on the SHARD's own
+    # subset alone would never see the other cell and would miss the
+    # collision entirely. The preflight must stay global (14.7).
+    results_root = tmp_path / "results"
+    config = {
+        "exp_name": "collide",
+        "datasets": {"ou": _minimal_dataset_entry(n_episodes=10, T=10)},
+        "base": {
+            "d_x": 2,
+            "d_z": 2,
+            "d_u": 1,
+            "epochs": 1,
+            "batch_episodes": 2,
+            "target_params": 200,
+            "results_root": str(results_root),
+        },
+        "arms": [
+            {"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}},
+            {"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0, "lr": 1e-3}},
+        ],
+        "seeds": [0],
+    }
+    config_path = tmp_path / "collide_shard.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="collision"):
+        main(["--config", str(config_path), "--shard", "1/2"])
+    assert not results_root.exists()  # nothing trained -- preflight ran before any fit()
+
+
+def test_atomic_index_write_leaves_no_tmp_residue(tmp_path):
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "tmp_residue.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert main(["--config", str(config_path)]) == 0
+    index_dir = results_root / "mini"
+    leftover = list(index_dir.glob("*.tmp"))
+    print(f"[factorial] leftover .tmp files after index write: {leftover}")
+    assert leftover == []
+    assert (index_dir / "index.csv").exists()
+
+
+def test_index_write_uses_atomic_replace(tmp_path, monkeypatch):
+    # pins the MECHANISM (a race between concurrent shards is not
+    # deterministically reproducible in a single-process test): the write
+    # must land in a temp file, fully populated, THEN be moved onto
+    # index.csv's final name with a single os.replace call -- same
+    # discipline as run_complete.json/failure.json in trainer.py. A mutant
+    # reverting to a bare open(final_path, "w") calls os.replace zero times
+    # for index.csv and reddens this.
+    import sld.experiments.factorial as factorial_mod
+
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "atomic.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    calls = []
+    real_replace = os.replace
+
+    def _spy_replace(src, dst):
+        calls.append((Path(src), Path(dst)))
+        assert Path(src).stat().st_size > 0  # never rename an empty/partial stub
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(factorial_mod.os, "replace", _spy_replace)
+
+    assert main(["--config", str(config_path)]) == 0
+    index_calls = [(s, d) for s, d in calls if d.name == "index.csv"]
+    print(f"[factorial] os.replace calls landing on index.csv: {index_calls}")
+    assert len(index_calls) >= 1
+    src, dst = index_calls[-1]
+    assert src.name == "index.csv.tmp"
+    assert src.parent == dst.parent  # same directory -- same filesystem, atomic on POSIX
+
+
+@pytest.mark.parametrize(
+    "bad_value,fragment",
+    [
+        ("0/3", "1 <= i <= k"),
+        ("4/3", "1 <= i <= k"),
+        ("abc", "must be i/k"),
+        ("3", "must be i/k"),
+    ],
+)
+def test_shard_flag_rejects_malformed_values(tmp_path, capsys, bad_value, fragment):
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text(yaml.safe_dump(_linear_config(1)))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--config", str(config_path), "--dry-run", "--shard", bad_value])
+    assert excinfo.value.code == 2  # argparse's own clean CLI rejection, never a traceback
+    err = capsys.readouterr().err
+    print(f"[factorial] --shard {bad_value!r} rejected: {err.strip().splitlines()[-1]!r}")
+    assert fragment in err

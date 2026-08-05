@@ -1,8 +1,9 @@
 # Smoke config: 1 dataset x 2 arms x 1 seed = 2 runs, must finish in << 5 min
 # (Makefile `smoke` target). Exercises the two cheapest-to-verify cells: the
-# mlp/off backbone and the ssm/on (koopman_ssm) structured backbone -- the
-# two ends of the backbone x structure axis (phase B1: structure is
-# architectural, mu_j is not part of this axis at all).
+# mlp/off backbone and the ssm/on (ssm_k since Amendment 4, PROTOCOL.md
+# section 13.2 -- NOT koopman_ssm) structured backbone -- the two ends of
+# the backbone x structure axis (phase B1: structure is architectural, mu_j
+# is not part of this axis at all).
 exp_name: smoke
 datasets:
   ou:
@@ -27,5 +28,11 @@ arms:
     overrides: {}
   - backbone: ssm
     structure: "on"
-    overrides: {constrained: true, delta: 0.05, n_pairs: 2}
+    # ssm_k's own knobs (trainer.py _FAMILY_CONFIG_KEYS): delta is the
+    # required physical ZOH step; constrained/n_pairs were koopman_ssm's,
+    # never ssm_k's, and are rejected by the closed schema (F7) -- removed,
+    # not renamed. r (lifted width) and delta_min/delta_max are left at
+    # their defaults (r=d_z, delta_min=1e-4, delta_max=10.0), which is
+    # already a real ssm_k cell, not a stub.
+    overrides: {delta: 0.05}
 seeds: [0]

@@ -1174,3 +1174,463 @@ def test_skipping_val_jac_penalty_saves_time(tmp_path, monkeypatch):
     print(f"[trainer] _jac_state_penalty calls by phase = {calls}")
     assert calls["train"] > 0  # sanity: the counter itself is wired up
     assert calls["val"] == 0  # exactly what compute_jac_penalty=False claims
+
+
+# ============================================================================
+# Wave D1.5a (PROTOCOL.md section 14.7): crash-resume checkpoints and
+# per-run logging. "Kill" is always simulated by raising from inside the
+# epoch loop via monkeypatch -- never by killing a real process.
+# ============================================================================
+
+
+def test_bit_identical_metrics_csv_across_interrupted_and_resumed_run(tmp_path, monkeypatch):
+    # THE POINT OF THE WAVE: a run of N updates, killed at N/2 and resumed,
+    # must produce a metrics.csv BYTE-IDENTICAL to an uninterrupted run of N
+    # updates. mu_j > 0 with step_subsample=1.0 on purpose: the jac penalty
+    # (TotalJacobianPenalty, generator=None) consumes torch's GLOBAL RNG
+    # every epoch, so this also proves torch RNG state is restored on
+    # resume, not only numpy's (batch sampling) -- the prompt names both as
+    # the mutants most likely to expose a weak bit-identity test.
+    import pytest
+
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=8, T=15)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 3)
+    n_epochs = 10
+    common = dict(epochs=n_epochs, mu_j=0.05, step_subsample=1.0, batch_episodes=4, lr=5e-2)
+    cfg_ref = _mlp_config(
+        tmp_path, exp_name="trainer_test_bitid", results_root=str(tmp_path / "ref"), **common
+    )
+    cfg_int = _mlp_config(
+        tmp_path, exp_name="trainer_test_bitid", results_root=str(tmp_path / "resumed"), **common
+    )
+
+    result_ref = Trainer(dict(cfg_ref)).fit(data)
+    bytes_ref = Path(result_ref["paths"]["metrics_csv"]).read_bytes()
+
+    # Interval=3 -> checkpoints saved after epochs 2, 5, 8. Crash on the 9th
+    # EMATarget.update call (epoch index 8, 0-indexed), which happens
+    # BEFORE that epoch's row/checkpoint: the last surviving checkpoint is
+    # epoch 5 (rows 0-5), while metrics.csv on disk carries rows 0-7 (epochs
+    # 6, 7 written normally, no boundary hit) -- resume must discard rows 6
+    # and 7 via truncation, not merely continue appending after them.
+    orig_update = jepa_mod.EMATarget.update
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        hit["n"] += 1
+        if hit["n"] == 9:
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg_int))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    run_dir = trainer_1.run_dir
+    resume_path = run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    assert resume_path.exists()
+    with open(run_dir / "metrics.csv", newline="") as f:
+        rows_before_resume = list(csv.reader(f))[1:]
+    print(f"[resume] rows on disk at crash time = {len(rows_before_resume)} (expect 8: epochs 0-7)")
+    assert len(rows_before_resume) == 8
+
+    trainer_2 = Trainer(dict(cfg_int))
+    result_resumed = trainer_2.fit(data)  # resumes from the epoch-5 checkpoint, completes
+    assert not resume_path.exists()  # gone on successful completion
+
+    bytes_resumed = Path(result_resumed["paths"]["metrics_csv"]).read_bytes()
+    print(f"[resume] reference bytes={len(bytes_ref)} resumed bytes={len(bytes_resumed)}")
+    if bytes_resumed != bytes_ref:
+        for i, (a, b) in enumerate(zip(bytes_ref, bytes_resumed)):
+            if a != b:
+                print(f"[resume] first differing byte at offset {i}: ref={a!r} resumed={b!r}")
+                break
+        else:
+            print(f"[resume] one is a prefix of the other at length {min(len(bytes_ref), len(bytes_resumed))}")
+    assert bytes_resumed == bytes_ref
+
+    with open(result_resumed["paths"]["metrics_csv"], newline="") as f:
+        resumed_rows = list(csv.reader(f))[1:]
+    assert len(resumed_rows) == n_epochs  # exact -- no duplicated rows from the crashed attempt
+
+
+def test_resume_does_not_duplicate_metrics_rows(tmp_path, monkeypatch):
+    import pytest
+
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    n_epochs = 6
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_no_dup_rows", epochs=n_epochs)
+
+    orig_update = jepa_mod.EMATarget.update
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        hit["n"] += 1
+        if hit["n"] == 4:  # past >=1 checkpoint interval, before completion
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    result = Trainer(dict(cfg)).fit(data)
+    with open(result["paths"]["metrics_csv"], newline="") as f:
+        rows = list(csv.reader(f))[1:]
+    print(f"[resume] final row count = {len(rows)} (expected {n_epochs})")
+    assert len(rows) == n_epochs
+    epochs_seen = [int(r[0]) for r in rows]
+    assert epochs_seen == list(range(n_epochs))  # exact, no duplicates, no gaps
+
+
+def test_resume_checkpoint_appears_during_run_and_gone_after_completion(tmp_path, monkeypatch):
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_resume_lifecycle", epochs=6)
+    trainer = Trainer(dict(cfg))
+
+    orig_update = jepa_mod.EMATarget.update
+    seen_mid_run = {"exists": False}
+
+    def _check(self, encoder):
+        if trainer.run_dir is not None:
+            path = trainer.run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+            if path.exists():
+                seen_mid_run["exists"] = True
+        return orig_update(self, encoder)
+
+    monkeypatch.setattr(jepa_mod.EMATarget, "update", _check)
+    result = trainer.fit(data)
+
+    print(f"[resume] checkpoint observed to exist mid-run = {seen_mid_run['exists']}")
+    assert seen_mid_run["exists"] is True
+    resume_path = Path(result["paths"]["ckpt"]).parent / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    assert not resume_path.exists()
+
+
+def test_resume_checkpoint_survives_a_second_crash_during_resume(tmp_path, monkeypatch):
+    # Guards specifically against deleting resume_ckpt.pt on ENTERING the
+    # resume branch (instead of only on successful completion): a second
+    # crash mid-resume must not lose the progress the first crash saved.
+    import pytest
+
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_resume_twice", epochs=8)
+
+    orig_update = jepa_mod.EMATarget.update
+
+    def _crash_on(call_no):
+        hit = {"n": 0}
+
+        def _boom(self, encoder):
+            hit["n"] += 1
+            if hit["n"] == call_no:
+                raise RuntimeError("simulated crash")
+            return orig_update(self, encoder)
+
+        return _boom
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _crash_on(5))  # epoch index 4
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+    resume_path = trainer_1.run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    assert resume_path.exists()
+
+    trainer_2 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _crash_on(2))  # crash again, early into the resume
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_2.fit(data)
+    print(f"[resume] resume_ckpt.pt survives a second crash = {resume_path.exists()}")
+    assert resume_path.exists()  # NOT deleted merely by attempting (and re-crashing) a resume
+
+    trainer_3 = Trainer(dict(cfg))
+    trainer_3.fit(data)  # finally completes
+    assert not resume_path.exists()  # gone only now
+
+
+def test_train_log_has_config_hash_budget_and_one_line_per_epoch(tmp_path):
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_log_content", epochs=4)
+    trainer = Trainer(dict(cfg))
+    trainer.fit(data)
+
+    log_text = (trainer.run_dir / "train.log").read_text()
+    print(f"[train.log]\n{log_text}")
+    header = log_text.split("epoch=0")[0]  # everything logged before the first per-epoch line
+    assert trainer.config_hash in header
+    assert f"epochs={cfg['epochs']}" in header  # the budget
+
+    epoch_lines = [line for line in log_text.splitlines() if line.startswith("epoch=")]
+    assert len(epoch_lines) == cfg["epochs"]
+    assert epoch_lines[0].startswith("epoch=0 ")
+    assert epoch_lines[-1].startswith(f"epoch={cfg['epochs'] - 1} ")
+
+
+def test_fresh_start_deletes_stale_train_log(tmp_path):
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_stale_log", epochs=2)
+    trainer_1 = Trainer(dict(cfg))
+    trainer_1.fit(data)
+    log_path = trainer_1.run_dir / "train.log"
+    assert "epoch=1" in log_path.read_text()
+
+    trainer_2 = Trainer(dict(cfg))  # same identity; no resume checkpoint survives completion
+    trainer_2.fit(data)  # fresh start
+    second_run_text = log_path.read_text()
+    print(f"[train.log after fresh rerun]\n{second_run_text}")
+    # replaced, not appended: a "resuming" marker or doubled epoch lines
+    # would mean the stale log survived into this fresh attempt
+    assert "resuming" not in second_run_text
+    assert second_run_text.count("epoch=0") == 1
+    assert second_run_text.count("epoch=1") == 1
+
+
+def test_fresh_start_clears_orphaned_resume_checkpoint_when_run_already_complete(tmp_path):
+    # The fresh-start cleanup also names the resume checkpoint (PROTOCOL.md
+    # 14.7). The only way one can coexist with run_complete.json is the
+    # narrow crash window between writing the sentinel and deleting the
+    # checkpoint at the very end of a successful fit -- simulated directly
+    # here by writing a syntactically-valid, IDENTITY-MATCHING resume
+    # checkpoint back after a completed run. The next attempt must not try
+    # to "resume" a run already certified complete (which would try to load
+    # `{}` as optimizer/scheduler state and blow up); it must retrain fresh,
+    # deterministically reproducing the same result, and the orphan is gone.
+    import random as random_mod
+
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_orphan_resume", epochs=2)
+    result_1 = Trainer(dict(cfg)).fit(data)
+    run_dir = Path(result_1["paths"]["ckpt"]).parent
+    resume_path = run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    assert not resume_path.exists()
+
+    orphan = {
+        "config_hash": result_1["metrics"]["config_hash"],
+        "epoch": 0,
+        "encoder": result_1["model"]["encoder"].state_dict(),
+        "predictor": result_1["model"]["predictor"].state_dict(),
+        "ema_target": result_1["model"]["ema_target"].state_dict(),
+        "optimizer": {},
+        "scheduler": {},
+        "torch_rng_state": torch.get_rng_state(),
+        "numpy_rng_state": np.random.get_state(),
+        "python_rng_state": random_mod.getstate(),
+    }
+    torch.save(orphan, resume_path)
+
+    result_2 = Trainer(dict(cfg)).fit(data)
+    print(f"[resume] orphaned resume_ckpt.pt cleared, retrained fresh: {not resume_path.exists()}")
+    assert not resume_path.exists()
+    assert result_2["history"]["train_loss"] == result_1["history"]["train_loss"]
+
+
+def test_resume_refused_on_config_hash_mismatch(tmp_path):
+    import random as random_mod
+
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_resume_mismatch", epochs=4)
+    trainer = Trainer(dict(cfg))
+    run_dir = trainer.resolve_run_dir(data)
+    run_dir.mkdir(parents=True)
+
+    bad_state = {
+        "config_hash": "deadbeef",  # deliberately wrong
+        "epoch": 1,
+        "encoder": {},
+        "predictor": {},
+        "ema_target": {},
+        "optimizer": {},
+        "scheduler": {},
+        "torch_rng_state": torch.get_rng_state(),
+        "numpy_rng_state": np.random.get_state(),
+        "python_rng_state": random_mod.getstate(),
+    }
+    resume_path = run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    torch.save(bad_state, resume_path)
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        Trainer(dict(cfg)).fit(data)
+    # not adopted and not silently deleted
+    assert resume_path.exists()
+    reloaded = torch.load(resume_path, weights_only=False)
+    assert reloaded["config_hash"] == "deadbeef"
+
+
+def test_resume_refused_on_corrupt_checkpoint(tmp_path):
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_resume_corrupt", epochs=4)
+    trainer = Trainer(dict(cfg))
+    run_dir = trainer.resolve_run_dir(data)
+    run_dir.mkdir(parents=True)
+    resume_path = run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+
+    resume_path.write_bytes(b"not a torch checkpoint at all, just garbage bytes")
+    with pytest.raises(RuntimeError, match="corrupt"):
+        Trainer(dict(cfg)).fit(data)
+    assert resume_path.exists()  # not silently deleted either
+
+    # a well-formed torch file MISSING required keys is corrupt too (a
+    # different code path from the unreadable-bytes case above: this one
+    # loads successfully but fails the required-keys check)
+    resume_path.unlink()
+    torch.save({"config_hash": trainer.config_hash, "epoch": 0}, resume_path)
+    with pytest.raises(RuntimeError, match="corrupt"):
+        Trainer(dict(cfg)).fit(data)
+    assert resume_path.exists()
+
+
+def test_resume_restores_python_random_state(tmp_path, monkeypatch):
+    # Nothing in fit()'s CURRENT loop consumes python's stdlib `random`
+    # module (only numpy's global RNG for batch sampling, torch's for the
+    # mu_j probes) -- and set_seed() reseeds it at the top of EVERY fit()
+    # call, resume or not. Left alone that makes a dropped python_rng_state
+    # restore INVISIBLE: the checkpoint's saved state and a fresh reseed
+    # coincide bit-for-bit, since nothing ever advances random. in between
+    # (verified: this was an actual hole in an earlier version of this
+    # test). To test the RESTORE MECHANISM itself, independent of whether
+    # today's callers happen to touch it, this test injects a synthetic
+    # consumer -- two random.random() draws inside EMATarget.update, stood
+    # in for a future predictor family that might use it -- so the
+    # checkpoint's state genuinely diverges from a fresh reseed, and a
+    # dropped restore becomes observable.
+    import random as random_mod
+
+    import pytest
+
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_random_restore", epochs=6)
+
+    orig_update = jepa_mod.EMATarget.update
+
+    def _advance_random() -> None:
+        random_mod.random()
+        random_mod.random()
+
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        _advance_random()
+        hit["n"] += 1
+        if hit["n"] == 3:
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    resume_path = trainer_1.run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    saved_state = torch.load(resume_path, weights_only=False)["python_rng_state"]
+
+    captured = {}
+
+    def _capture_then_advance(self, encoder):
+        if "state" not in captured:  # capture BEFORE this call's own draws
+            captured["state"] = random_mod.getstate()
+        _advance_random()
+        return orig_update(self, encoder)
+
+    monkeypatch.setattr(jepa_mod.EMATarget, "update", _capture_then_advance)
+    Trainer(dict(cfg)).fit(data)
+
+    assert captured.get("state") is not None
+    assert captured["state"] == saved_state
+
+
+def test_failure_json_survives_both_cleanup_paths(tmp_path, monkeypatch):
+    # PROTOCOL.md section 11.7: failure.json is a divergent run's terminal
+    # record and must never be touched by either cleanup path -- fresh
+    # start (unchanged from before this wave) or resume (new in this wave).
+    import pytest
+
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_failure_both", epochs=6)
+
+    # -- resume path: crash after >=1 checkpoint interval, plant a
+    # failure.json alongside the genuine resume checkpoint (simulating a
+    # terminal record left by an unrelated earlier divergence at this exact
+    # identity), then resume to completion and check it survived --
+    orig_update = jepa_mod.EMATarget.update
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        hit["n"] += 1
+        if hit["n"] == 4:
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    run_dir = trainer_1.run_dir
+    resume_path = run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    assert resume_path.exists()  # crossed at least one checkpoint interval
+    failure_path = run_dir / trainer_mod.FAILURE_FILENAME
+    failure_path.write_text('{"planted": true}')
+
+    Trainer(dict(cfg)).fit(data)  # resumes and completes
+    print(f"[failure.json] survives resume-path completion: {failure_path.exists()}")
+    assert not resume_path.exists()  # deleted on successful completion
+    assert failure_path.exists()  # untouched by the resume path
+    assert failure_path.read_text() == '{"planted": true}'  # never rewritten
+
+    # -- fresh path: a genuine divergence from epoch 0 (before any
+    # checkpoint interval), then a fresh rerun on the SAME identity must
+    # also leave failure.json alone --
+    cfg2 = _mlp_config(tmp_path, exp_name="trainer_test_failure_fresh", epochs=3)
+    with monkeypatch.context() as m:
+        m.setattr(trainer_mod, "variance_loss", lambda z: torch.tensor(float("nan")))
+        trainer_2 = Trainer(dict(cfg2))
+        with pytest.raises(RuntimeError, match="nonfinite"):
+            trainer_2.fit(data)
+    failure_path2 = trainer_2.run_dir / trainer_mod.FAILURE_FILENAME
+    assert failure_path2.exists()
+    assert not (trainer_2.run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME).exists()
+
+    Trainer(dict(cfg2)).fit(data)  # fresh start (no resume checkpoint), succeeds
+    print(f"[failure.json] survives fresh-path rerun: {failure_path2.exists()}")
+    assert failure_path2.exists()
