@@ -20,6 +20,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -34,6 +35,15 @@ from sld.objectives.vicreg import covariance_loss, variance_loss
 from sld.predictors.base import PredictorState
 from sld.predictors.registry import STRUCTURED_FAMILIES, get_predictor
 from sld.training.seeding import set_seed
+
+if TYPE_CHECKING:
+    # deferred to a LAZY import inside Trainer.__init__ (see there): a
+    # module-level import here would close a real cycle --
+    # sld.encoders.pretrain imports sld.training.seeding, which (as part of
+    # importing the sld.training package) imports this very module. Typing
+    # only, never evaluated at runtime (PEP 563, `from __future__ import
+    # annotations` above already stringifies every annotation in this file).
+    from sld.encoders.pretrain import FrozenRepresentationArtifact
 
 # resolved for any key the caller omits; unknown extra keys the caller DOES
 # pass are kept as-is (they still flow into the config hash and config.yaml)
@@ -110,7 +120,7 @@ _BUDGET_OWNED_KEYS = frozenset(
 # ``_trainer_allowed_keys`` derives its allow-list from ``_DEFAULTS``, which
 # deliberately does NOT carry ``gauge_digest``, so a YAML naming it is
 # rejected there too.
-_DERIVED_OR_POLICY_KEYS = frozenset({"d_h", "dtype", "gauge_digest"})
+_DERIVED_OR_POLICY_KEYS = frozenset({"d_h", "dtype", "gauge_digest", "representation_digest"})
 
 # objective weights: must be finite and >= 0 (a negative weight silently
 # behaving as "disabled" was adversarial review round 2's finding), and at
@@ -381,13 +391,48 @@ class Trainer:
     gauge is dropped and the key stays absent: inert for identity, exactly
     like ``k_probes``/``step_subsample`` there.
 
+    Frozen shared representation (Wave D2b, PROTOCOL.md sections 14.9-14.11).
+    ``Trainer(config, representation=...)`` takes a ``FrozenRepresentationArtifact``
+    OUT-OF-BAND, exactly like ``gauge`` above and for the same reason: it is
+    tensors and a manifest, not YAML, and it is pretrained once per
+    ``(system, regime)`` stratum, shared by all six arms, never per run. When
+    supplied, ``fit`` loads the encoder from the artifact instead of
+    constructing and training one: the encoder is frozen (``eval()``,
+    every parameter ``requires_grad=False``, zero entries in the optimizer's
+    parameter groups), the EMA target machinery never updates it, and the
+    preflight ``validate_shared_representation`` runs at construction time --
+    a mismatched stratum, a tampered digest, or an unusable ``e_recon``
+    refuses loudly before any model is built. The stratum it checks against
+    comes from config keys ``stratum_system``/``stratum_regime`` (required
+    only when a representation is supplied) -- named with a ``stratum_``
+    prefix rather than bare ``system``/``regime`` because ``regime`` already
+    names a koopman_ssm-only constructor key (its ZOH discretization regime)
+    and would otherwise collide with the family-applicability check above.
+    Its CONTENT still reaches the
+    run identity, as the derived ``representation_digest`` key -- two runs
+    loading different representations build different models and can never
+    share a run directory. On a run with no representation the key stays
+    ABSENT (never a null value), for the identical reason ``gauge_digest``
+    does: only ``results_root`` is otherwise excluded from the hash, so an
+    unconditional key would move every existing config_hash, therefore every
+    run directory, therefore make every sentinel already on disk unreachable.
+
     BatchNorm-free assumption: encoders in this repo are plain MLPs; the EMA
     target's buffer-copy policy is declared in ``EMATarget`` (jepa.py) and is
     a no-op here. Runs on CPU, float32, by default -- data arrives as
     float64 numpy and is cast to float32 once, at ``_time_major``.
     """
 
-    def __init__(self, config: dict, gauge: Gauge | None = None) -> None:
+    def __init__(
+        self,
+        config: dict,
+        gauge: Gauge | None = None,
+        representation: FrozenRepresentationArtifact | None = None,
+    ) -> None:
+        # lazy import -- see the TYPE_CHECKING guard at the top of this
+        # module for why this cannot be a module-level import
+        from sld.encoders.pretrain import representation_digest, validate_shared_representation
+
         missing = [k for k in _REQUIRED_KEYS if k not in config]
         if missing:
             raise ValueError(f"config must include {missing}")
@@ -416,7 +461,8 @@ class Trainer:
             raise ValueError(
                 f"config keys {derived} are derived or policy-owned (d_h follows from "
                 "d_z/n_pairs; precision is the Trainer's declared CPU/float32 policy; "
-                "gauge_digest is derived from the out-of-band gauge= argument)"
+                "gauge_digest is derived from the out-of-band gauge= argument; "
+                "representation_digest is derived from the out-of-band representation= argument)"
             )
         # loop integers must be usable BEFORE any artifact is created: an
         # empty epoch loop would still write success-only artifacts and then
@@ -569,6 +615,56 @@ class Trainer:
             # bit-stable across processes (see gauge_digest) and is the only
             # thing about the gauge that enters the identity.
             self.config["gauge_digest"] = gauge_digest(self.gauge)
+
+        # The frozen shared representation (Wave D2b, PROTOCOL.md sections
+        # 14.9-14.11) travels OUT-OF-BAND, exactly like the gauge above, and
+        # for the same reason: it is tensors and a manifest, measured once
+        # per stratum, not declared per run. Unlike the gauge it has no
+        # on/off knob -- if it is supplied at all, it is always used, so the
+        # preflight and the derived key below are unconditional on
+        # `representation is not None`, never on another config value.
+        self.representation = representation
+        if representation is not None:
+            # "stratum_system"/"stratum_regime" are ordinary caller-supplied
+            # config keys (the doctrine already documented at the top of
+            # this file: an unknown extra key the caller passes is kept
+            # as-is and flows into the hash) -- required HERE, and only
+            # here, so the preflight below has something to check the
+            # artifact's own manifest against. A representation-less run
+            # never needs them. Named with a "stratum_" prefix, NOT plain
+            # "system"/"regime": "regime" already names a koopman_ssm-only
+            # constructor key (its ZOH discretization regime, "bilinear" or
+            # "selective", part of _FAMILY_CONFIG_KEYS/_MODEL_KEYS) -- a bare
+            # "regime" key here would collide with that and be REJECTED by
+            # the family-applicability check above for every other family
+            # (caught by hand: `Trainer(cfg, representation=art)` on family
+            # "mlp" raised "config keys ['regime'] are not applicable").
+            if "stratum_system" not in self.config or "stratum_regime" not in self.config:
+                raise ValueError(
+                    "representation requires 'stratum_system' and 'stratum_regime' keys "
+                    "in config, so the preflight (validate_shared_representation) can "
+                    "check the artifact was pretrained for THIS run's stratum"
+                )
+            # preflight: digest tamper check, stratum match, e_recon
+            # usability -- all three BEFORE any model is built or any batch
+            # is drawn (round 4 doctrine: schema/artifact errors caught
+            # before any artifact, never a fit-time surprise). Raises
+            # ValueError, never coerces, never proceeds on a bad artifact.
+            validate_shared_representation(
+                representation,
+                system=self.config["stratum_system"],
+                regime=self.config["stratum_regime"],
+            )
+            # its CONTENT still reaches the run identity, as this derived
+            # key -- two runs loading different representations build
+            # different models and can never share a run directory. Stays
+            # ABSENT (never a null value) when representation is None: only
+            # results_root is otherwise excluded from the hash, so an
+            # unconditional key would move every existing config_hash,
+            # therefore every run directory, therefore make every sentinel
+            # already on disk unreachable -- the exact trap gauge_digest
+            # above already avoids.
+            self.config["representation_digest"] = representation_digest(representation)
 
         # canonical config string: sort_keys=True makes it a pure function of
         # the resolved dict's content, not of insertion order; this EXACT
@@ -849,6 +945,19 @@ class Trainer:
         torch.set_default_dtype(torch.float32)
         try:
             encoder = FrameMLPEncoder(cfg["d_x"], cfg["d_z"], tuple(cfg["encoder_hidden"]))
+            if self.representation is not None:
+                # Wave D2b: the trainer does NOT train this encoder -- load
+                # the frozen weights from the artifact and freeze them here,
+                # at the single point construction happens, so every
+                # downstream reader (optimizer param list below, EMA target,
+                # ckpt.pt's saved state) sees the SAME frozen object. eval()
+                # and requires_grad=False are both set (neither alone is
+                # trusted -- belt and suspenders, same doctrine EMATarget
+                # already uses for its own stop-gradient target).
+                encoder.load_state_dict(self.representation.encoder_state_dict)
+                encoder.eval()
+                for p in encoder.parameters():
+                    p.requires_grad_(False)
             passthrough = {k: cfg[k] for k in _FAMILY_CONFIG_KEYS[cfg["family"]] if k in cfg}
             predictor = get_predictor(
                 cfg["family"],
@@ -867,7 +976,15 @@ class Trainer:
         ema = EMATarget(encoder, tau=cfg["tau_ema"])
         jepa = JEPALoss(lambda_c=cfg["lambda_c"])
 
-        params = list(encoder.parameters()) + list(predictor.parameters())
+        # a frozen encoder contributes ZERO members to the optimizer -- this
+        # is the mutant that matters most (module docstring, Wave D2b): a
+        # re-introduced `encoder.parameters()` here would silently start
+        # training weights the run identity and the preflight both declare
+        # frozen.
+        if self.representation is not None:
+            params = list(predictor.parameters())
+        else:
+            params = list(encoder.parameters()) + list(predictor.parameters())
         optimizer = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"])
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg["epochs"])
 
@@ -1016,7 +1133,12 @@ class Trainer:
                     train_total.backward()
                     lr_used = optimizer.param_groups[0]["lr"]  # rate actually used for this step
                     optimizer.step()
-                    ema.update(encoder)  # EMA target refreshed after EVERY optimizer step
+                    if self.representation is None:
+                        ema.update(encoder)  # EMA target refreshed after EVERY optimizer step
+                    # else: Wave D2b -- a frozen encoder is never fed to
+                    # ema.update(); `ema.target` was deep-copied from the
+                    # already-frozen encoder at construction and is left
+                    # exactly there, never touched again.
                     scheduler.step()
 
                     with torch.no_grad():

@@ -23,6 +23,12 @@ import torch
 from sld.data.generate import build_dataset
 from sld.data.regimes import OURegime
 from sld.encoders.frame_mlp import FrameMLPEncoder
+from sld.encoders.pretrain import (
+    load_frozen_representation,
+    pretrain_representation,
+    representation_digest,
+    save_frozen_representation,
+)
 from sld.objectives.jac_reg import Gauge, gauge_digest
 from sld.objectives.jepa import EMATarget, JEPALoss
 from sld.objectives.vicreg import covariance_loss, variance_loss
@@ -1634,3 +1640,346 @@ def test_failure_json_survives_both_cleanup_paths(tmp_path, monkeypatch):
     Trainer(dict(cfg2)).fit(data)  # fresh start (no resume checkpoint), succeeds
     print(f"[failure.json] survives fresh-path rerun: {failure_path2.exists()}")
     assert failure_path2.exists()
+
+
+# --------------------------------------------------------------------------
+# Wave D2b: the frozen shared representation (PROTOCOL.md sections 14.9-14.11,
+# src/sld/encoders/pretrain.py) travels OUT-OF-BAND, exactly like the gauge
+# above and for the identical reason -- ``Trainer(config, representation=...)``.
+# This section tests only the WIRING: the trainer does not construct or
+# optimize the encoder, its digest is a derived run-identity key that stays
+# ABSENT (never null) when no representation is supplied, and a run with no
+# representation is byte-for-byte identical to today's behaviour.
+# --------------------------------------------------------------------------
+
+
+def _small_representation(
+    tmp_path, *, seed: int = 0, system: str = "pendulum", regime: str = "ou", data: dict | None = None,
+    name: str = "representation",
+):
+    """A small, digest-STAMPED artifact. Trainer's preflight
+    (validate_shared_representation) requires ``manifest["digest"]``, which
+    only a save/load round trip stamps -- ``pretrain_representation`` itself
+    returns an artifact with an UNSTAMPED manifest (its own docstring)."""
+    if data is None:
+        data = _small_dataset()
+    artifact = pretrain_representation(
+        data,
+        system=system,
+        regime=regime,
+        d_z=_D_Z,
+        encoder_hidden=(8,),
+        seed=seed,
+        epochs=3,
+        batch_size=16,
+    )
+    path = tmp_path / f"{name}.pt"
+    save_frozen_representation(artifact, path)
+    return load_frozen_representation(path)
+
+
+def _repr_config(tmp_path, **overrides) -> dict:
+    config = _mlp_config(
+        tmp_path,
+        encoder_hidden=[8],  # must match the representation's own architecture
+        stratum_system="pendulum",
+        stratum_regime="ou",
+    )
+    config.update(overrides)
+    return config
+
+
+def test_representation_digest_absent_when_none_config_hash_pinned(tmp_path):
+    # POSITIVE, the identity regression this whole wave is riskiest on: no
+    # representation -> config_hash BYTE-IDENTICAL to today's value. Pinned
+    # as a literal (computed against this exact fixture before any Wave D2b
+    # code existed) so a future change to hashing cannot slip through
+    # unnoticed -- the task brief's own warning about this test.
+    trainer = Trainer(_mlp_config(tmp_path))
+    print(f"[trainer D2b] no-representation config_hash = {trainer.config_hash}")
+    assert trainer.config_hash == "49b3b551"
+    assert "representation_digest" not in trainer.config
+    assert "representation_digest" not in trainer._canonical_yaml
+
+
+def test_representation_digest_is_derived_key_rejected_if_supplied(tmp_path):
+    import pytest
+
+    # the schema stays CLOSED, same doctrine as gauge_digest: a config that
+    # names the derived key outright is rejected, representation or not
+    with pytest.raises(ValueError, match="derived or policy-owned"):
+        Trainer(_repr_config(tmp_path, representation_digest="deadbeef"))
+
+
+def test_representation_requires_stratum_config_keys(tmp_path):
+    import pytest
+
+    data = _small_dataset()
+    art = _small_representation(tmp_path, data=data)
+    cfg = _mlp_config(tmp_path, encoder_hidden=[8])  # no stratum_system/stratum_regime
+    with pytest.raises(ValueError, match="stratum_system"):
+        Trainer(cfg, representation=art)
+
+
+def test_representation_stratum_key_does_not_collide_with_koopman_regime(tmp_path):
+    # regression for the collision caught by hand while building this wave:
+    # a bare "regime" config key already names koopman_ssm's OWN ZOH
+    # discretization regime ("bilinear"/"selective", _FAMILY_CONFIG_KEYS) --
+    # stratum_system/stratum_regime must coexist with it without tripping
+    # the family-applicability check.
+    data = _small_dataset()
+    art = _small_representation(tmp_path, data=data)
+    cfg = _repr_config(
+        tmp_path, family="koopman_ssm", delta=0.02, regime="bilinear", exp_name="koopman_stratum"
+    )
+    trainer = Trainer(cfg, representation=art)  # must not raise
+    assert trainer.config["regime"] == "bilinear"  # koopman's own key, untouched
+    assert trainer.config["stratum_regime"] == "ou"  # the stratum-preflight key, distinct
+
+
+def test_representation_content_separates_run_identity(tmp_path):
+    # two runs loading DIFFERENT representations build different models and
+    # must never share a run directory; two runs loading the SAME content
+    # (a fresh reload from disk, not the same object) are the SAME run.
+    data = _small_dataset()
+    art_a = _small_representation(tmp_path, data=data, seed=1, name="a")
+    _small_representation(tmp_path, data=data, seed=2, name="b")  # writes b.pt
+    art_a_reloaded = load_frozen_representation(tmp_path / "a.pt")
+    art_b = load_frozen_representation(tmp_path / "b.pt")
+
+    cfg = _repr_config(tmp_path)
+    h_none = Trainer(dict(cfg)).config_hash
+    h_a1 = Trainer(dict(cfg), representation=art_a).config_hash
+    h_a2 = Trainer(dict(cfg), representation=art_a_reloaded).config_hash
+    h_b = Trainer(dict(cfg), representation=art_b).config_hash
+    print(f"[trainer D2b] none={h_none} a(direct)={h_a1} a(reloaded)={h_a2} b={h_b}")
+
+    assert h_a1 == h_a2  # SAME representation content -> SAME run identity
+    assert len({h_none, h_a1, h_b}) == 3  # none / A / B: three distinct identities
+
+    trainer = Trainer(dict(cfg), representation=art_a)
+    assert trainer.config["representation_digest"] == representation_digest(art_a)
+    assert "representation_digest" in trainer._canonical_yaml
+    # recorded in the run's own artifacts (config.yaml / ckpt.pt's "config"
+    # field save the SAME resolved dict) -- traceable after the fact
+    data_small = _small_dataset(n_episodes=6, T=10)
+    result = trainer.fit(data_small)
+    config_yaml_text = Path(result["paths"]["config"]).read_text()
+    assert f"representation_digest: {representation_digest(art_a)}" in config_yaml_text
+    ckpt = torch.load(result["paths"]["ckpt"], map_location="cpu", weights_only=False)
+    assert ckpt["config"]["representation_digest"] == representation_digest(art_a)
+
+
+def test_representation_encoder_frozen_zero_optimizer_members_state_dict_bit_identical(
+    tmp_path, monkeypatch
+):
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    art = _small_representation(tmp_path, data=data)
+    encoder_before = {k: v.clone() for k, v in art.encoder_state_dict.items()}
+
+    # capture exactly what params AdamW is constructed with, at the real
+    # call site -- counted by object identity, never assumed from reading
+    # the source
+    captured: dict = {}
+    real_adamw = torch.optim.AdamW
+
+    class _CapturingAdamW(real_adamw):
+        def __init__(self, params, *args, **kwargs):
+            params = list(params)
+            captured["param_ids"] = {id(p) for p in params}
+            captured["n_params"] = len(params)
+            super().__init__(params, *args, **kwargs)
+
+    monkeypatch.setattr(trainer_mod.torch.optim, "AdamW", _CapturingAdamW)
+
+    cfg = _repr_config(tmp_path, epochs=2, batch_episodes=4)
+    result = Trainer(cfg, representation=art).fit(data)  # REAL backward() + optimizer.step()
+
+    encoder = result["model"]["encoder"]
+    predictor = result["model"]["predictor"]
+
+    n_requires_grad = sum(1 for p in encoder.parameters() if p.requires_grad)
+    print(f"[trainer D2b] encoder params requiring grad = {n_requires_grad} (want 0)")
+    assert n_requires_grad == 0
+
+    n_with_grad = sum(1 for p in encoder.parameters() if p.grad is not None)
+    print(f"[trainer D2b] encoder params with .grad set after backward() = {n_with_grad} (want 0)")
+    assert n_with_grad == 0
+
+    encoder_param_ids = {id(p) for p in encoder.parameters()}
+    overlap = encoder_param_ids & captured["param_ids"]
+    print(
+        f"[trainer D2b] optimizer members total={captured['n_params']}, "
+        f"encoder members in optimizer={len(overlap)} (want 0)"
+    )
+    assert len(overlap) == 0
+    assert captured["n_params"] == sum(1 for _ in predictor.parameters())
+
+    sd_after = encoder.state_dict()
+    for k in encoder_before:
+        torch.testing.assert_close(encoder_before[k], sd_after[k], atol=0.0, rtol=0.0)
+    print("[trainer D2b] encoder state dict bit-identical before/after backward()+optimizer.step()")
+
+
+def test_representation_ema_never_updates_frozen_encoder(tmp_path, monkeypatch):
+    import sld.objectives.jepa as jepa_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    art = _small_representation(tmp_path, data=data)
+
+    calls = {"n": 0}
+    real_update = jepa_mod.EMATarget.update
+
+    def _counting_update(self, online):
+        calls["n"] += 1
+        return real_update(self, online)
+
+    monkeypatch.setattr(jepa_mod.EMATarget, "update", _counting_update)
+
+    cfg = _repr_config(tmp_path, epochs=3, batch_episodes=4)
+    Trainer(cfg, representation=art).fit(data)
+    print(f"[trainer D2b] ema.update() call count WITH representation = {calls['n']} (want 0)")
+    assert calls["n"] == 0
+
+    # positive control (REGLES section 7.1's two-check doctrine): the SAME
+    # counting patch DOES see calls on a representation-less run, over the
+    # SAME number of epochs -- proves the count above is a real 0, not a
+    # vacuous one from a broken patch
+    calls["n"] = 0
+    Trainer(_mlp_config(tmp_path, exp_name="ema_sanity_control", epochs=3)).fit(data)
+    print(f"[trainer D2b] ema.update() call count WITHOUT representation = {calls['n']} (want > 0)")
+    assert calls["n"] > 0
+
+
+def test_representation_readout_and_sigma_train_never_refit_per_run(tmp_path, monkeypatch):
+    # built BEFORE poisoning: pretrain_representation legitimately calls
+    # both functions below to build the artifact in the first place
+    data = _small_dataset(n_episodes=6, T=10)
+    art = _small_representation(tmp_path, data=data)
+    readout_w_before = art.readout.W.copy()
+    sigma_before = art.sigma_train.copy()
+
+    import sld.audit.rollout as rollout_mod
+    import sld.encoders.pretrain as pretrain_mod
+
+    def _poison(*_a, **_k):
+        raise AssertionError(
+            "must not refit a readout/sigma_train per run when representation is supplied -- "
+            "both come from the artifact"
+        )
+
+    monkeypatch.setattr(rollout_mod, "fit_train_state_scale", _poison)
+    monkeypatch.setattr(pretrain_mod, "fit_readout", _poison)
+
+    cfg = _repr_config(tmp_path, epochs=2, batch_episodes=4)
+    Trainer(cfg, representation=art).fit(data)  # would raise if either were called
+
+    assert np.array_equal(art.readout.W, readout_w_before)
+    assert np.array_equal(art.sigma_train, sigma_before)
+    print("[trainer D2b] readout/sigma_train untouched -- both come from the artifact")
+
+
+def test_representation_shared_across_six_arms_one_digest_bit_identical_embeddings(tmp_path):
+    # the six D2b arms (PROTOCOL.md section 13.1's 3x2 design, minus the
+    # koopman_ssm/ssm_k substitution of Amendment 4): mlp, transformer,
+    # min_ssm (unstructured) x mlp_k, transformer_k, ssm_k (structured)
+    data = _small_dataset(n_episodes=6, T=10)
+    art = _small_representation(tmp_path, data=data)
+
+    family_extra = {
+        "mlp": {},
+        "transformer": {},
+        "min_ssm": {},
+        "mlp_k": {"delta": 0.02},
+        "transformer_k": {"delta": 0.02},
+        "ssm_k": {"delta": 0.02},
+    }
+    encoders = {}
+    for family, extra in family_extra.items():
+        # target_params=10_000: transformer's d_model moves on an
+        # n_heads-stride grid (same note as the heads test above) -- a 2k
+        # target is unreachable within +/-5% at this tiny d_z/d_u, so every
+        # arm here budgets at 10k for a fair, uniform comparison
+        cfg = _repr_config(
+            tmp_path,
+            family=family,
+            exp_name=f"sixarm_{family}",
+            epochs=1,
+            target_params=10_000,
+            **extra,
+        )
+        result = Trainer(cfg, representation=art).fit(data)
+        encoders[family] = result["model"]["encoder"]
+
+    # ONE encoder digest across all six arms: bit-identical state dicts
+    state_dicts = {fam: enc.state_dict() for fam, enc in encoders.items()}
+    reference_fam = "mlp"
+    for fam, sd in state_dicts.items():
+        for k in state_dicts[reference_fam]:
+            torch.testing.assert_close(sd[k], state_dicts[reference_fam][k], atol=0.0, rtol=0.0)
+    print(f"[trainer D2b] six arms {sorted(encoders)} -> bit-identical encoder state dict (one digest)")
+
+    # bit-identical embeddings on a fixed probe input, atol=rtol=0
+    probe = torch.as_tensor(data["val"]["x"][:, 0, :], dtype=torch.float32)
+    with torch.no_grad():
+        outs = {fam: enc(probe) for fam, enc in encoders.items()}
+    base = outs[reference_fam]
+    max_dev = 0.0
+    for fam, out in outs.items():
+        max_dev = max(max_dev, (out - base).abs().max().item())
+        torch.testing.assert_close(out, base, atol=0.0, rtol=0.0)
+    print(f"[trainer D2b] six arms -> max embedding deviation = {max_dev} (want 0.0)")
+    assert max_dev == 0.0
+
+
+def test_representation_stratum_mismatch_refused_at_construction(tmp_path):
+    import pytest
+
+    data = _small_dataset()
+    art = _small_representation(tmp_path, data=data, system="pendulum", regime="ou")
+    cfg = _repr_config(tmp_path, stratum_regime="action_conditioned")  # different stratum
+    with pytest.raises(ValueError, match="stratum mismatch"):
+        Trainer(cfg, representation=art)  # refused before any model is built or any batch drawn
+
+
+def test_representation_flipped_bit_refused_by_digest_check(tmp_path):
+    import pytest
+
+    data = _small_dataset()
+    artifact = pretrain_representation(
+        data, system="pendulum", regime="ou", d_z=_D_Z, encoder_hidden=(8,),
+        seed=0, epochs=3, batch_size=16,
+    )
+    path = tmp_path / "flipped.pt"
+    save_frozen_representation(artifact, path)
+
+    payload = torch.load(path, weights_only=False)
+    key = next(iter(payload["encoder_state_dict"]))
+    arr = payload["encoder_state_dict"][key].clone().numpy()
+    flat = arr.reshape(-1)
+    as_uint = flat[:1].view(np.uint32)
+    as_uint[0] ^= 1  # ONE actual bit flip, on disk
+    payload["encoder_state_dict"][key] = torch.from_numpy(arr)
+    torch.save(payload, path)
+
+    tampered = load_frozen_representation(path)  # load itself does not check the digest
+    with pytest.raises(ValueError, match="digest mismatch"):
+        Trainer(_repr_config(tmp_path), representation=tampered)
+
+
+def test_representation_nonfinite_e_recon_refused(tmp_path):
+    import pytest
+
+    data = _small_dataset()
+    artifact = pretrain_representation(
+        data, system="pendulum", regime="ou", d_z=_D_Z, encoder_hidden=(8,),
+        seed=0, epochs=3, batch_size=16,
+    )
+    artifact.e_recon = float("nan")
+    artifact.manifest = dict(artifact.manifest)
+    artifact.manifest["digest"] = representation_digest(artifact)  # stamp AFTER corrupting e_recon
+
+    with pytest.raises(ValueError, match="non-finite"):
+        Trainer(_repr_config(tmp_path), representation=artifact)
