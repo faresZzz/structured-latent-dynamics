@@ -1795,3 +1795,44 @@ later:
 and recorded before the artifact exists. The alternative considered and rejected was
 pretraining on one declared reference arm, which is cheaper and produces a better latent, and
 which would have privileged one backbone inside a comparison of backbones.
+
+### 14.10 The pretraining objective, second version — supersedes 14.9's loss (added 2026-08-06)
+
+14.9's **scope** stands unchanged: no predictor in the loop, arm-neutrality is the reason, and
+everything it declares about consequences still holds. What changes is the loss itself, at the
+project owner's direction, before any representation artifact exists as a published result.
+
+**Declared: a two-view self-distillation objective, DINO/BYOL-shaped, with no predictor.**
+
+- Two **views** of the same underlying state: two frames drawn at a short, declared temporal
+  offset from the same episode. No transition model is involved — this is an invariance
+  objective, not a prediction one, and that is what keeps it arm-neutral.
+- A **student** encoder and a **teacher** encoder, the teacher an EMA of the student, with a
+  stop-gradient on the teacher branch. The EMA machinery already exists in this repo
+  (`EMATarget`) and is reused rather than rebuilt.
+- The alignment term is taken **directly between the two encoders' outputs**. This is the
+  substantive change from 14.9: no predictor head sits between them.
+
+**Why an anti-collapse term is nonetheless present, stated because it is the one place this
+contract departs from the instruction as literally given.** Matching two encoder outputs under
+an EMA teacher with a stop-gradient and *nothing else* is the configuration BYOL's own ablation
+reports as collapsing to a constant: the predictor head is what prevents it there. DINO removes
+that predictor and prevents collapse another way — centering and sharpening a softmax over
+prototypes — which does not transfer to a continuous 4-dimensional latent. This project already
+carries the standard non-contrastive anti-collapse mechanism: VICReg's **variance and
+covariance** terms, whose stated purpose is exactly this. They are retained, and they stand in
+for DINO's centering and sharpening.
+
+So the objective is: invariance between the two encoders' outputs, plus VICReg variance and
+covariance on the student embedding, plus the linear state readout's reconstruction term
+retained from 14.9. The last is kept because `e_recon` — and therefore `tau_1` — is only
+meaningful if the latent is linearly decodable to the true state; an objective that is
+invariant but not decodable would publish every stratum ungated under 12.3's condition.
+
+**Decided, not derived**, like 14.9 before it: no measurement informs the choice of alignment
+term, and the temporal offset defining the two views is a judgment. What IS inherited from the
+literature, and cited rather than invented, is the collapse behaviour of predictor-free BYOL and
+VICReg's role as the non-contrastive anti-collapse regularizer.
+
+14.9 is not deleted. It is the first version of this decision, and the repo keeps superseded
+decisions visible rather than rewriting them out of the record.
