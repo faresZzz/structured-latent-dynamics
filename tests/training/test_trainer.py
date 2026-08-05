@@ -60,6 +60,51 @@ def _mlp_config(tmp_path: Path, **overrides) -> dict:
     return config
 
 
+def test_structured_family_config_is_canonicalized_and_delta_is_required(tmp_path):
+    # POSITIVE: an omitted default and the same default written out must be
+    # the SAME run identity for the new families too -- that is what makes a
+    # factorial cell one cell. r defaults to d_z (2r = the same lifted width
+    # koopman_ssm gets from n_pairs=d_z).
+    for family, explicit in (
+        ("mlp_k", {"r": _D_Z}),
+        ("transformer_k", {"r": _D_Z, "n_heads": 2, "max_len": 512}),
+        ("ssm_k", {"r": _D_Z, "delta_min": 1e-4, "delta_max": 10.0}),
+    ):
+        implicit_cfg = _mlp_config(tmp_path, family=family, delta=0.02)
+        explicit_cfg = _mlp_config(tmp_path, family=family, delta=0.02, **explicit)
+        a, b = Trainer(implicit_cfg), Trainer(explicit_cfg)
+        assert a.config == b.config
+        meta = {"n_episodes": 2, "T": 5, "dt": 0.02, "seed": 0}
+        assert a.resolve_run_dir({"meta": meta}) == b.resolve_run_dir({"meta": meta})
+        for key, value in explicit.items():
+            assert a.config[key] == value
+        print(f"[trainer] {family} canonicalized to {explicit} -> one run identity")
+
+    # NEGATIVE: delta has no default for any structured arm, exactly as for
+    # koopman_ssm -- a config that forgets it is refused at construction, not
+    # silently given an invented discretization step.
+    import pytest
+
+    for family in ("mlp_k", "transformer_k", "ssm_k"):
+        with pytest.raises(ValueError, match="requires delta"):
+            Trainer(_mlp_config(tmp_path, family=family))
+
+
+def test_family_with_no_canonicalization_branch_is_refused(monkeypatch, tmp_path):
+    # NEGATIVE, reached by mutating the family table IN MEMORY. The
+    # canonicalization chain used to have no else: a family accepted by
+    # _FAMILY_CONFIG_KEYS but missing a branch was never canonicalized, so
+    # "default omitted" and "default written out" hashed as two identities
+    # for one model -- a silent cell-identity bug no green gate would catch.
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    monkeypatch.setitem(trainer_mod._FAMILY_CONFIG_KEYS, "unbranched", frozenset())
+    with pytest.raises(ValueError, match="no canonicalization branch"):
+        Trainer(_mlp_config(tmp_path, family="unbranched"))
+
+
 def test_trainer_contract_mlp_family(tmp_path):
     data = _small_dataset()
 
@@ -1093,33 +1138,39 @@ def test_val_evaluation_reproducible_bit_identical_with_mu_j_positive(tmp_path):
 
 
 def test_skipping_val_jac_penalty_saves_time(tmp_path, monkeypatch):
-    # the measured cost this change removes: 23-38% of epoch time. Prove the
-    # direction (not a specific magnitude) by comparing against a forced
-    # "old behavior" where compute_jac_penalty is always True, including val.
-    import time
-
+    # Was a wall-clock comparison of two `fit()` calls in one process --
+    # unstable by construction: it measures machine load and call order, not
+    # the code (review measured fixed=8.815s/old=2.542s in one run, and
+    # fixed=28.595s/old=2.058s -- a REVERSED 14x -- in a fresh process with no
+    # code change). Replaced with the deterministic claim the skip actually
+    # makes: _jac_state_penalty (what compute_jac_penalty gates) is called
+    # for the train split and NEVER for the val split, tagged via the
+    # compute_jac_penalty kwarg _composite_loss is called with (fit() passes
+    # compute_jac_penalty=False only for the val split, see trainer.py).
     import sld.training.trainer as trainer_mod
+
+    calls = {"train": 0, "val": 0}
+    orig_composite = trainer_mod.Trainer._composite_loss
+    orig_jac = trainer_mod.Trainer._jac_state_penalty
+    phase = {"current": "train"}
+
+    def tagged_composite(self, *args, **kwargs):
+        phase["current"] = "val" if kwargs.get("compute_jac_penalty", True) is False else "train"
+        return orig_composite(self, *args, **kwargs)
+
+    def counting_jac(self, predictor, jac_steps):
+        calls[phase["current"]] += 1
+        return orig_jac(self, predictor, jac_steps)
+
+    monkeypatch.setattr(trainer_mod.Trainer, "_composite_loss", tagged_composite)
+    monkeypatch.setattr(trainer_mod.Trainer, "_jac_state_penalty", counting_jac)
 
     data = _small_dataset(n_episodes=8, T=20)
     cfg = _mlp_config(
         tmp_path, exp_name="trainer_test_val_speed", family="min_ssm", mu_j=0.1, epochs=6
     )
+    Trainer(cfg).fit(data)
 
-    t0 = time.perf_counter()
-    Trainer(dict(cfg, exp_name="trainer_test_val_speed_fixed")).fit(data)
-    fixed_time = time.perf_counter() - t0
-
-    orig = trainer_mod.Trainer._composite_loss
-
-    def always_compute_jac(self, *args, **kwargs):
-        kwargs["compute_jac_penalty"] = True
-        return orig(self, *args, **kwargs)
-
-    monkeypatch.setattr(trainer_mod.Trainer, "_composite_loss", always_compute_jac)
-
-    t0 = time.perf_counter()
-    Trainer(dict(cfg, exp_name="trainer_test_val_speed_old")).fit(data)
-    old_time = time.perf_counter() - t0
-
-    print(f"[trainer] val-jac timing: fixed={fixed_time:.3f}s old-behavior={old_time:.3f}s")
-    assert fixed_time < old_time
+    print(f"[trainer] _jac_state_penalty calls by phase = {calls}")
+    assert calls["train"] > 0  # sanity: the counter itself is wired up
+    assert calls["val"] == 0  # exactly what compute_jac_penalty=False claims

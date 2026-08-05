@@ -26,6 +26,122 @@ from torch import nn
 _VALID_MODES = ("continuous", "discrete")
 
 
+def rotation_scaling_zoh(
+    alpha: torch.Tensor,
+    omega: torch.Tensor,
+    delta: torch.Tensor | float,
+    B_cont: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Zero-order-hold discretization of GIVEN rotation-scaling generators.
+
+    The parameter-free primitive behind :meth:`RotationScalingBlocks.discretize_zoh`
+    and behind the context-dependent structured cell, whose ``(alpha, omega, B)``
+    are produced by a head rather than held as parameters. Everything is batched:
+    ``alpha``/``omega`` are ``(..., n_pairs)`` with an arbitrary leading batch,
+    ``B_cont`` is ``(..., 2*n_pairs, m)`` (block ``i`` occupying rows ``2i:2i+2``),
+    and the two batch shapes only have to broadcast against each other.
+
+    Each block is ``A_i = alpha_i*I + omega_i*J`` with ``J = [[0,-1],[1,0]]``,
+    ``J^2 = -I``; ``I`` and ``J`` commute, so
+
+        A_bar_i = exp(delta*A_i) = exp(delta*alpha_i) * R(delta*omega_i)
+
+    in closed form, with ``R`` the 2x2 rotation. The input integral
+
+        B_bar_i = Phi_i B_i,   Phi_i = int_0^delta exp(t A_i) dt
+
+    is an ENTIRE function of ``A_i``: the familiar ``A^{-1}(A_bar - I)`` has a
+    merely REMOVABLE singularity at ``(alpha, omega) = (0, 0)``, where
+    ``Phi = delta*I``. Evaluation is branch-selected per block: closed form where
+    ``delta^2*(alpha^2 + omega^2) > 1e-6``, else the series
+    ``delta*(I + delta*A/2 + delta^2*A^2/6 + delta^3*A^3/24)``, which avoids
+    the ``exp(delta*A) - I`` cancellation at small ``delta*||A||``. The bound
+    that matters is on the RETURNED ``B_bar = Phi @ B_cont``, not on the
+    intermediate ``Phi`` alone: at the worst point of this branch (the
+    switch boundary), the relative error of ``Phi`` itself is ``~3e-11``, but
+    the componentwise relative error of ``B_bar`` scales with how
+    ill-conditioned ``B_cont`` is (its per-component magnitude spread) since
+    each component is a separate cancellation; measured up to ``~2e-8`` for a
+    deliberately mismatched ``B_cont`` before this series term was added.
+    With this term, the same worst-case configuration measures ``~1e-14``.
+
+    Args:
+        alpha: ``(..., n_pairs)`` real parts of the continuous generators. FREE:
+            no stability reparametrization is applied here.
+        omega: ``(..., n_pairs)`` angular frequencies, broadcastable with ``alpha``.
+        delta: ZOH step; scalar, ``(n_pairs,)``, or broadcastable onto ``alpha``.
+        B_cont: optional ``(..., 2*n_pairs, m)`` continuous input matrix.
+
+    Returns:
+        ``(A_bar, B_bar)`` with ``A_bar`` of shape ``(..., n_pairs, 2, 2)`` and
+        ``B_bar`` of shape ``(..., 2*n_pairs, m)`` (``None`` if ``B_cont`` is).
+
+    Raises:
+        ValueError: if any element of ``delta`` is not finite and strictly
+            positive. NaN fails every comparison, so ``<= 0`` alone would let
+            NaN (and ``+inf``) through into NaN matrices — finiteness is checked
+            explicitly.
+    """
+    delta_t = torch.as_tensor(delta, dtype=alpha.dtype, device=alpha.device)
+    if not torch.all(torch.isfinite(delta_t)) or torch.any(delta_t <= 0):
+        raise ValueError("delta must be finite and strictly positive")
+
+    # closed-form matrix exponential of a rotation-scaling block
+    scale = torch.exp(delta_t * alpha)
+    cos = torch.cos(delta_t * omega)
+    sin = torch.sin(delta_t * omega)
+    row0 = torch.stack([scale * cos, -scale * sin], dim=-1)
+    row1 = torch.stack([scale * sin, scale * cos], dim=-1)
+    A_bar = torch.stack([row0, row1], dim=-2)
+
+    if B_cont is None:
+        return A_bar, None
+
+    # Phi_i = int_0^delta exp(t A_i) dt in the (I, J) coefficient basis:
+    # every matrix in play is a*I + b*J, and (pI + qJ)(rI + sJ) =
+    # (pr - qs)I + (ps + qr)J, so the whole computation stays per-block
+    denom = alpha**2 + omega**2
+    small = (delta_t**2) * denom <= 1e-6
+
+    # closed-form branch: Phi = A^{-1}(A_bar - I), guarded against the
+    # untaken-branch NaN-gradient pitfall of torch.where by a safe denom
+    denom_safe = torch.where(small, torch.ones_like(denom), denom)
+    r = scale * cos - 1.0
+    s = scale * sin
+    a_cf = (alpha * r + omega * s) / denom_safe
+    b_cf = (alpha * s - omega * r) / denom_safe
+
+    # series branch (entire-function evaluation through A = 0):
+    # Phi = delta*(I + delta*A/2 + delta^2*A^2/6 + delta^3*A^3/24), with
+    # A^2 = (alpha^2 - omega^2)*I + 2*alpha*omega*J and, treating (alpha, omega)
+    # as (Re, Im) of a complex number since (I, J) obeys the same algebra as
+    # (1, i): A^3 = (alpha + i*omega)^3 = (alpha^3 - 3*alpha*omega^2)
+    # + i*(3*alpha^2*omega - omega^3), so
+    # A^3 = (alpha^3 - 3*alpha*omega^2)*I + (3*alpha^2*omega - omega^3)*J
+    a_ser = delta_t * (
+        1.0
+        + delta_t * alpha / 2.0
+        + delta_t**2 * (alpha**2 - omega**2) / 6.0
+        + delta_t**3 * (alpha**3 - 3.0 * alpha * omega**2) / 24.0
+    )
+    b_ser = delta_t * (
+        delta_t * omega / 2.0
+        + delta_t**2 * (2.0 * alpha * omega) / 6.0
+        + delta_t**3 * (3.0 * alpha**2 * omega - omega**3) / 24.0
+    )
+
+    a_phi = torch.where(small, a_ser, a_cf)
+    b_phi = torch.where(small, b_ser, b_cf)
+    phi_row0 = torch.stack([a_phi, -b_phi], dim=-1)
+    phi_row1 = torch.stack([b_phi, a_phi], dim=-1)
+    Phi = torch.stack([phi_row0, phi_row1], dim=-2)
+
+    n_pairs = Phi.shape[-3]
+    B = B_cont.reshape(*B_cont.shape[:-2], n_pairs, 2, B_cont.shape[-1])
+    B_bar = Phi @ B  # batch dims of Phi and B broadcast here
+    return A_bar, B_bar.reshape(*B_bar.shape[:-3], 2 * n_pairs, B_bar.shape[-1])
+
+
 class RotationScalingBlocks(nn.Module):
     """``n_pairs`` independent 2x2 rotation-scaling blocks.
 
@@ -130,7 +246,7 @@ class RotationScalingBlocks(nn.Module):
     def discretize_zoh(
         self, delta: torch.Tensor | float, B_cont: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Zero-order-hold discretization (A_bar exact; B_bar exact or 1e-10).
+        """Zero-order-hold discretization (A_bar exact; B_bar exact or ~1e-14).
 
         Since A_i = alpha_i*I + omega_i*J with J = [[0,-1],[1,0]], J^2 = -I,
         and I, J commute, exp(delta*A_i) has the closed form:
@@ -149,11 +265,19 @@ class RotationScalingBlocks(nn.Module):
         (= delta*B), a point an earlier revision wrongly rejected (caught
         in adversarial review). Evaluation is branch-selected per block:
         the closed form where delta^2*(alpha^2 + omega^2) > 1e-6, else the
-        series delta*(I + delta*A/2 + delta^2*A^2/6), whose relative
-        truncation error is < 1e-10 in that regime and which also avoids
-        the exp(delta*A) - I cancellation at small delta*||A||. B_bar is
-        returned with the same shape as B_cont, (2*n_pairs, m). This path
-        only supports scalar or (n_pairs,) delta.
+        series delta*(I + delta*A/2 + delta^2*A^2/6 + delta^3*A^3/24), which
+        also avoids the exp(delta*A) - I cancellation at small delta*||A||.
+        The truncation-error bound that matters is on the RETURNED B_bar,
+        not on the intermediate Phi: Phi's own relative error at the branch
+        switch is ~3e-11, but B_bar = Phi @ B_cont's componentwise relative
+        error additionally depends on how ill-conditioned B_cont is (spread
+        across component magnitudes) — measured up to ~2e-8 for a badly
+        scaled B_cont before this series term was added, ~1e-14 after. B_bar is
+        returned with the same shape as B_cont, (2*n_pairs, m). Delegates the
+        whole computation to ``rotation_scaling_zoh``, this method only
+        supplies the block parameters — including its batched-delta B_bar
+        support, so scalar, (n_pairs,), or (batch, n_pairs) delta all work
+        with B_cont too.
 
         Raises:
             ValueError: in mode="discrete" (nothing to discretize — the
@@ -174,55 +298,10 @@ class RotationScalingBlocks(nn.Module):
         delta_t = torch.as_tensor(delta, dtype=omega.dtype, device=omega.device)
         # NaN fails every comparison, so `<= 0` alone would let NaN (and
         # +inf) through to produce NaN matrices — require finite AND positive
+        # (re-checked inside rotation_scaling_zoh; kept here for a fast reject)
         if not torch.all(torch.isfinite(delta_t)) or torch.any(delta_t <= 0):
             raise ValueError("delta must be finite and strictly positive")
-
-        # closed-form matrix exponential of a rotation-scaling block
-        scale = torch.exp(delta_t * alpha)
-        cos = torch.cos(delta_t * omega)
-        sin = torch.sin(delta_t * omega)
-        row0 = torch.stack([scale * cos, -scale * sin], dim=-1)
-        row1 = torch.stack([scale * sin, scale * cos], dim=-1)
-        A_bar = torch.stack([row0, row1], dim=-2)
-
-        if B_cont is None:
-            return A_bar, None
-
-        if delta_t.dim() > 1:
-            raise ValueError(
-                "B_bar path only supports scalar or (n_pairs,) delta; "
-                "batched-delta B_bar is not needed yet"
-            )
-
-        # Phi_i = int_0^delta exp(t A_i) dt in the (I, J) coefficient basis:
-        # every matrix in play is a*I + b*J, and (pI + qJ)(rI + sJ) =
-        # (pr - qs)I + (ps + qr)J, so the whole computation stays per-block
-        denom = alpha**2 + omega**2
-        small = (delta_t**2) * denom <= 1e-6
-
-        # closed-form branch: Phi = A^{-1}(A_bar - I), guarded against the
-        # untaken-branch NaN-gradient pitfall of torch.where by a safe denom
-        denom_safe = torch.where(small, torch.ones_like(denom), denom)
-        r = scale * cos - 1.0
-        s = scale * sin
-        a_cf = (alpha * r + omega * s) / denom_safe
-        b_cf = (alpha * s - omega * r) / denom_safe
-
-        # series branch (entire-function evaluation through A = 0):
-        # Phi = delta*(I + delta*A/2 + delta^2*A^2/6), with
-        # A^2 = (alpha^2 - omega^2)*I + 2*alpha*omega*J
-        a_ser = delta_t * (1.0 + delta_t * alpha / 2.0 + delta_t**2 * (alpha**2 - omega**2) / 6.0)
-        b_ser = delta_t * (delta_t * omega / 2.0 + delta_t**2 * (2.0 * alpha * omega) / 6.0)
-
-        a_phi = torch.where(small, a_ser, a_cf)
-        b_phi = torch.where(small, b_ser, b_cf)
-        phi_row0 = torch.stack([a_phi, -b_phi], dim=-1)
-        phi_row1 = torch.stack([b_phi, a_phi], dim=-1)
-        Phi = torch.stack([phi_row0, phi_row1], dim=-2)
-
-        B = B_cont.reshape(self.n_pairs, 2, -1)
-        B_bar = Phi @ B
-        return A_bar, B_bar.reshape(2 * self.n_pairs, -1)
+        return rotation_scaling_zoh(alpha, omega, delta_t, B_cont)
 
     def spectral_moduli(self, delta: torch.Tensor | float | None = None) -> torch.Tensor:
         """Modulus of the shared eigenvalue pair, per block.

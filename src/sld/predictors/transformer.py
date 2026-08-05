@@ -90,6 +90,156 @@ class _CausalBlock(nn.Module):
         return x, new_cache
 
 
+class _QueryCacheBlock(nn.Module):
+    """One pre-LN block whose QUERY and whose KEYS/VALUES come from different
+    sources: the query is the current ``h_t`` token, the keys/values are the
+    cached PAST pairs ``(h_s, u_s)``, ``s < t``, plus a learned BOS entry.
+
+    Same conventions as ``_CausalBlock`` above (``ln -> attn -> ln -> mlp``
+    with residuals, ``d_head**-0.5`` scaling) but NOT the same block:
+    ``_CausalBlock`` derives ``q, k, v`` from one and the same token
+    (``qkv(...).chunk(3)``), which is exactly what must not happen here. If
+    the current token contributed its own ``k, v``, they would be built from
+    ``h_t`` alone while every cached entry is built from a pair ``(h_s,
+    u_s)`` -- inconsistent, and a standing invitation for ``u_t`` to leak
+    into ``c_t`` the day the query token grows a ``u`` slot.
+
+    The learned BOS ``(k, v)`` is always present, so attention is defined and
+    non-degenerate at ``t = 0`` with an empty cache.
+    """
+
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dtype: torch.dtype) -> None:
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.ln1 = nn.LayerNorm(d_model, dtype=dtype)
+        self.q_proj = nn.Linear(d_model, d_model, dtype=dtype)
+        # applied in `absorb`, to the PAIR token -- never to the query
+        self.kv_proj = nn.Linear(d_model, 2 * d_model, dtype=dtype)
+        self.attn_out = nn.Linear(d_model, d_model, dtype=dtype)
+        self.ln2 = nn.LayerNorm(d_model, dtype=dtype)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_ff, dtype=dtype),
+            nn.GELU(),
+            nn.Linear(d_ff, d_model, dtype=dtype),
+        )
+        # BOS: a learned cache entry, small-init like a normal projection
+        self.bos_kv = nn.Parameter(0.02 * torch.randn(2, n_heads, self.d_head, dtype=dtype))
+
+    def cache_entry(self, token: Tensor) -> Tensor:
+        """``(2, B, n_heads, 1, d_head)`` K/V of ONE pair token ``(B, d_model)``.
+
+        ponytail: a plain linear read of the pair token -- no attention, no
+        pre-LN, no cross-token mixing. The cache is therefore a memory of RAW
+        pairs, not of contextualized ones; the contextualized version needs a
+        full forward pass inside ``absorb`` (double the per-step compute) and
+        nothing here shows that capacity is the binding constraint. Upgrade
+        path if it ever is: run the query path on the pair token in ``absorb``
+        and cache the block outputs instead.
+        """
+        B = token.shape[0]
+        kv = self.kv_proj(token).view(B, 2, self.n_heads, self.d_head)
+        return kv.permute(1, 0, 2, 3).unsqueeze(3).contiguous()
+
+    def forward(self, x: Tensor, cache: Tensor | None) -> Tensor:
+        # x: (B, 1, d_model), the query token. cache: (2, B, n_heads, S, d_head) or None.
+        B = x.shape[0]
+        q = self.q_proj(self.ln1(x)).view(B, 1, self.n_heads, self.d_head).transpose(1, 2)
+
+        bos = self.bos_kv.to(dtype=x.dtype, device=x.device)
+        bos = bos.unsqueeze(1).expand(2, B, self.n_heads, self.d_head).unsqueeze(3)
+        k = bos[0] if cache is None else torch.cat([bos[0], cache[0]], dim=2)
+        v = bos[1] if cache is None else torch.cat([bos[1], cache[1]], dim=2)
+
+        scores = torch.einsum("bhqd,bhkd->bhqk", q, k) * (self.d_head**-0.5)
+        attn = torch.softmax(scores, dim=-1)
+        out = torch.einsum("bhqk,bhkd->bhqd", attn, v)
+        out = out.transpose(1, 2).reshape(B, 1, self.n_heads * self.d_head)
+        x = x + self.attn_out(out)
+        return x + self.mlp(self.ln2(x))
+
+
+class CausalTransformerContextBackbone(nn.Module):
+    """``kappa_transformer``: attention over the past pairs as context producer.
+
+    The ``ContextBackbone`` (``structured.py``) for the transformer arm of the
+    3x2 factorial. Strict causality is STRUCTURAL, not policed: ``step``
+    (in ``StructuredPredictor``) calls ``context_step`` BEFORE ``absorb``, so
+    at step ``t`` the cache holds exactly the pairs ``s = 0 .. t-1`` and the
+    query is built from ``h_t`` alone. There is no path by which ``u_t``, or
+    anything later, can reach ``c_t``.
+
+    Cache layout matches ``CausalTransformerPredictor``:
+    ``(n_layers, 2, B, n_heads, S, d_head)`` with ``S`` the number of pairs
+    absorbed so far (dim 1 indexes K=0/V=1). The learned BOS entry is a
+    PARAMETER, not a cache slot, so ``S`` stays equal to the number of steps
+    already taken -- which is also the positional index of the next query.
+    ``m=None`` is the empty cache; ``rollout`` (``PredictorModule``) always
+    starts from a fresh ``PredictorState()``, which is what rebuilds the cache
+    between episodes.
+    """
+
+    def __init__(
+        self,
+        d_h: int,
+        d_u: int,
+        width: int = 64,
+        *,
+        n_heads: int = 2,
+        n_layers: int = 2,
+        d_ff: int | None = None,
+        max_len: int = 512,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__()
+        if width % n_heads != 0:
+            raise ValueError(f"width ({width}) must be divisible by n_heads ({n_heads})")
+        d_ff = 4 * width if d_ff is None else d_ff
+        self.d_context = width
+        self.d_model = width
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.d_head = width // n_heads
+        self.max_len = max_len
+        # two DIFFERENT read-ins: the query sees h alone, the cache sees pairs
+        self.q_in = nn.Linear(d_h, width, dtype=dtype)
+        self.pair_in = nn.Linear(d_h + d_u, width, dtype=dtype)
+        self.blocks = nn.ModuleList(
+            _QueryCacheBlock(width, n_heads, d_ff, dtype) for _ in range(n_layers)
+        )
+        self.register_buffer("pe", _build_sinusoidal_pe(max_len, width), persistent=False)
+
+    def _position(self, state: PredictorState, what: str) -> int:
+        t = 0 if state.m is None else state.m.shape[4]
+        if t >= self.max_len:
+            raise ValueError(
+                f"cache length {t} would exceed max_len={self.max_len} on this {what}"
+            )
+        return t
+
+    def context_step(self, h: Tensor, state: PredictorState) -> Tensor:
+        t = self._position(state, "context step")
+        token = self.q_in(h) + self.pe[t].to(dtype=h.dtype, device=h.device)
+        x = token.unsqueeze(1)
+        for layer_idx, block in enumerate(self.blocks):
+            x = block(x, None if state.m is None else state.m[layer_idx])
+        return x.squeeze(1)
+
+    def absorb(self, h: Tensor, u: Tensor, state: PredictorState) -> PredictorState:
+        s = self._position(state, "absorb")
+        token = self.pair_in(torch.cat([h, u], dim=-1))
+        token = token + self.pe[s].to(dtype=token.dtype, device=token.device)
+        entries = [block.cache_entry(token) for block in self.blocks]
+        if state.m is None:
+            new_m = torch.stack(entries, dim=0)
+        else:
+            new_m = torch.stack(
+                [torch.cat([state.m[i], entries[i]], dim=3) for i in range(self.n_layers)],
+                dim=0,
+            )
+        return PredictorState(m=new_m)
+
+
 class CausalTransformerPredictor(PredictorModule):
     """Minimal causal transformer over the (h, u) token stream.
 

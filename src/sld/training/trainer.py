@@ -27,7 +27,7 @@ from sld.objectives.jac_reg import Gauge, TotalJacobianPenalty, gauge_digest
 from sld.objectives.jepa import EMATarget, JEPALoss
 from sld.objectives.vicreg import covariance_loss, variance_loss
 from sld.predictors.base import PredictorState
-from sld.predictors.registry import get_predictor
+from sld.predictors.registry import STRUCTURED_FAMILIES, get_predictor
 from sld.training.seeding import set_seed
 
 # resolved for any key the caller omits; unknown extra keys the caller DOES
@@ -60,6 +60,12 @@ _REQUIRED_KEYS = ("exp_name", "seed", "family", "d_x", "d_z", "d_u")
 # but not applicable to the declared family is REJECTED at construction --
 # silently ignoring it would let distinct run identities build identical
 # models (adversarial review round 2)
+#
+# The three structured arms (PROTOCOL.md section 13.1) share ONE key set
+# plus their backbone's own extras -- the same shape as their shared
+# constructor signature, so canonicalization below is one branch for the
+# three, not three.
+_STRUCTURED_KEYS = frozenset({"delta", "r"})
 _FAMILY_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "mlp": frozenset(),
     "transformer": frozenset({"n_heads", "max_len"}),
@@ -67,6 +73,9 @@ _FAMILY_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "koopman_ssm": frozenset(
         {"delta", "regime", "constrained", "n_pairs", "delta_min", "delta_max"}
     ),
+    "mlp_k": _STRUCTURED_KEYS,
+    "transformer_k": _STRUCTURED_KEYS | {"n_heads", "max_len"},
+    "ssm_k": _STRUCTURED_KEYS | {"delta_min", "delta_max"},
 }
 _MODEL_KEYS = frozenset().union(*_FAMILY_CONFIG_KEYS.values())
 
@@ -75,7 +84,7 @@ _MODEL_KEYS = frozenset().union(*_FAMILY_CONFIG_KEYS.values())
 # run identity yet silently ignored by the forwarding above -- reject them
 # outright (adversarial review round 3)
 _BUDGET_OWNED_KEYS = frozenset(
-    {"d_model", "d_ff", "n_layers", "hidden", "d_state", "psi_hidden", "pi_hidden"}
+    {"d_model", "d_ff", "n_layers", "hidden", "d_state", "psi_hidden", "pi_hidden", "width"}
 )
 
 # derived or policy-owned constructor names, rejected for every family
@@ -290,12 +299,35 @@ class Trainer:
             if self.config.get(key) is None:
                 self.config[key] = default
 
-        if family == "transformer":
+        # The chain is CLOSED (see its else): a family present in
+        # _FAMILY_CONFIG_KEYS but absent here would never be canonicalized,
+        # and "default omitted" vs "default written out" would hash as two
+        # run identities for one and the same model -- a silent identity bug
+        # that no green gate would catch.
+        if family == "mlp":
+            pass  # no family-specific keys, nothing to canonicalize
+        elif family == "transformer":
             _resolve("n_heads", 2)
             _resolve("max_len", 512)
         elif family == "min_ssm":
             _resolve("delta_min", 1e-4)
             _resolve("delta_max", 10.0)
+        elif family in STRUCTURED_FAMILIES:
+            # ONE branch for mlp_k/transformer_k/ssm_k: delta is the shared
+            # physical ZOH step (required, like koopman_ssm's), r the shared
+            # lifted width (d_h = 2r, defaulting to the same 2x lifting
+            # ratio koopman_ssm gets from n_pairs=d_z). Only the backbone's
+            # own extras differ, and they are the SAME defaults their
+            # unstructured counterparts use.
+            if self.config.get("delta") is None:
+                raise ValueError(f"family {family!r} requires delta in the config")
+            _resolve("r", self.config["d_z"])
+            if family == "transformer_k":
+                _resolve("n_heads", 2)
+                _resolve("max_len", 512)
+            elif family == "ssm_k":
+                _resolve("delta_min", 1e-4)
+                _resolve("delta_max", 10.0)
         elif family == "koopman_ssm":
             # conditional requiredness is schema validation, not a fit-time
             # surprise (round 5): delta is koopman's physical ZOH step
@@ -307,6 +339,12 @@ class Trainer:
             if self.config["regime"] == "selective":
                 _resolve("delta_min", 1e-4)
                 _resolve("delta_max", 10.0 * self.config["delta"])
+        else:  # unreachable while every registered family has a branch above
+            raise ValueError(
+                f"no canonicalization branch for family {family!r} -- a family accepted "
+                "by _FAMILY_CONFIG_KEYS must resolve its defaults here, or two configs "
+                "describing the same model would hash to two run identities"
+            )
         # selective-only knobs on a fixed regime would hash into the identity
         # while constructing identical dynamics (round 3); the check reads the
         # USER-supplied keys (canonicalization never adds them to fixed regimes)

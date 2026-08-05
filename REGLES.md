@@ -188,7 +188,7 @@ Proportionnels au risque, comportementaux d'abord :
 - **Tests de propriété** : stabilité de la cellule ON ∀Δ>0 ; invariance des
   pairings sous reparamétrisation ; contrôles négatifs silencieux ; énergie
   infinie hors de l'image.
-- **Tests de contrat** : les 4 familles passent la même suite `Predictor`
+- **Tests de contrat** : les 7 familles passent la même suite `Predictor`
   (shapes, threading de l'état, rollout dans H, `local_operator` cohérent).
 - **Tests de contre-exemple** : le contre-exemple 1-D des gates et le cache qui
   explose à bloc contractif sont des tests — ils documentent en code pourquoi

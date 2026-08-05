@@ -106,7 +106,7 @@ structured-latent-dynamics/
     systems/               # §4.1 — vérités terrain RK4
     data/                  # §4.2 — régimes, mixing, datasets
     encoders/              # §4.3
-    predictors/            # §4.4 — les 4 familles + blocs 2×2
+    predictors/            # §4.4 — les 7 familles + blocs 2×2
     objectives/            # §4.5 — JEPA, VICReg, μ_J, R_spec
     training/              # §4.6 — trainer, budgets, seeds
     audit/                 # §4.7 — l'instrument
@@ -165,7 +165,7 @@ utilisé dans un run ». Câblage prévu Wave 6.
 Vérifié 2026-07-21 : `frame_mlp.py` 5/5, `window_mlp.py` 6/6, tests verts.
 `pretrain.py` confirmé absent (aucun fichier, aucun stub).
 
-### 4.4 `predictors/` — les 4 familles
+### 4.4 `predictors/` — les 7 familles (4 non structurées + les 3 bras structurés)
 
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
@@ -175,7 +175,8 @@ Vérifié 2026-07-21 : `frame_mlp.py` 5/5, `window_mlp.py` 6/6, tests verts.
 | `transformer.py` | `CausalTransformerPredictor` | 2 blocs d'attention causale sur la fenêtre du rollout ; famille générique + baseline O(H²) de la facture | ✅ |
 | `min_ssm.py` | `SelectiveSSMPredictor` | $\bar A(c_t)$ diagonal réel, $\Delta(c_t)$, $\bar B(c_t)$ ; scan séquentiel ; régime LPV, jamais « Koopman » | ✅ |
 | `koopman_ssm.py` | `KoopmanSSMPredictor` | lifting ψ + transition sur l'échelle `regime='constant'\|'bilinear'\|'selective'` + projection π ; **cellule core = bilinear** ($\bar A h + \sum_j u_j \bar B_j h + \bar B_0 u$) ; `selective` = ablation LPV | ✅ |
-| `registry.py` | `get_predictor` | famille + config → instance appariée au budget | ✅ |
+| `structured.py` | `StructuredPredictor`, `MLPKPredictor`, `TransformerKPredictor`, `SSMKPredictor` | LA cellule structurée partagée (PROTOCOL §13.1) : lift ψ, tête affine $\theta_0 + W_\theta c$, blocs 2×2 rotation-scaling, ZOH exacte, projection π. Les 3 façades ne diffèrent QUE par le producteur de contexte $\kappa_b$ et partagent une signature de constructeur identique (`width` = l'unique bouton de budget, $d_{context} = width$). Vocabulaire : $\bar A_t$ dépend du contexte donc **LPV/cocycle**, jamais « Koopman » ; $\bar A h + \bar B u$ est **affine**, jamais « bilinéaire » | ✅ |
+| `registry.py` | `get_predictor`, `FAMILIES`, `STRUCTURED_FAMILIES` | famille + config → instance appariée au budget. **7 familles enregistrées pour 6 cellules du factoriel** : `koopman_ssm` reste constructible/chargeable pour les artefacts publiés mais n'est JAMAIS une cellule (PROTOCOL §13.1) — refus porté par `factorial._NON_FACTORIAL_FAMILIES` | ✅ |
 
 ### 4.5 `objectives/`
 
@@ -191,7 +192,7 @@ Vérifié 2026-07-21 : `frame_mlp.py` 5/5, `window_mlp.py` 6/6, tests verts.
 | Fichier | Exports | Responsabilité | Statut |
 |---|---|---|---|
 | `trainer.py` | `Trainer` | config-driven : AdamW, schedule, mix TF/FR, logging CSV/JSON, artefacts `<exp>/<hash>/` | ✅ |
-| `budget.py` | `match_budget`, `count_flops_per_step`, `count_flops_per_trajectory` | appariement params ±5 % par famille ; FLOPs analytiques ; transformer en f(H) | ✅ |
+| `budget.py` | `match_budget`, `count_flops_per_step`, `count_flops_per_trajectory` | appariement params ±5 % par famille (ψ, π, tête et contexte tous comptés) ; FLOPs analytiques du chemin réellement exécuté ; croissance en f(H) pour les deux bras d'attention (`transformer`, `transformer_k`), affine pour les cinq autres | ✅ |
 | `seeding.py` | `set_seed` | reproductibilité torch/numpy | ✅ |
 
 ### 4.7 `audit/` — l'instrument
@@ -278,8 +279,12 @@ viennent du fichier alors nommé `pendulum_core_off.yaml` (renommé
 `pendulum_core_partial.yaml` en B4) — qui partage `exp_name: pendulum_core`
 avec le fichier ci-dessus, d'où le nom identique du dossier de résultats ;
 ce n'est pas le même fichier qui a tourné. `pendulum_core_partial.yaml` est
-la config core active aujourd'hui (4 des 6 paires `backbone`/`structure`
-valides ; `mlp_k`/`transformer_k` de la phase C complètent les 2 restantes) ;
+la config core active aujourd'hui — elle déclare les 3 bras OFF exécutés, et
+son bras `(ssm, on)` (jamais exécuté) a été retiré par l'amendement 4
+(PROTOCOL §13.2). Depuis la phase C les **6** paires `backbone`/`structure`
+sont valides : `(mlp,on)→mlp_k`, `(transformer,on)→transformer_k`,
+`(ssm,on)→ssm_k` ; la grille 3×2 complète est une NOUVELLE
+pré-enregistration sous `results_factorial/` (PROTOCOL §13.3) ;
 `experiments/selection.py` (le sélecteur μ_J) n'existe plus dans `src/` —
 historique seulement, trace complète sous `reports/historical/mu_j/traces/`
 (922 fichiers, 5 043 481 octets, 228 checkpoints `.pt` volontairement

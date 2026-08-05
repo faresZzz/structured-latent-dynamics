@@ -42,35 +42,51 @@ def _minimal_dataset_entry(**overrides) -> dict:
     return entry
 
 
-def test_expand_produces_exactly_the_four_valid_backbone_structure_pairs():
-    # phase B1: backbone x structure replaces the retired family x
-    # constraint / mu_J axis. Exactly 4 pairs are valid today (the 2
-    # missing structured backbones arrive in phase C -- see
-    # test_mlp_and_transformer_on_rejected_naming_phase_c below).
+_SIX_CELLS = {
+    ("mlp", "off"): "mlp",
+    ("mlp", "on"): "mlp_k",
+    ("transformer", "off"): "transformer",
+    ("transformer", "on"): "transformer_k",
+    ("ssm", "off"): "min_ssm",
+    ("ssm", "on"): "ssm_k",
+}
+
+
+def test_expand_produces_exactly_the_six_factorial_cells():
+    # phase C: all 3 backbones x 2 structures now resolve. The mapping is
+    # PINNED here, value by value -- ("ssm", "on") in particular moved from
+    # koopman_ssm to ssm_k at Amendment 4 (PROTOCOL.md section 13.2), and
+    # that remap must never drift back or wander silently.
     config = {
         "exp_name": "x",
         "datasets": {"d1": _minimal_dataset_entry()},
         "arms": [
-            {"backbone": "mlp", "structure": "off", "overrides": {}},
-            {"backbone": "transformer", "structure": "off", "overrides": {}},
-            {"backbone": "ssm", "structure": "off", "overrides": {}},
-            {"backbone": "ssm", "structure": "on", "overrides": {"constrained": True, "delta": 0.02}},
+            {"backbone": b, "structure": s, "overrides": ({"delta": 0.02} if s == "on" else {})}
+            for b, s in _SIX_CELLS
         ],
         "seeds": [0],
     }
     cells = expand(config, dry_run=True)
-    assert len(cells) == 4
+    assert len(cells) == 6
     pairs = [(c["backbone"], c["structure"]) for c in cells]
-    assert set(pairs) == {("mlp", "off"), ("transformer", "off"), ("ssm", "off"), ("ssm", "on")}
-    assert len(set(pairs)) == 4  # no duplicates
-    expected_family = {
-        ("mlp", "off"): "mlp",
-        ("transformer", "off"): "transformer",
-        ("ssm", "off"): "min_ssm",
-        ("ssm", "on"): "koopman_ssm",
-    }
+    assert set(pairs) == set(_SIX_CELLS)
+    assert len(set(pairs)) == 6  # no duplicates
     for cell in cells:
-        assert cell["family"] == expected_family[(cell["backbone"], cell["structure"])]
+        assert cell["family"] == _SIX_CELLS[(cell["backbone"], cell["structure"])]
+    # 6 distinct cells, 6 distinct families: no two cells of the factorial
+    # are the same model wearing two labels
+    assert len({c["family"] for c in cells}) == 6
+    print(f"[factorial] 6 cells, 0 duplicates: {sorted(_SIX_CELLS.items())}")
+
+
+def test_factorial_pair_table_is_exactly_the_declared_cross_product():
+    # the table is the full 3x2 and nothing more: a missing pair would make
+    # an arm unrunnable, an extra one would smuggle a 7th cell into a grid
+    # PROTOCOL.md section 13.3 sizes at 6 arms x 2 datasets x 5 seeds
+    from sld.experiments.factorial import _BACKBONES, _FAMILY_BY_PAIR, _STRUCTURES
+
+    assert set(_FAMILY_BY_PAIR) == {(b, s) for b in _BACKBONES for s in _STRUCTURES}
+    assert _FAMILY_BY_PAIR == _SIX_CELLS
 
 
 @pytest.mark.parametrize("config_name", ("calibration.yaml", "pendulum_core.yaml"))
@@ -328,19 +344,173 @@ def test_old_constraint_field_rejected():
         expand(config)
 
 
-def test_mlp_and_transformer_on_rejected_naming_phase_c():
-    # only (ssm, on) has a predictor family (koopman_ssm) today -- (mlp, on)
-    # and (transformer, on) are refused, by name, until phase C builds
-    # mlp_k/transformer_k.
-    for backbone in ("mlp", "transformer"):
-        config = {
-            "exp_name": "x",
-            "datasets": {"d1": _minimal_dataset_entry()},
-            "arms": [{"backbone": backbone, "structure": "on", "overrides": {}}],
-            "seeds": [0],
-        }
-        with pytest.raises(ValueError, match="phase C"):
-            expand(config, dry_run=True)
+def test_koopman_ssm_is_registered_but_never_a_factorial_family():
+    # the asymmetry PROTOCOL.md section 13.1 declares, asserted on the two
+    # objects that carry it: 7 registered families, 6 factorial cells, and
+    # koopman_ssm is the one in the first set and not the second.
+    from sld.experiments.factorial import _FAMILY_BY_PAIR
+    from sld.predictors.registry import FAMILIES
+
+    assert "koopman_ssm" in FAMILIES
+    assert len(FAMILIES) == 7
+    assert set(_FAMILY_BY_PAIR.values()) == set(FAMILIES) - {"koopman_ssm"}
+    assert len(set(_FAMILY_BY_PAIR.values())) == 6
+
+
+def test_factorial_arm_resolving_to_koopman_ssm_is_refused_before_any_run(monkeypatch):
+    # NEGATIVE, and deliberately reached by mutating the mapping IN MEMORY:
+    # the guard's whole job is to survive someone remapping ("ssm", "on")
+    # back to the historical contraction-constrained class -- the exact
+    # regression Amendment 4 makes possible. Asserting the guard only
+    # through the current (correct) table would test nothing.
+    import sld.experiments.factorial as factorial_mod
+
+    monkeypatch.setitem(factorial_mod._FAMILY_BY_PAIR, ("ssm", "on"), "koopman_ssm")
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "arms": [{"backbone": "ssm", "structure": "on", "overrides": {"delta": 0.02}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="NEVER a cell of the 3x2 factorial"):
+        expand(config, dry_run=True)
+
+
+def test_duplicate_structured_cell_under_alias_is_refused_before_any_run(tmp_path):
+    # (ssm, on) declared TWICE, the second arm writing out `r` at exactly
+    # the value the Trainer canonicalizes it to (d_z) -- an alias of the
+    # first cell, not a second treatment. Both hash to the same run
+    # identity, so the preflight must refuse the grid before any fit().
+    # This also proves the new families' defaults ARE canonicalized: drop
+    # the `r` resolution in Trainer and the two arms hash apart, the
+    # collision disappears, and the grid silently trains one cell twice.
+    results_root = tmp_path / "results"
+    d_z = 2
+    config = {
+        "exp_name": "alias",
+        "datasets": {"ou": _minimal_dataset_entry(n_episodes=10, T=10)},
+        "base": {
+            "d_x": 2,
+            "d_z": d_z,
+            "d_u": 1,
+            "epochs": 1,
+            "batch_episodes": 2,
+            "target_params": 2_000,
+            "results_root": str(results_root),
+        },
+        "arms": [
+            {"backbone": "ssm", "structure": "on", "overrides": {"delta": 0.02}},
+            {"backbone": "ssm", "structure": "on", "overrides": {"delta": 0.02, "r": d_z}},
+        ],
+        "seeds": [0],
+    }
+    config_path = tmp_path / "alias.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ValueError, match="collision"):
+        main(["--config", str(config_path)])
+    assert not results_root.exists()  # nothing trained: preflight is before fit()
+
+
+def test_all_six_cells_round_trip_from_config_and_seed(tmp_path):
+    """The wave's integration proof, end to end and in one place: the six
+    cells are expanded, trained, and READ BACK.
+
+    Covered here and nowhere else together: (1) the runner builds all six
+    from config + seed; (2) the six resolve to six DISTINCT run
+    directories -- doublons 0, checked on the artifacts rather than on the
+    expansion; (3) ``load_run`` reconstructs each one from its checkpoint
+    alone and gets back an instance of the class the family names.
+
+    target_params=1100 with d_z=2 is the smallest budget at which all six
+    families land inside +/-5% (scanned, not guessed -- at 200 neither
+    `transformer` nor `min_ssm` fits, which is a pre-existing property of a
+    quadratic width knob at tiny targets, not of the structured arms).
+    """
+    from sld.experiments.loading import load_run
+    from sld.predictors.registry import _FAMILY_CONSTRUCTORS
+
+    results_root = tmp_path / "results"
+    config = {
+        "exp_name": "sixcells",
+        "datasets": {"ou": _minimal_dataset_entry(n_episodes=10, T=10)},
+        "base": {
+            "d_x": 2,
+            "d_z": 2,
+            "d_u": 1,
+            "epochs": 1,
+            "batch_episodes": 2,
+            "target_params": 1_100,
+            "encoder_hidden": [8, 8],
+            "results_root": str(results_root),
+        },
+        "arms": [
+            {
+                "backbone": b,
+                "structure": s,
+                "overrides": {"mu_j": 0.0, **({"delta": 0.02} if s == "on" else {})},
+            }
+            for b, s in _SIX_CELLS
+        ],
+        "seeds": [0],
+    }
+    config_path = tmp_path / "sixcells.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert main(["--config", str(config_path)]) == 0
+
+    rows = list(csv.DictReader((results_root / "sixcells" / "index.csv").open()))
+    assert len(rows) == 6
+    assert {r["status"] for r in rows} == {"complete"}
+    assert {r["family"] for r in rows} == set(_SIX_CELLS.values())
+    assert len({r["run_dir"] for r in rows}) == 6  # doublons 0, on the artifacts
+
+    for row in rows:
+        loaded = load_run(row["run_dir"])
+        family = loaded["config"]["family"]
+        assert family == row["family"]
+        assert isinstance(loaded["predictor"], _FAMILY_CONSTRUCTORS[family])
+        print(f"[factorial] round-trip {family} -> {type(loaded['predictor']).__name__}")
+
+
+def test_load_run_refuses_a_checkpoint_built_by_another_family(tmp_path):
+    # NEGATIVE for the round-trip above: load_run rebuilds the architecture
+    # from the config and only then loads the weights, so a checkpoint whose
+    # config says one family while its tensors came from another must fail
+    # loudly. It is the exact accident a hand-edited config or a copied
+    # ckpt.pt produces, and a silent partial load would evaluate the wrong
+    # model under the right label.
+    import torch
+
+    from sld.experiments.loading import load_run
+    from sld.predictors.registry import get_predictor
+
+    cfg = {
+        "exp_name": "mismatch",
+        "seed": 0,
+        "family": "mlp_k",
+        "d_x": 2,
+        "d_z": 2,
+        "d_u": 1,
+        "delta": 0.02,
+        "r": 2,
+        "encoder_hidden": [8, 8],
+        "target_params": 1_100,
+    }
+    encoder_sd = {}
+    from sld.encoders.frame_mlp import FrameMLPEncoder
+
+    encoder_sd = FrameMLPEncoder(2, 2, (8, 8)).state_dict()
+    impostor = get_predictor("ssm_k", 2, 1, target_params=1_100, delta=0.02, r=2)
+
+    run_dir = tmp_path / "mismatch_run"
+    run_dir.mkdir()
+    torch.save(
+        {"encoder": encoder_sd, "predictor": impostor.state_dict(), "config": cfg},
+        run_dir / "ckpt.pt",
+    )
+    with pytest.raises(RuntimeError, match="state_dict"):
+        load_run(run_dir)
 
 
 def test_run_identity_collision_raises(tmp_path):

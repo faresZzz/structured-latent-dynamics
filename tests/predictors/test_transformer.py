@@ -453,3 +453,257 @@ def test_attention_negative_shifted_positional_index():
     diffs = [(a - o).abs().max().item() for a, o in zip(actual_outs, false_outs)]
     print(f"[attn-oracle] shifted-position per-step max|diff| = {[f'{d:.3e}' for d in diffs]}")
     assert all(d > _ATTN_TOL for d in diffs)
+
+
+# ===========================================================================
+# WAVE C2 -- CausalTransformerContextBackbone: the query is h_t alone, the
+# keys/values are the PAST pairs (h_s, u_s) plus a learned BOS entry.
+#
+# Same method as the attention oracle above: every weight is assigned by hand
+# from arithmetic ramps, and `_manual_context` recomputes the whole thing from
+# scratch in full-prefix form -- it never calls the backbone.
+# ===========================================================================
+from sld.predictors.transformer import CausalTransformerContextBackbone  # noqa: E402
+
+CTX_DTYPE = torch.float64
+CTX_TOL = 1e-10  # float64 forward, single layer -- see the wave report
+
+
+def _ramp(*shape: int, scale: float, offset: float = 0.0) -> Tensor:
+    n = 1
+    for s in shape:
+        n *= s
+    return torch.arange(n, dtype=CTX_DTYPE).reshape(shape) * scale + offset
+
+
+def _hand_set_context_backbone() -> CausalTransformerContextBackbone:
+    """1 head, 1 layer, width 4, float64, every weight a deterministic ramp.
+
+    Neutralized and declared (REGLES 7.1 allows isolating attention when the
+    full layer is too rich to reproduce honestly): ``ln1`` becomes
+    ``nn.Identity`` so the oracle may skip it -- it must be a real no-op in the
+    module, not merely assumed away -- and both MLP ``Linear``s are zeroed
+    weight AND bias so that branch contributes exactly 0 whatever ``ln2`` and
+    GELU do upstream. Everything the wave is about stays real and hand-set:
+    ``q_in`` (query read-in, h ONLY), ``pair_in`` (cache read-in, the pair),
+    ``kv_proj``, ``q_proj``, ``attn_out`` and the learned BOS entry.
+    """
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        bb = CausalTransformerContextBackbone(
+            d_h=2, d_u=1, width=4, n_heads=1, n_layers=1, d_ff=4,
+            max_len=16, dtype=CTX_DTYPE,
+        )
+    block = bb.blocks[0]
+    with torch.no_grad():
+        bb.q_in.weight.copy_(_ramp(*bb.q_in.weight.shape, scale=0.03, offset=-0.05))
+        bb.q_in.bias.copy_(_ramp(*bb.q_in.bias.shape, scale=0.01))
+        bb.pair_in.weight.copy_(_ramp(*bb.pair_in.weight.shape, scale=0.04, offset=-0.07))
+        bb.pair_in.bias.copy_(_ramp(*bb.pair_in.bias.shape, scale=0.02, offset=-0.01))
+        block.q_proj.weight.copy_(_ramp(*block.q_proj.weight.shape, scale=0.02, offset=-0.15))
+        block.q_proj.bias.copy_(_ramp(*block.q_proj.bias.shape, scale=0.01, offset=-0.02))
+        block.kv_proj.weight.copy_(_ramp(*block.kv_proj.weight.shape, scale=0.015, offset=-0.2))
+        block.kv_proj.bias.copy_(_ramp(*block.kv_proj.bias.shape, scale=0.005, offset=-0.03))
+        block.attn_out.weight.copy_(_ramp(*block.attn_out.weight.shape, scale=0.04, offset=-0.08))
+        block.attn_out.bias.zero_()
+        block.bos_kv.copy_(_ramp(*block.bos_kv.shape, scale=0.06, offset=-0.1))
+        block.mlp[0].weight.zero_()
+        block.mlp[0].bias.zero_()
+        block.mlp[2].weight.zero_()
+        block.mlp[2].bias.zero_()
+        block.ln1 = nn.Identity()
+    return bb
+
+
+def _manual_context(
+    bb: CausalTransformerContextBackbone,
+    h: Tensor,
+    pairs: list[tuple[Tensor, Tensor]],
+    t: int,
+    *,
+    drop_bos: bool = False,
+    shift_pos: int = 0,
+    query_attends_to_itself: bool = False,
+) -> Tensor:
+    """Independent full-prefix rewrite of ``context_step`` after ``len(pairs)``
+    ``absorb`` calls -- written from scratch, never calling the backbone.
+
+    Each keyword replaces exactly one line of the otherwise-correct
+    computation with one specific way of getting the contract wrong.
+    """
+    block = bb.blocks[0]
+    d_head = bb.d_head  # == width, n_heads == 1
+    B = h.shape[0]
+
+    keys, values = [], []
+    if not drop_bos:
+        keys.append(block.bos_kv[0].reshape(1, d_head).expand(B, d_head))
+        values.append(block.bos_kv[1].reshape(1, d_head).expand(B, d_head))
+    for s, (h_s, u_s) in enumerate(pairs):
+        tok = torch.cat([h_s, u_s], dim=-1) @ bb.pair_in.weight.T + bb.pair_in.bias
+        tok = tok + bb.pe[s].to(CTX_DTYPE)
+        kv = tok @ block.kv_proj.weight.T + block.kv_proj.bias
+        k_s, v_s = kv.chunk(2, dim=-1)
+        keys.append(k_s)
+        values.append(v_s)
+
+    x = h @ bb.q_in.weight.T + bb.q_in.bias + bb.pe[t + shift_pos].to(CTX_DTYPE)
+    if query_attends_to_itself:
+        # what `_CausalBlock` does, and what this backbone must NOT do: build
+        # k/v from the CURRENT token (which carries no u) and let it into the
+        # cache it is about to read
+        kv_self = x @ block.kv_proj.weight.T + block.kv_proj.bias
+        k_self, v_self = kv_self.chunk(2, dim=-1)
+        keys.append(k_self)
+        values.append(v_self)
+
+    q = x @ block.q_proj.weight.T + block.q_proj.bias
+    K = torch.stack(keys, dim=1)  # (B, S, d_head)
+    V = torch.stack(values, dim=1)
+    scores = torch.einsum("bd,bsd->bs", q, K) * (d_head**-0.5)
+    attn = torch.softmax(scores, dim=-1)
+    out = torch.einsum("bs,bsd->bd", attn, V)
+    x = x + (out @ block.attn_out.weight.T + block.attn_out.bias)
+    return x  # MLP branch neutralized to exactly 0 -- see the builder docstring
+
+
+def _ctx_inputs(n_pairs: int, seed: int):
+    gen = torch.Generator().manual_seed(seed)
+    pairs = [
+        (
+            torch.randn(2, 2, generator=gen, dtype=CTX_DTYPE),
+            torch.randn(2, 1, generator=gen, dtype=CTX_DTYPE),
+        )
+        for _ in range(n_pairs)
+    ]
+    return pairs
+
+
+def _absorb_all(bb, pairs) -> PredictorState:
+    state = PredictorState()
+    for h_s, u_s in pairs:
+        state = bb.absorb(h_s, u_s, state)
+    return state
+
+
+def test_context_backbone_two_prefixes_match_the_full_prefix_reference():
+    """THE POSITIVE: same current token, same position t=2, two known prefixes.
+    Both contexts must equal an independently written full-prefix computation,
+    and they must differ from each other -- otherwise the prefix is decorative.
+    """
+    bb = _hand_set_context_backbone()
+    h = torch.tensor([[0.3, -0.8], [1.1, 0.2]], dtype=CTX_DTYPE)
+    pre_a = _ctx_inputs(2, seed=101)
+    pre_b = _ctx_inputs(2, seed=202)
+
+    got, want = [], []
+    for prefix in (pre_a, pre_b):
+        got.append(bb.context_step(h, _absorb_all(bb, prefix)))
+        want.append(_manual_context(bb, h, prefix, t=2))
+
+    errs = [(g - w).abs().max().item() for g, w in zip(got, want)]
+    spread = (got[0] - got[1]).abs().max().item()
+    print(f"[ctx-oracle] positive err={[f'{e:.3e}' for e in errs]} prefix spread={spread:.6e}")
+    for g, w in zip(got, want):
+        torch.testing.assert_close(g, w, rtol=0.0, atol=CTX_TOL)
+    assert spread > 1e-3
+
+
+def test_context_backbone_is_defined_at_t0_through_the_learned_bos():
+    """The empty cache is not a special case: the BOS entry is always there,
+    so c_0 exists AND depends on h_0. The negative half is the same oracle with
+    the BOS entry dropped, which must diverge once a real entry is present."""
+    bb = _hand_set_context_backbone()
+    h_a = torch.tensor([[0.3, -0.8], [1.1, 0.2]], dtype=CTX_DTYPE)
+    h_b = torch.tensor([[-1.4, 0.9], [0.5, -0.3]], dtype=CTX_DTYPE)
+
+    c_a = bb.context_step(h_a, PredictorState())
+    c_b = bb.context_step(h_b, PredictorState())
+    err = (c_a - _manual_context(bb, h_a, [], t=0)).abs().max().item()
+    h_dep = (c_a - c_b).abs().max().item()
+    print(f"[ctx-oracle] t=0 err={err:.3e} dependence on h_0={h_dep:.6e}")
+    torch.testing.assert_close(c_a, _manual_context(bb, h_a, [], t=0), rtol=0.0, atol=CTX_TOL)
+    assert torch.isfinite(c_a).all()
+    assert h_dep > 1e-3
+
+    # NEGATIVE: an implementation whose attention forgets the BOS entry
+    prefix = _ctx_inputs(1, seed=303)
+    real = bb.context_step(h_a, _absorb_all(bb, prefix))
+    no_bos = _manual_context(bb, h_a, prefix, t=1, drop_bos=True)
+    gap = (real - no_bos).abs().max().item()
+    print(f"[ctx-oracle] NEGATIVE drop-bos gap={gap:.6e}")
+    assert gap > CTX_TOL
+
+
+def test_context_backbone_query_must_not_attend_to_itself():
+    """NEGATIVE: the `_CausalBlock` behaviour (q, k, v from the same token) is
+    exactly what this backbone must not do -- the current token carries no
+    ``u``, so letting it into its own cache would treat it differently from
+    every past entry and open the door to a u_t leak."""
+    bb = _hand_set_context_backbone()
+    h = torch.tensor([[0.3, -0.8], [1.1, 0.2]], dtype=CTX_DTYPE)
+    prefix = _ctx_inputs(2, seed=404)
+    real = bb.context_step(h, _absorb_all(bb, prefix))
+    selfish = _manual_context(bb, h, prefix, t=2, query_attends_to_itself=True)
+    gap = (real - selfish).abs().max().item()
+    print(f"[ctx-oracle] NEGATIVE self-attention gap={gap:.6e}")
+    assert gap > CTX_TOL
+
+
+def test_context_backbone_positions_must_follow_the_prefix():
+    """NEGATIVE: the query's positional index must be the number of absorbed
+    pairs. Shifting it by one is invisible to shapes and to every finiteness
+    check, and it is caught here."""
+    bb = _hand_set_context_backbone()
+    h = torch.tensor([[0.3, -0.8], [1.1, 0.2]], dtype=CTX_DTYPE)
+    prefix = _ctx_inputs(2, seed=505)
+    real = bb.context_step(h, _absorb_all(bb, prefix))
+    shifted = _manual_context(bb, h, prefix, t=2, shift_pos=1)
+    gap = (real - shifted).abs().max().item()
+    print(f"[ctx-oracle] NEGATIVE shifted-position gap={gap:.6e}")
+    assert gap > CTX_TOL
+
+
+class _DeadCacheBackbone(CausalTransformerContextBackbone):
+    """MUTANT: absorb accumulates nothing. Shapes stay right, rollouts stay
+    finite, and every context silently becomes the t=0 context."""
+
+    def absorb(self, h: Tensor, u: Tensor, state: PredictorState) -> PredictorState:
+        return state
+
+
+def test_context_backbone_negative_dead_cache_kills_the_prefix_sentinel():
+    """NEGATIVE: two different prefixes must give two different contexts. With
+    a dead cache the spread collapses to exactly 0 -- the measured gap between
+    the real backbone and the mutant IS the sentinel's discriminating power."""
+    h = torch.tensor([[0.3, -0.8], [1.1, 0.2]], dtype=CTX_DTYPE)
+    pre_a = _ctx_inputs(3, seed=606)
+    pre_b = _ctx_inputs(3, seed=707)
+
+    real_bb = _hand_set_context_backbone()
+    spread_real = (
+        real_bb.context_step(h, _absorb_all(real_bb, pre_a))
+        - real_bb.context_step(h, _absorb_all(real_bb, pre_b))
+    ).abs().max().item()
+
+    with torch.random.fork_rng():
+        torch.manual_seed(0)
+        dead = _DeadCacheBackbone(d_h=2, d_u=1, width=4, n_heads=1, n_layers=1, dtype=CTX_DTYPE)
+    spread_dead = (
+        dead.context_step(h, _absorb_all(dead, pre_a))
+        - dead.context_step(h, _absorb_all(dead, pre_b))
+    ).abs().max().item()
+    print(f"[ctx-oracle] NEGATIVE dead-cache: real spread={spread_real:.6e} mutant={spread_dead:.6e}")
+    assert spread_real > 1e-3
+    assert spread_dead == 0.0
+
+
+def test_context_backbone_cache_layout_grows_one_entry_per_absorb():
+    bb = CausalTransformerContextBackbone(d_h=2, d_u=1, width=8, n_heads=2, n_layers=3)
+    state = PredictorState()
+    assert state.m is None
+    for s in range(4):
+        assert bb.context_step(torch.randn(5, 2), state).shape == (5, 8)
+        state = bb.absorb(torch.randn(5, 2), torch.randn(5, 1), state)
+        # (n_layers, 2, B, n_heads, S, d_head) -- same layout as the family
+        assert state.m.shape == (3, 2, 5, 2, s + 1, 4)

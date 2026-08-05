@@ -14,12 +14,20 @@ matplotlib.use("Agg")  # figures regenerate headless from results/, never intera
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-# colorblind-safe (Okabe & Ito 2008 palette), one fixed color per predictor family
+# colorblind-safe (Okabe & Ito 2008 palette), one fixed color per predictor
+# family. SEVEN families for six factorial cells: koopman_ssm keeps its color
+# because published artifacts still plot under it, even though it is never a
+# cell of the 3x2 factorial (PROTOCOL.md section 13.1). The Okabe & Ito
+# palette has exactly 8 entries; 7 are used here, yellow (#F0E442) is left
+# out as the one with too little contrast on white.
 FAMILY_COLORS: dict[str, str] = {
     "mlp": "#0072B2",
     "transformer": "#D55E00",
     "min_ssm": "#009E73",
     "koopman_ssm": "#CC79A7",
+    "mlp_k": "#56B4E9",
+    "transformer_k": "#E69F00",
+    "ssm_k": "#000000",
 }
 
 # constraint axis (off = unconstrained cell, on = structurally constrained cell)

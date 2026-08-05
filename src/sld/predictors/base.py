@@ -1,9 +1,10 @@
-"""Shared contract for the four predictor families.
+"""Shared contract for the seven predictor families.
 
 Semantics locked by OBJECTIFS section 4.4 -- subclasses must not weaken them:
 
 - ``step`` and ``rollout`` iterate **in the predictor's latent space H**.
-  For lifted families (``koopman_ssm``) the read-out projection ``pi`` is
+  For lifted families (``koopman_ssm`` and the three structured arms
+  ``mlp_k``/``transformer_k``/``ssm_k``) the read-out projection ``pi`` is
   read-only: it never feeds back into the recurrence.
 - ``local_operator`` is a READING of the local linear(ized) transition,
   exposed for the audit instrument (Fig. 2 of the plan) -- it feeds the
@@ -47,13 +48,14 @@ class PredictorState(NamedTuple):
 
 @runtime_checkable
 class Predictor(Protocol):
-    """The contract shared by the four families (OBJECTIFS section 4.4).
+    """The contract shared by the seven families (OBJECTIFS section 4.4).
 
     ``local_operator`` returns the frozen-context first-order pair
     ``(A, B)`` of the family's *recurrent-state* update -- ``A`` is
     ``(B, d_r, d_r)`` and ``B`` is ``(B, d_r, d_u)`` where ``d_r`` is the
     dimension of the space the recurrence actually lives in (``d_h`` for
-    ``koopman_ssm``, the hidden-state dimension for ``min_ssm``). Families
+    ``koopman_ssm`` and the structured arms, the hidden-state dimension for
+    ``min_ssm``). Families
     with no structured operator (``mlp``, ``transformer``) return ``None``
     and the audit falls back to autograd.
     """

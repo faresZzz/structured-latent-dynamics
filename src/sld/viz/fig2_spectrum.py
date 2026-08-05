@@ -41,6 +41,7 @@ contradict the very completeness guarantee strict mode promises.
 from __future__ import annotations
 
 import copy
+import math
 import sys
 import warnings
 from pathlib import Path
@@ -248,10 +249,23 @@ def make_fig2(
         )
         raise SystemExit(1)
 
+    # The grid is SIZED FROM the family list, never fixed at 2x2. It used to
+    # be, and `zip(axes.ravel(), families)` truncates silently: the day
+    # FAMILY_COLORS grew past 4 entries the extra families would simply have
+    # vanished from the figure with every gate still green. Every family gets
+    # a panel or this raises; the leftover cells of the rectangle are turned
+    # off so they render blank rather than as empty axes.
     families = sorted(FAMILY_COLORS)
-    fig, axes = plt.subplots(2, 2, figsize=(9, 9))
-    for ax, family in zip(axes.ravel(), families):
+    ncols = math.ceil(math.sqrt(len(families)))
+    nrows = math.ceil(len(families) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows), squeeze=False)
+    panels = axes.ravel()
+    if len(panels) < len(families):  # unreachable by the arithmetic above
+        raise AssertionError(f"fig2: {len(panels)} panels for {len(families)} families")
+    for ax, family in zip(panels, families):
         _plot_family_panel(ax, family, complete, exp_yaml, require_full_cells)
+    for ax in panels[len(families) :]:
+        ax.axis("off")
 
     fig.suptitle(
         "Spectral DISPLAY/screening across families -- never a stability certificate "

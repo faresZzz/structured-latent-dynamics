@@ -2,9 +2,12 @@
 
 A YAML config declares a dataset axis (regime), an arm axis (backbone x
 structure, cells named explicitly -- no cross-product magic), and a seed
-list. ``structure`` is an ARCHITECTURAL property (the Koopman-structured
-variant of a backbone), not a numeric penalty -- it selects a predictor
-family, it does not tune ``mu_j``. ``expand`` turns that into a
+list. ``structure`` is an ARCHITECTURAL property (the STRUCTURED variant
+of a backbone -- lift, context-scheduled 2x2 rotation-scaling blocks, exact
+ZOH, projection), not a numeric penalty -- it selects a predictor family, it
+does not tune ``mu_j``. Vocabulary (REGLES section 3, PROTOCOL.md section
+13.4): the structured operator depends on the context, so it is LPV/cocycle
+and is never called Koopman. ``expand`` turns that into a
 deterministic list of run cells (datasets in YAML order, then arms, then
 seeds); ``main`` builds each dataset once, resolves every cell's run
 identity up front (preflight: collision check, F8), runs (or
@@ -60,15 +63,32 @@ _ARM_KEYS = frozenset({"backbone", "structure", "overrides"})
 _BACKBONES = ("mlp", "transformer", "ssm")
 _STRUCTURES = ("off", "on")
 
-# backbone x structure -> predictor family (see registry.FAMILIES). Only 4
-# pairs exist today; the 2 missing "on" backbones (mlp_k, transformer_k)
-# arrive in phase C -- looked up in _validate_arm, never silently defaulted.
+# backbone x structure -> predictor family (see registry.FAMILIES). The full
+# 3x2 = 6 cells since phase C -- looked up in _validate_arm, never silently
+# defaulted.
+#
+# ("ssm", "on") maps to ssm_k, NOT to koopman_ssm as it did before Amendment
+# 4. That remap is safe because no config in this repo declares the pair any
+# more: pendulum_core_partial.yaml withdrew its (ssm, on) arm -- 10 cells
+# that were never executed -- when the amendment redefined ON (PROTOCOL.md
+# section 13.2). No existing declaration therefore changes meaning silently.
 _FAMILY_BY_PAIR: dict[tuple[str, str], str] = {
     ("mlp", "off"): "mlp",
+    ("mlp", "on"): "mlp_k",
     ("transformer", "off"): "transformer",
+    ("transformer", "on"): "transformer_k",
     ("ssm", "off"): "min_ssm",
-    ("ssm", "on"): "koopman_ssm",
+    ("ssm", "on"): "ssm_k",
 }
+
+# Registered, loadable, and never a cell of this factorial: the registry
+# carries SEVEN families for SIX factorial cells (PROTOCOL.md section 13.1).
+# koopman_ssm stays constructible so every published artifact keeps its
+# constructor, but the ON arms are now the structured transition with alpha
+# FREE (13.2) -- an arm resolving to the contraction-constrained historical
+# class would be a different treatment wearing the same label. Refused here,
+# BEFORE any dataset is built or any model constructed.
+_NON_FACTORIAL_FAMILIES = frozenset({"koopman_ssm"})
 
 # keys the RUNNER injects into every cell's config (exp_name from the top
 # level, seed from the seed axis, family derived from backbone/structure) --
@@ -124,9 +144,10 @@ def _validate_arm(idx: int, arm: dict) -> str:
     ``backbone`` and ``structure`` are the axis (F8): ``structure`` is a
     treatment LABEL, not free text -- an unrecognized value would sail
     through undetected. The pair is then looked up in ``_FAMILY_BY_PAIR``;
-    a pair not in that table is a backbone whose structured ("on") variant
-    does not exist YET -- refused by name, naming the phase that builds it,
-    never silently ignored or misrouted to an unrelated family.
+    a pair absent from that table is refused by name rather than silently
+    ignored or misrouted to an unrelated family, and a pair resolving to a
+    family that is registered but NOT a factorial cell
+    (``_NON_FACTORIAL_FAMILIES``) is refused too -- before any run.
     """
     unknown = sorted(set(arm) - _ARM_KEYS)
     if unknown:
@@ -143,11 +164,18 @@ def _validate_arm(idx: int, arm: dict) -> str:
     pair = (arm["backbone"], arm["structure"])
     if pair not in _FAMILY_BY_PAIR:
         raise ValueError(
-            f"arms[{idx}]: backbone={arm['backbone']!r} structure='on' has no predictor "
-            "family yet -- the structured (Koopman) variant of this backbone is built in "
-            "phase C, it does not exist today"
+            f"arms[{idx}]: backbone={arm['backbone']!r} structure={arm['structure']!r} "
+            f"has no predictor family -- known pairs are {sorted(_FAMILY_BY_PAIR)}"
         )
-    return _FAMILY_BY_PAIR[pair]
+    family = _FAMILY_BY_PAIR[pair]
+    if family in _NON_FACTORIAL_FAMILIES:
+        raise ValueError(
+            f"arms[{idx}]: backbone={arm['backbone']!r} structure={arm['structure']!r} "
+            f"resolves to family {family!r}, which is registered and loadable for "
+            "published artifacts but is NEVER a cell of the 3x2 factorial "
+            "(PROTOCOL.md section 13.1)"
+        )
+    return family
 
 
 def _trainer_allowed_keys(families: set[str]) -> frozenset[str]:

@@ -5,15 +5,18 @@ analytic per-step / per-trajectory FLOP accounting.
 from __future__ import annotations
 
 import pytest
+import torch
 
+from sld.predictors.base import PredictorState
 from sld.predictors.koopman_ssm import KoopmanSSMPredictor
 from sld.predictors.min_ssm import SelectiveSSMPredictor
 from sld.predictors.mlp import MLPPredictor
+from sld.predictors.registry import FAMILIES, STRUCTURED_FAMILIES
+from sld.predictors.structured import MLPKPredictor, SSMKPredictor, TransformerKPredictor
 from sld.predictors.transformer import CausalTransformerPredictor
 from sld.training.budget import (
     count_flops_per_step,
     count_flops_per_trajectory,
-    count_params,
     match_budget,
 )
 
@@ -24,14 +27,33 @@ _FAMILY_FIXED = {
     "transformer": {},
     "min_ssm": {},
     "koopman_ssm": {"delta": 0.05},
+    "mlp_k": {"delta": 0.05},
+    "transformer_k": {"delta": 0.05},
+    "ssm_k": {"delta": 0.05},
 }
 _CONSTRUCTORS = {
     "mlp": MLPPredictor,
     "transformer": CausalTransformerPredictor,
     "min_ssm": SelectiveSSMPredictor,
     "koopman_ssm": KoopmanSSMPredictor,
+    "mlp_k": MLPKPredictor,
+    "transformer_k": TransformerKPredictor,
+    "ssm_k": SSMKPredictor,
 }
 FAMILY_NAMES = tuple(_CONSTRUCTORS)
+
+# the two arms whose per-step cost grows with trajectory position
+_ATTENTION_FAMILIES = ("transformer", "transformer_k")
+_CONSTANT_COST_FAMILIES = tuple(f for f in FAMILY_NAMES if f not in _ATTENTION_FAMILIES)
+
+
+def test_family_tables_cover_the_whole_registry():
+    # these two dicts are LOCAL duplicates of the registry. A family added
+    # there and forgotten here is covered by no budget or FLOP test at all,
+    # and the suite stays green -- pin them together instead.
+    assert set(FAMILY_NAMES) == set(FAMILIES)
+    assert set(_FAMILY_FIXED) == set(FAMILIES)
+    assert len(FAMILIES) == 7
 
 
 def _build(family: str, target: int = 10_000):
@@ -43,10 +65,51 @@ def _build(family: str, target: int = 10_000):
 @pytest.mark.parametrize("family", FAMILY_NAMES)
 def test_match_budget_hits_target(family, target):
     model = _build(family, target)
-    params = count_params(model)
+    # C6: the reference is a DIRECT sum over the model's own trainable
+    # tensors, never count_params -- match_budget already uses count_params
+    # internally to decide when to stop, so checking it against itself would
+    # make the fairness contract its own oracle.
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     rel_err = abs(params - target) / target
     print(f"[budget] family={family} target={target} params={params} rel_err={rel_err:.3%}")
     assert rel_err <= 0.05
+
+
+@pytest.mark.parametrize("target", [10_000, 30_000])
+@pytest.mark.parametrize("family", STRUCTURED_FAMILIES)
+def test_structured_budget_covers_psi_pi_head_and_context(family, target):
+    """Positive: the four parts of a structured cell sum to the whole matched
+    budget -- nothing sits outside the accounting.
+
+    Negative, in the same test because it is the same measurement: a budget
+    that counted only the CONTEXT PRODUCER would land far outside +/-5%.
+    psi/pi/head are not a rounding term here, and the gap is printed so the
+    claim is measured, not asserted.
+
+    Measured share of psi+pi+head across the six (family, target) pairs:
+    12.9% .. 37.9% of the budget -- so dropping them as a group is always
+    detectable. Dropping psi ALONE is 4.3% .. 10.0%, i.e. detectable at five
+    of the six pairs and not at ssm_k/30k; that single-parameterization hole
+    is why the assertion below is stated on the group, not on psi alone.
+    """
+    model = _build(family, target)
+
+    def numel(mod):
+        return sum(p.numel() for p in mod.parameters() if p.requires_grad)
+
+    total = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    parts = {n: numel(getattr(model, n)) for n in ("psi", "pi", "head", "backbone")}
+    assert sum(parts.values()) == total  # exact: no parameter is unaccounted for
+
+    lift_share = (parts["psi"] + parts["pi"] + parts["head"]) / target
+    backbone_only_err = abs(parts["backbone"] - target) / target
+    print(
+        f"[budget] {family} target={target} total={total} parts={parts} "
+        f"psi+pi+head = {lift_share:.1%} of budget, "
+        f"backbone-only would be {backbone_only_err:.1%} off target"
+    )
+    assert backbone_only_err > 0.05  # omitting psi/pi/head breaks the contract
+    assert lift_share > 0.05  # ... and they are why, not a rounding term
 
 
 @pytest.mark.parametrize("family", FAMILY_NAMES)
@@ -57,12 +120,86 @@ def test_flops_per_step_positive(family):
     assert flops > 0
 
 
-def test_transformer_flops_strictly_increasing_in_t():
-    model = _build("transformer")
+@pytest.mark.parametrize("family", _ATTENTION_FAMILIES)
+def test_attention_arm_flops_strictly_increasing_in_t(family):
+    model = _build(family)
     flops = [count_flops_per_step(model, t=t) for t in (0, 1, 5, 50)]
-    print(f"[budget] transformer flops per t -> {flops}")
+    print(f"[budget] {family} flops per t -> {flops}")
     assert flops == sorted(flops)
     assert len(set(flops)) == len(flops)  # strictly increasing, not just non-decreasing
+
+
+@pytest.mark.parametrize("family", _CONSTANT_COST_FAMILIES)
+def test_non_attention_arm_flops_do_not_depend_on_t(family):
+    # the mirror negative of the test above: t is accepted for a uniform
+    # signature and must be IGNORED by the five markovian/recurrent
+    # families. A t-dependence leaking in here would silently inflate their
+    # trajectory bills and break the affine-growth claim below.
+    model = _build(family)
+    flops = {count_flops_per_step(model, t=t) for t in (0, 1, 5, 50)}
+    print(f"[budget] {family} flops across t -> {flops}")
+    assert len(flops) == 1
+
+
+@pytest.mark.parametrize("family", FAMILY_NAMES)
+def test_analytic_flops_bracket_the_matmuls_torch_actually_dispatches(family):
+    """Positive, with a reference INDEPENDENT of this repo (REGLES 7.1):
+    ``torch.utils.flop_counter.FlopCounterMode`` counts the FLOPs of the
+    matmul-family ops PyTorch actually dispatches while ``step`` runs, at
+    the same 2-FLOPs-per-MAC convention ``budget.py`` declares.
+
+    It ignores exactly what ``budget.py`` declares out of scope (elementwise
+    adds, softmax, LayerNorm, GELU, the trig/exp block assembly), so the
+    analytic count must SIT ABOVE it by that declared slack and no more:
+
+      - a Linear or einsum missing from the analytic count (a forgotten
+        head, a forgotten second W_c call, ``t`` instead of ``t + 1`` in the
+        attention contraction) puts the analytic count BELOW the measured
+        one -> red;
+      - a term counted twice, or a block-diagonal operator counted at its
+        sparse instead of its executed dense shape, pushes it far above the
+        slack -> red.
+
+    Measured at ``t = 3``, i.e. with a non-empty KV cache, so the attention
+    arms' ``t``-dependence is inside the bracket rather than assumed away.
+
+    ONE declared deviation, and it is corrected here rather than tolerated:
+    ``koopman_ssm``'s bilinear interaction is written
+    ``einsum("bj,jkl,bl->bk", u, B_j, h)``, which torch executes in two
+    contractions -- it MATERIALIZES ``sum_j u_j B_j`` (``d_u * d_h^2`` MACs)
+    and only then applies it to ``h`` (another ``d_h^2``). ``budget.py``
+    counts the first term only, calling it "the dominant matmul-equivalent
+    cost" in ``_koopman_flops``'s docstring. That is a pre-existing declared
+    approximation of the historical class (never a factorial cell,
+    PROTOCOL.md section 13.1), not a defect introduced here; the missing
+    ``2 * d_h^2`` is added back below so the deviation is pinned with its
+    exact size instead of being hidden by a looser tolerance.
+    """
+    from torch.utils.flop_counter import FlopCounterMode
+
+    t = 3
+    model = _build(family).eval()
+    h = torch.randn(1, model.d_h)
+    u = torch.randn(1, model.d_u)
+    state = PredictorState()
+    with torch.no_grad():
+        for _ in range(t):
+            _, state = model.step(h, u, state)
+        counter = FlopCounterMode(display=False)
+        with counter:
+            model.step(h, u, state)
+    measured = counter.get_total_flops()
+    analytic = count_flops_per_step(model, t)
+    if family == "koopman_ssm" and model.regime == "bilinear":
+        analytic += 2 * model.d_h * model.d_h  # the einsum's materialization step
+    slack = (analytic - measured) / analytic
+    print(
+        f"[flops oracle] {family} t={t} torch-dispatched matmul FLOPs={measured} "
+        f"analytic={analytic} declared slack={slack:.2%}"
+    )
+    assert measured > 0
+    assert analytic >= measured  # never undercount what actually runs
+    assert slack < 0.06  # and never exceed the declared elementwise slack
 
 
 @pytest.mark.parametrize("H", [50, 100])
@@ -82,7 +219,26 @@ def test_transformer_trajectory_flops_superlinear(H):
 
 
 @pytest.mark.parametrize("H", [50, 100])
-@pytest.mark.parametrize("family", ["mlp", "min_ssm", "koopman_ssm"])
+@pytest.mark.parametrize("family", _ATTENTION_FAMILIES)
+def test_attention_arm_trajectory_flops_strictly_superlinear(family, H):
+    # STRICT superlinearity at the matched budget, stated as an exact
+    # integer property instead of a ratio threshold: the second difference
+    # over H, 2H, 3H is c*H^2 > 0 for a quadratic bill and exactly 0 for an
+    # affine one. It cannot be satisfied by an affine formula at any width,
+    # so it holds at the 10k budget where the ratio test would not bite.
+    model = _build(family)
+    f_h, f_2h, f_3h = (count_flops_per_trajectory(model, k * H) for k in (1, 2, 3))
+    second_diff = (f_3h - f_2h) - (f_2h - f_h)
+    print(
+        f"[budget] {family} trajectory H={H}: {f_h}, {f_2h}, {f_3h} "
+        f"second difference = {second_diff} (affine would be 0)"
+    )
+    assert second_diff > 0
+    assert f_2h > 2 * f_h  # strictly more than doubling the horizon costs
+
+
+@pytest.mark.parametrize("H", [50, 100])
+@pytest.mark.parametrize("family", _CONSTANT_COST_FAMILIES)
 def test_other_families_trajectory_flops_exactly_affine(family, H):
     # AFFINE in H, not proportional: koopman_ssm's trajectory bill carries a
     # constant one-time lift on top of its per-step cost (step + projection),
@@ -101,9 +257,27 @@ def test_unknown_family_raises():
         match_budget("not_a_family", D_Z, D_U, target_params=10_000)
 
 
-def test_koopman_without_delta_raises():
-    with pytest.raises(ValueError):
-        match_budget("koopman_ssm", D_Z, D_U, target_params=10_000)
+@pytest.mark.parametrize("family", ("koopman_ssm", *STRUCTURED_FAMILIES))
+def test_family_with_a_physical_zoh_step_refuses_to_default_it(family):
+    # delta has no sane default for ANY family that carries one: the
+    # structured arms get the same treatment koopman_ssm already had, so a
+    # config that forgets it fails loudly instead of training a cell whose
+    # discretization step was invented by the budget matcher.
+    with pytest.raises(ValueError, match="delta"):
+        match_budget(family, D_Z, D_U, target_params=10_000)
+
+
+def test_kwargs_recipe_is_closed_over_the_registry(monkeypatch):
+    # NEGATIVE, reached by mutating the registry IN MEMORY. _kwargs_for used
+    # to end in a bare `else` that WAS the koopman_ssm branch: a family added
+    # to the registry and forgotten there was silently built with Koopman's
+    # kwargs. Registering a family with no recipe must now raise.
+    import sld.predictors.registry as registry_mod
+    from sld.training.budget import _kwargs_for
+
+    monkeypatch.setitem(registry_mod._FAMILY_CONSTRUCTORS, "brand_new", MLPPredictor)
+    with pytest.raises(ValueError, match="no kwargs recipe"):
+        _kwargs_for("brand_new", 8, D_Z, D_U, {})
 
 
 def test_out_of_reach_budget_raises():

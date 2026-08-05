@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
 
 import matplotlib
@@ -34,6 +35,7 @@ from sld.experiments.loading import (
 from sld.predictors.registry import get_predictor
 from sld.viz.fig1_rollout import _aggregate_curves, make_fig1
 from sld.viz.fig2_spectrum import _plot_family_panel, make_fig2
+from sld.viz.style import CONSTRAINT_LINESTYLES, FAMILY_COLORS
 
 D_X, D_Z, D_U = 2, 4, 1
 TARGET_PARAMS = 1000
@@ -426,6 +428,72 @@ def test_make_fig2_panel_titles_show_provenance(tmp_path: Path, monkeypatch) -> 
     assert "seed=0" in mlp_title
 
 
+def test_fig2_renders_one_titled_panel_per_family_and_never_truncates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The grid used to be a hardcoded ``subplots(2, 2)`` fed through
+    ``zip(axes.ravel(), families)``. ``zip`` stops at the shorter side WITHOUT
+    error, so every family past the 4th would have disappeared from the
+    figure with the whole suite still green -- the defect slept only because
+    ``FAMILY_COLORS`` happened to hold exactly 4 entries.
+
+    So the count is asserted on the RENDERED figure: one titled panel per
+    family, each family named exactly once. It is checked here at the real 7
+    AND, via monkeypatched palettes, at 4 and at 9 -- a fixed grid passes at
+    4 and fails at 7 and 9, and an off-by-one in the row/column arithmetic
+    fails at one of the three.
+    """
+
+    def _render_and_count(expected_families: list[str]) -> list[str]:
+        captured: dict = {}
+
+        def _capture(fig, path):
+            captured["fig"] = fig
+
+        monkeypatch.setattr("sld.viz.fig2_spectrum.save_fig", _capture)
+
+        results_root = tmp_path / f"results_{len(expected_families)}"
+        yaml_path = tmp_path / f"exp_{len(expected_families)}.yaml"
+        _write_exp_yaml(yaml_path)
+        dh = _ou_data_hash(yaml_path)
+        run_dir, _ = _make_run_dir(
+            tmp_path / f"run_{len(expected_families)}",
+            family="mlp",
+            constraint="on",
+            seed=0,
+            data_hash=dh,
+        )
+        _write_index(
+            results_root,
+            "pendulum_core",
+            [[str(run_dir), "ou", "mlp", "on", 0, "complete", 0.4]],
+        )
+        make_fig2(
+            results_root=str(results_root),
+            exp_name="pendulum_core",
+            exp_yaml=str(yaml_path),
+            out_path=str(tmp_path / "fig2.png"),
+            require_full_cells=False,
+        )
+        return [ax.get_title() for ax in captured["fig"].axes if ax.get_title()]
+
+    for palette in (
+        dict(FAMILY_COLORS),  # the real 7
+        {f: "#000000" for f in ("mlp", "transformer", "min_ssm", "koopman_ssm")},
+        {f"fam{i}": "#000000" for i in range(9)},
+    ):
+        monkeypatch.setattr("sld.viz.fig2_spectrum.FAMILY_COLORS", palette)
+        titles = _render_and_count(sorted(palette))
+        print(f"[fig2] {len(palette)} families -> {len(titles)} titled panels")
+        assert len(titles) == len(palette)
+        for family in palette:
+            # \b, not startswith: "mlp" is a prefix of "mlp_k" and
+            # "transformer" of "transformer_k", so a prefix test would
+            # double-count and mask a missing panel
+            hits = sum(bool(re.match(rf"{re.escape(family)}\b", t)) for t in titles)
+            assert hits == 1, f"{family}: {hits} panels in {titles}"
+
+
 # -- round-2 locks: M5 strict fallback (fig2), M6/m12 aggregation -----------
 
 
@@ -482,8 +550,14 @@ def test_expected_grid_derives_from_yaml_arms_and_seeds(tmp_path: Path) -> None:
     assert cells == [("ou", "mlp", "off"), ("ou", "koopman_ssm", "on")]
     assert seeds == frozenset({0})
 
-    # fallback: no arms declared -> style domains x pre-registered seeds
+    # fallback: no arms declared -> style domains x pre-registered seeds.
+    # DERIVED from the style dicts, so it survives the registry growing --
+    # but a derived assertion alone is tautological, so the sizes it derives
+    # from are pinned too (7 families since phase C, 2 constraints).
     _write_exp_yaml(tmp_path / "noarms.yaml")
     cells_fb, seeds_fb = _expected_grid(str(tmp_path / "noarms.yaml"))
-    assert len(cells_fb) == 8  # 1 regime x 4 families x 2 constraints
+    assert (len(FAMILY_COLORS), len(CONSTRAINT_LINESTYLES)) == (7, 2)
+    assert len(cells_fb) == 1 * len(FAMILY_COLORS) * len(CONSTRAINT_LINESTYLES)
+    assert len(cells_fb) == 14
+    assert len(set(cells_fb)) == len(cells_fb)  # no duplicated cell
     assert seeds_fb == frozenset(range(5))

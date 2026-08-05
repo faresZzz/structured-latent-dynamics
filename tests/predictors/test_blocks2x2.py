@@ -405,6 +405,49 @@ def test_where_without_denom_safe_guard_produces_nan_gradient():
     assert torch.isnan(alpha.grad)  # but the gradient is poisoned regardless
 
 
+def test_b_bar_series_branch_third_order_term_bounds_ill_conditioned_B():
+    """Positive (REGLES 7.1 + R2), C1 review fix.
+
+    The series branch of ``rotation_scaling_zoh`` truncates
+    ``Phi = delta*(I + delta*A/2 + delta^2*A^2/6 + delta^3*A^3/24)``. Before
+    this term was added, the guarantee in the docstring ("relative
+    truncation error < 1e-10") was true of the intermediate ``Phi`` but NOT
+    of the value the function actually returns, ``B_bar = Phi @ B_cont``:
+    when ``B_cont`` has components of very different magnitude, each
+    component of ``B_bar`` is its own cancellation and the relative error
+    inflates independently of ``Phi``'s own error. Reference here is
+    ``_phi_van_loan`` (module-level torch.matrix_exp on the Van Loan
+    augmented matrix) -- an independent computation from the series/closed
+    form pair in the source, matrix_exp is never used in production code.
+
+    Point: alpha = omega = 1e-3/sqrt(2), delta = 1 -- exactly at the
+    small-branch switch (delta^2*(alpha^2+omega^2) == 1e-6, the switch
+    condition is "<="), so this is the worst point *inside* the series
+    branch. B_cont = [1, 1e-3] is deliberately mismatched across components
+    (three orders of magnitude) to stress exactly the failure mode above.
+    """
+    alpha_val = 1e-3 / (2**0.5)
+    omega_val = 1e-3 / (2**0.5)
+    delta = 1.0
+
+    blocks = RotationScalingBlocks(1, constrained=False, mode="continuous", dtype=DTYPE)
+    with torch.no_grad():
+        blocks.nu[0] = alpha_val
+        blocks.omega[0] = omega_val
+
+    B_cont = torch.tensor([[1.0], [1e-3]], dtype=DTYPE)
+    A_bar, B_bar = blocks.discretize_zoh(delta, B_cont=B_cont)
+
+    A = blocks.continuous_blocks()[0].detach()
+    ref_Phi = _phi_van_loan(A, delta)
+    ref_B = ref_Phi @ B_cont
+
+    rel_err = ((B_bar - ref_B).abs() / ref_B.abs()).max().item()
+    print(f"[b_bar series 3rd-order] rel_err={rel_err:.3e}")
+    # measured ~8.2e-15 with the delta^3*A^3/24 term; generous 1e-12 margin
+    assert rel_err < 1e-12
+
+
 def test_nonpositive_delta_rejected():
     # adversarial-review lock: the ON-cell stability claim holds for
     # delta > 0 only, so nonpositive deltas must be rejected loudly

@@ -1,5 +1,5 @@
 """The common contract suite (predictors/base.py), parameterized over the
-four predictor families: shapes, state threading, local_operator shapes,
+seven predictor families: shapes, state threading, local_operator shapes,
 frozen-context coherence against autograd, and rollout determinism.
 """
 
@@ -12,6 +12,7 @@ from sld.predictors.base import PredictorState
 from sld.predictors.koopman_ssm import KoopmanSSMPredictor
 from sld.predictors.min_ssm import SelectiveSSMPredictor
 from sld.predictors.mlp import MLPPredictor
+from sld.predictors.structured import MLPKPredictor, SSMKPredictor, TransformerKPredictor
 from sld.predictors.transformer import CausalTransformerPredictor
 
 D_H, D_U = 4, 2
@@ -43,16 +44,36 @@ def _koopman(regime: str) -> KoopmanSSMPredictor:
     )
 
 
+# the three structured arms: r = D_H // 2 so the lifted state is D_H wide
+# and the whole contract suite runs in the SAME H-space as the other four.
+# d_z is arbitrary here (lift/project are never exercised by these tests).
+def _structured(cls):
+    return lambda: cls(d_z=D_H, d_u=D_U, delta=DELTA, r=D_H // 2, width=8)
+
+
 FAMILY_BUILDERS = {
     "mlp": _mlp,
     "transformer": _transformer,
     "min_ssm": _min_ssm,
     "koopman_ssm": lambda: _koopman("bilinear"),
+    "mlp_k": _structured(MLPKPredictor),
+    "transformer_k": _structured(TransformerKPredictor),
+    "ssm_k": _structured(SSMKPredictor),
 }
 FAMILY_NAMES = tuple(FAMILY_BUILDERS)
 
+
+def test_family_builders_cover_the_whole_registry():
+    # this dict is a LOCAL duplicate of the registry: a family added there
+    # and forgotten here would be covered by no contract test at all, with
+    # the suite still green. That is the failure mode this phase keeps
+    # hitting, so the two are pinned together.
+    from sld.predictors.registry import FAMILIES
+
+    assert set(FAMILY_NAMES) == set(FAMILIES)
+
 # local_operator families: min_ssm plus the three koopman regimes
-OPERATOR_FAMILIES = ("min_ssm", "koopman_constant", "koopman_bilinear", "koopman_selective")
+OPERATOR_FAMILIES = ("min_ssm", "koopman_constant", "koopman_bilinear", "lpv_selective")
 
 
 def _operator_builder(name: str):
@@ -302,7 +323,7 @@ def test_local_operator_coherence(name):
         assert worst < 1e-5
         return
 
-    # koopman_selective: freeze c = W_c([h, u]) and differentiate _frozen_step
+    # lpv_selective: freeze c = W_c([h, u]) and differentiate _frozen_step
     c = model.W_c(torch.cat([h, u], dim=-1)).detach()
 
     def frozen_step(h_b, u_b, c_b):
@@ -322,7 +343,7 @@ def test_local_operator_coherence(name):
 
 
 # ---------------------------------------------------------------------------
-# negative counterpart (REGLES 7.1) to the koopman_selective B-branch just
+# negative counterpart (REGLES 7.1) to the lpv_selective B-branch just
 # added above: B_bar_t is real and nontrivial here, so a broken
 # implementation that silently flips its sign (a plausible wiring bug --
 # same "denied input term" failure mode the packet names) must be REJECTED
@@ -332,7 +353,7 @@ def test_local_operator_coherence(name):
 # well-conditioned instead of blowing up against a near-zero denominator.
 # ---------------------------------------------------------------------------
 def test_local_operator_coherence_selective_negative_negated_b():
-    model = _make(_operator_builder("koopman_selective"), seed=8).double()
+    model = _make(_operator_builder("lpv_selective"), seed=8).double()
     B = 3
     gen = torch.Generator().manual_seed(9)
     h = torch.randn(B, D_H, generator=gen, dtype=torch.float64)
@@ -349,7 +370,7 @@ def test_local_operator_coherence_selective_negative_negated_b():
     for b in range(B):
         jac_u = torch.func.jacrev(frozen_step, argnums=1)(h[b], u[b], c[b])
         worst = max(worst, _rel_err(jac_u, Bm_negated[b]))
-    print(f"[coherence-negative] koopman_selective negated-B worst rel err = {worst:.3e}")
+    print(f"[coherence-negative] lpv_selective negated-B worst rel err = {worst:.3e}")
     assert worst > 1e-5  # must be REJECTED by the exact tolerance the positive uses
 
 
