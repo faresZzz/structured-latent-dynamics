@@ -31,7 +31,16 @@ from sld.audit.invariance import (
     check_shear_breaks_invariance,
     diagonal_gauges,
 )
-from sld.audit.rollout import VPTResult, vpt
+from sld.audit.rollout import (
+    PositiveControlResult,
+    VPTResult,
+    evaluate_positive_control,
+    fit_train_state_scale,
+    linear_extrapolation_rollout,
+    normalized_state_error,
+    persistence_rollout,
+    vpt,
+)
 from sld.audit.spectral import (
     edmd_fit,
     local_spectra_field,
@@ -43,6 +52,7 @@ from sld.audit.spectral import (
 __all__ = [
     "ExcludedAugmentedJacobian",
     "GaugeCheckResult",
+    "PositiveControlResult",
     "VPTResult",
     "assert_diagonal_gauge_invariant",
     "augmented_jacobian_excluding_identity",
@@ -52,13 +62,18 @@ __all__ = [
     "conditional_jacobian",
     "diagonal_gauges",
     "edmd_fit",
+    "evaluate_positive_control",
+    "fit_train_state_scale",
     "fr_drift_curve",
     "fr_lyapunov_exponents",
     "jacobian_products",
+    "linear_extrapolation_rollout",
     "lipschitz_pi",
     "local_spectra_field",
+    "normalized_state_error",
     "operator_norm",
     "operator_spectrum",
+    "persistence_rollout",
     "pseudospectrum_grid",
     "total_jacobian",
     "vpt",
