@@ -1836,3 +1836,50 @@ VICReg's role as the non-contrastive anti-collapse regularizer.
 
 14.9 is not deleted. It is the first version of this decision, and the repo keeps superseded
 decisions visible rather than rewriting them out of the record.
+
+### 14.11 The measured invariance/fidelity trade, and two probe axes it adds (added 2026-08-06)
+
+14.10 declared a tension between the alignment term and the reconstruction term without
+quantifying it. It is now measured, and the measurement is recorded here because the raw
+training-time signal is misleading on its own.
+
+**What looks alarming.** Under the shipped default weights (alignment, variance, covariance and
+reconstruction all at 1.0), the alignment loss does **not** decrease over training — it rises
+monotonically, by roughly 280x over 60 epochs on the development fixture. Read alone, that says
+the alignment term is inert or actively losing. It is neither, and a future reader who finds
+that number without what follows would draw the wrong conclusion.
+
+**What the downstream quantity says.** `e_recon` measured on held-out data, same fixture, same
+seed, varying only the alignment weight:
+
+| `w_align` | 0 (no temporal term) | **1 (shipped)** | 10 | 100 |
+|---|---|---|---|---|
+| `e_recon` | 0.1176 | **0.0950** | 0.2064 | 0.6232 |
+
+At the shipped weight the alignment term **improves** reconstruction relative to switching it
+off. The rising alignment loss is reconstruction correctly winning the direct conflict — the
+pendulum genuinely moves in one physical step, so a faithful latent must separate `t` from
+`t+1` — while the term still acts as a useful regularizer on the latent's geometry. Damage
+begins a full decade higher, at `w_align >= 10`.
+
+**Why this conflict is structural on this system, stated so it is not rediscovered as a
+surprise.** The pendulum is fully observed (`d_x = 2`, `obs: null`). There is no nuisance
+variation for an invariance objective to discard; every direction the encoder could smooth away
+is state the readout needs. A DINO-shaped objective can therefore only ever be a **mild
+regularizer** here, never the primary signal — unlike its home territory of high-dimensional,
+nuisance-heavy inputs. This is a property of the system, not a defect of the objective, and it
+would change on a partially observed or higher-dimensional stratum.
+
+**Two axes added to the 14.3 probe**, since the numbers above come from a development fixture
+(8 episodes, T=20, 15 epochs) and are probe-quality signal, not a result:
+
+- `w_align` in `{0, 1, 10}` — 0 being the pure autoencoder-plus-VICReg alternative, which is
+  the serious competing design and deserves a measurement rather than an argument;
+- `view_offset` in `{0, 1}` — 0 disabling the temporal term entirely, which separates "the
+  offset is too small to matter" from "the term helps".
+
+Scored on `e_recon`, on the latent's `cond(Sigma)`, and on `e_25` for the cheapest arm. The
+retained values enter the same dated addendum as 14.3's other axes, committed before D3.
+`cond(Sigma)` is on the list because this project has already been damaged once by
+badly-conditioned latents: the mu_J campaign measured 62.7, 1.5e7 and 1.3e5 across families,
+and per-coordinate normalization amplified the low-variance directions rather than taming them.
