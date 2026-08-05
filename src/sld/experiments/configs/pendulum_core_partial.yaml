@@ -1,31 +1,33 @@
-# PARTIAL core grid under the backbone x structure factorial (phase B1
-# replaces the old family x constraint / mu_J axis -- see factorial.py).
-# `structure` is architectural, never a numeric penalty: `structure: on`
-# means `constrained: true` in koopman_ssm.py (see KoopmanSSMPredictor,
-# koopman_ssm.py:78 -- "constrained: True is the ON cell (alpha = -exp(nu),
-# contractive stability axis)"). mu_j stays 0 in every arm below, including
-# the `on` one. "Partial": 6 (backbone, structure) pairs are possible in the
-# full design, and only 4 are valid TODAY --
-# {(mlp,off),(transformer,off),(ssm,off),(ssm,on)} -- because `(mlp,on)`
-# and `(transformer,on)` need the `mlp_k`/`transformer_k` structured
-# variants that phase C builds.
+# EXECUTED core grid under the backbone x structure factorial. This file is
+# now the frozen record of the 30 cells that actually ran; it declares no
+# cell that has not been executed. See PROTOCOL.md section 13 (Amendment 4,
+# 2026-08-04), which supersedes the (ssm, on) arm this file used to carry.
 #
-# 2 datasets x 4 arms (the 4 valid backbone/structure pairs) x 5 seeds = 40
-# declared cells. Only 30 of them have been executed: the (mlp,off),
-# (transformer,off) and (ssm,off) arms (3 arms x 2 datasets x 5 seeds) are
-# the runs from 2026-07-31 below, filed in `results_amended/pendulum_core/`
-# under the pre-migration `family`/`constraint` naming (this file's
-# predecessor, `pendulum_core_off.yaml`, had a 4th arm
-# `{family: koopman_ssm, constraint: 'off', constrained: false}` -- the
-# Koopman architecture WITHOUT its contraction, not the structured cell;
-# see git history for `pendulum_core_off.yaml` for that arm). The
-# migration replaced that unconstrained ablation with the real (ssm, on)
-# structured cell, which has never been run: its 10 cells (1 arm x 2
-# datasets x 5 seeds) have no data anywhere in this repo. The unconstrained
-# Koopman ablation no longer has a cell in the backbone x structure axis.
+# `structure` is architectural, never a numeric penalty -- but WHAT it means
+# changed at Amendment 4. It used to mean `constrained: true` in
+# koopman_ssm.py (alpha = -exp(nu), contractive). It now means the STRUCTURED
+# TRANSITION -- lift psi, 2x2 rotation-scaling blocks, exact ZOH, projection
+# pi -- with alpha FREE, realized by the `mlp_k`/`transformer_k`/`ssm_k`
+# arms phase C built. mu_j stays 0 in every arm below.
+#
+# 2 datasets x 3 arms x 5 seeds = 30 declared cells, all 30 executed on
+# 2026-07-31, filed in `results_amended/pendulum_core/` under the
+# pre-migration `family`/`constraint` naming. All three are OFF arms.
+#
+# What this file used to declare and no longer does: a 4th arm pairing
+# backbone ssm with the ON structure, mapping to `koopman_ssm` with
+# `constrained: true`, i.e. the OLD definition of ON. Its 10 cells (1 arm x
+# 2 datasets x 5 seeds) were NEVER EXECUTED -- no data for them exists
+# anywhere in this repo -- and Amendment 4 withdraws them as superseded.
+# This is the removal of a declaration, never of a result. (An earlier
+# predecessor of this file, `pendulum_core_off.yaml`, carried a different
+# 4th arm, `{family: koopman_ssm, constraint: off, constrained: false}` --
+# the Koopman architecture WITHOUT its contraction, an ablation, not the
+# structured cell. See git history for that arm. It has no cell on the
+# backbone x structure axis either.)
 #
 # `results_root: results_amended` (PROTOCOL.md section 11.5, review round 2
-# BLOCKER 1): for the 30 cells above, the first execution ran at 17:14 on
+# BLOCKER 1): the first execution of these 30 cells ran at 17:14 on
 # 2026-07-31, and the amendment authorizing their 200-update budget was
 # committed at 18:48 the same day. Later commitment does not retroactively
 # pre-register a run -- section 11.2 states that rule and it applies to this
@@ -33,15 +35,12 @@
 # as post-hoc diagnostics; a SEPARATE root is required so resume sentinels
 # cannot silently adopt them.
 #
-# WARNING -- unresolved before the (ssm,on) cells are run: writing the 10
-# new (ssm,on) cells into `results_root: results_amended` below would mix a
-# cell that was never pre-registered against this root into the amended
-# grid that PROTOCOL.md section 11.5 covers -- the exact risk that section
-# names in requiring a separate root, so resume sentinels cannot silently
-# adopt artifacts across pre-registration boundaries. Whether `(ssm,on)`
-# gets its own root, or a fresh amendment covering it, is a decision the
-# project owner has not yet made; it is due before phase C/E executes these
-# cells, not encoded here.
+# THIS ROOT IS NOW FROZEN. The full 3x2 grid (6 arms x 2 datasets x 5 seeds
+# = 60 cells) is a NEW pre-registration writing to a NEW root, and it
+# re-runs these OFF arms rather than reusing them -- they predate the
+# structured code, and one figure must not mix two code versions under two
+# pre-registrations. See PROTOCOL.md section 13.3. Nothing may be written
+# into `results_amended` again.
 exp_name: pendulum_core
 datasets:
   ou:
@@ -96,13 +95,6 @@ arms:
   structure: 'off'
   overrides:
     mu_j: 0.0
-    lr: 0.0003
-- backbone: ssm
-  structure: 'on'
-  overrides:
-    mu_j: 0.0
-    constrained: true
-    delta: 0.02
     lr: 0.0003
 seeds:
 - 0

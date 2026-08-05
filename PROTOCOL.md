@@ -1350,3 +1350,223 @@ presented as a physical fact.
   pendulum in the default IC regime with `u = 0` and `σ` taken over initial conditions —
   an order-of-magnitude probe, not the final `σ^train`. The six-decade separation they
   establish does not depend on that reservation; no threshold in 12.3 is set from them.
+
+## 13. Amendment 4 — the structure axis becomes architectural (dated 2026-08-04)
+
+### 13.0 Scope, and why it is committed now
+
+Phase C builds the arms this amendment describes. Rule R4 requires an amendment to be
+committed **before** the execution it authorizes, and this repo has already paid for
+breaking that rule once (11.5: the OFF grid ran 1h34 before its amendment). Nothing in
+phase C trains anything, so this amendment authorizes no run. It fixes three things that
+phase C's code would otherwise decide silently: what a structured arm *is*, what
+`structure: on` *means*, and which result root the eventual 3x2 grid writes to.
+
+Three decisions below are the project owner's, taken 2026-08-04, not derived from any
+measurement: the strong-factorial option, a free `alpha` on the ON cells, and a fresh
+result root for the full grid.
+
+### 13.1 Decision C0 — three structured arms, one shared transition
+
+The open decision was: build a third structured arm under the common wrapper (**strong
+factorial**), or keep the historical `koopman_ssm` class as the SSM structured cell and
+weaken the claim. **The strong factorial is chosen.**
+
+Every structured arm runs literally the same transition; only the context producer
+`kappa_b` differs between MLP, transformer and SSM:
+
+```
+h_0     = psi(z_0)
+(c_t, m_{t+1}) = kappa_b(h_t, m_t; {(h_s, u_s)}_{s<t})
+(alpha_t, omega_t, vec B_t) = theta_0 + W_theta c_t
+G_{t,i} = [[alpha_{t,i}, -omega_{t,i}], [omega_{t,i}, alpha_{t,i}]]
+A_bar_t = blkdiag_i exp(Delta G_{t,i})
+B_bar_t = blkdiag_i (int_0^Delta exp(s G_{t,i}) ds) B_t
+h_{t+1} = A_bar_t h_t + B_bar_t u_t
+z_hat_{t+1} = pi(h_{t+1})
+```
+
+Fixed with it: `u_t` is excluded from `c_t` (otherwise the cell stops being linear in the
+action and the arms stop being one treatment); the head `theta_0 + W_theta c` is affine and
+unique, so a neutral context is exactly `W_theta = 0`; the ZOH is the exact input integral,
+not a directly parametrized discrete `B`; and the lifted width `r` is identical across the
+three structured arms.
+
+**The reason this option was chosen over the cheaper one.** Only under the common wrapper is
+"identical treatment, three backbones" a true sentence. Under the minimal option, an observed
+gap between `(ssm,on)` and `(mlp,on)` would confound backbone with transition machinery, and
+the claim would have to be weakened to "three models that contain 2x2 blocks" — which is not
+the claim this project exists to make.
+
+**The historical class is retained, not reinterpreted.** `KoopmanSSMPredictor` stays
+constructible and loadable exactly as it is, under the family name `koopman_ssm`, so every
+published artifact keeps its constructor. It is **never** a cell of the 3x2 factorial. The
+registry therefore holds seven families while the factorial uses six; that asymmetry is
+deliberate and a test enforces it — a factorial arm naming `koopman_ssm` must be refused
+before any run.
+
+### 13.2 What `structure: on` now means, and what it stopped meaning
+
+Until this amendment, `structure: on` meant `koopman_ssm(constrained=True)`: the stability
+axis constrained to `alpha = -exp(nu) < 0`, contractive by construction
+(`koopman_ssm.py:78`). **From this amendment, `structure: on` means the structured
+transition above — lift, 2x2 rotation-scaling blocks, exact ZOH, projection — with `alpha`
+FREE.**
+
+`alpha` is free deliberately. The OFF arms have no `alpha` at all, so constraining it on the
+ON arms would make one axis carry two changes at once: structured transition AND contraction.
+A gap measured across such an axis is not attributable to either. That confound is exactly
+what the mu_J withdrawal (section 11) cost this project the most to identify, and it is not
+being reintroduced under a new name. Stability is therefore **measured** on the ON cells, not
+imposed.
+
+**What this invalidates: nothing that exists.** Measured before deciding: every executed core
+cell is an OFF cell (30 of them, `results_amended/pendulum_core/`), and no `structure: on`
+cell has ever been run anywhere in this repo. The redefinition changes no published number.
+
+**What it does withdraw.** `pendulum_core_partial.yaml` declared 40 cells, of which the 10
+`(ssm, on)` cells were never executed. Those 10 cells named the OLD definition of ON. They are
+**withdrawn as never-executed and superseded by this amendment**, and the arm is removed from
+that file, which now records exactly the 30 cells that ran. This is a removal of a declaration,
+never of a result.
+
+**P3 is affected and stays open.** Section 11.5 already flagged P3 as requiring a dependency
+audit because it is stated in terms of "the constrained predictor". The new ON arm is not that
+predictor: it is structured, and it is not contraction-constrained. P3 therefore cannot be
+resolved by the 3x2 grid as currently worded. Restating it or withdrawing it is due at E0,
+before the grid runs, and this amendment does not pretend to do it here.
+
+### 13.3 The 3x2 grid is a new pre-registration, under a new result root
+
+The eventual factorial is 6 arms x 2 datasets x 5 seeds = **60 cells**, written to a **fresh
+result root** (`results_factorial/`). `results_amended/` is **frozen**: its 30 OFF cells stay
+as the phase-B trace, are never merged into the new root, and no resume sentinel may adopt
+them. This is section 11.5's own rule applied to this repo's convenience again.
+
+**The 30 OFF cells are re-run rather than reused.** They were executed before any structured
+code existed. Reusing them would put cells produced by two code versions, under two separate
+pre-registrations, side by side in one figure — a provenance defect the figure would then have
+to declare. Compute is not the constraint here: the measured cost of the 40-cell OFF grid was
+~17 minutes on 8 cores (mlp ~5 s, min_ssm ~10 s, koopman ~28 s, transformer ~60 s per run at
+200 updates).
+
+**What this amendment does NOT fix, and must not be read as fixing**: the grid's training
+budget (epochs/updates, batch, device), which depends on what phase D measures and is due at
+D0/E0; and the config file that declares the 60 cells, which does not exist yet. This section
+fixes the boundary and the root, nothing about the runs themselves. No cell of this grid may
+execute until that budget is committed.
+
+### 13.4 Vocabulary
+
+When `alpha_t`, `omega_t`, `B_t` depend on `c_t`, the operator is **LPV/cocycle**. It is not
+Koopman, in the code, the docstrings, the notebooks or the README (`REGLES.md` section 3).
+The `_k` suffix on `mlp_k`/`transformer_k`/`ssm_k` marks the structured transition; it grants
+no right to write "Koopman" anywhere. `A_bar h + B_bar u` is **affine**; "bilinear" requires
+the explicit interaction term `sum_j u_j B_bar_j h`, which the structured arms do not have.
+
+### 13.5 Honesty declaration
+
+- **Decided, not derived**: the strong-factorial option, `alpha` free on ON, and the fresh
+  result root. Each is the project owner's call, taken on the reasoning stated above and
+  recorded before the code that depends on it exists.
+- **Measured before deciding**: 30 executed OFF cells and 0 executed ON cells; the ~17 min /
+  40 cells compute cost. The first is what makes the redefinition free of consequence for
+  published numbers; the second is what makes re-running the OFF arms cheaper than carrying a
+  provenance defect.
+- **Deferred, and named rather than omitted**: the grid budget, the phase-E config, and the
+  restatement or withdrawal of P3.
+
+### 13.6 Declared initialization of the structured head (added 2026-08-04)
+
+Section 13.1 fixed the head as `theta_0 + W_theta c`. It said nothing about how that head is
+initialized, and phase C measured why that gap matters. This subsection closes it. It authorizes
+no run; it is committed before the code that depends on it, per R4.
+
+**Measured, before deciding.** With a default random `W_theta`, the three arms do not start from
+comparable operators. Median context norm at initialization, over 20 seeds, `d_z=4`, `r=2`,
+`width=16`: `mlp_k` **0.68**, `ssm_k` **0.60**, `transformer_k` **3.45** — the transformer's
+context is ~5x larger, because its output is a sum of residual branches. That propagates straight
+through the head: median `max|alpha|` **0.217 / 0.182 / 0.496**. And because `c_t` is an
+unnormalized read of `h_t` while `alpha` is free (13.2), the three quantities close a runaway
+loop: `|h|` up, `|c|` up, `alpha` up, `|h|` up faster. Free-running rollouts over `H = 50` from
+the real entry point `h_0 = lift(z_0)` go non-finite on 1/20 seeds at `Delta = 0.10`
+(`transformer_k`), and on 5/20, 12/20, 7/20 seeds at `Delta = 0.50` for `mlp_k`,
+`transformer_k`, `ssm_k` respectively.
+
+An unequal starting operator across arms of a factorial whose whole claim is "identical
+treatment, three backbones" is a confound, not a detail. It is the same shape of defect as the
+one section 11 withdrew a prediction over.
+
+**Declared.** `W_theta` is initialized to **exactly zero**, and `theta_0` is drawn from the ranges
+this repo already uses for the same three quantities in `RotationScalingBlocks` and
+`KoopmanSSMPredictor` — no new constant is introduced:
+
+- `alpha_0 ~ U(-1.5, -0.5)` — the `nu` range of `RotationScalingBlocks`, whose own docstring calls
+  it "contractive-ish and oscillatory by declaration, not by tuning";
+- `omega_0 ~ U(0.1, 2.0)` — the `omega` range of the same module;
+- `vec B_0 ~ N(0, 0.01^2)` — the `B_cont` initialization of `KoopmanSSMPredictor`.
+
+**What this buys, measured.** At initialization `alpha = theta_0` exactly, so the context-norm gap
+no longer reaches the operator at all: the three arms start from the same LTI system drawn from
+the same law. Free-running rollouts become **20/20 finite on every arm at `Delta = 0.02`, `0.10`
+and `0.50`**. As a side effect the initial state of every structured arm **is** the neutral-context
+configuration (`W_theta = 0`) that the phase-C oscillator gold requires, which makes that gold a
+statement about the model as built rather than about a hand-patched variant.
+
+**What this does NOT do, so it is not read as doing it.** `alpha` stays **free** — unbounded, able
+to become positive during training, exactly as 13.2 declares. Only the *initialization* is
+contractive, on the same declared basis the existing blocks already use. This is not the
+contraction constraint returning under another name: nothing at any later step bounds `alpha`, and
+stability remains something the grid measures rather than something the architecture imposes. Nor
+does it equalize the arms during training: the context-norm gap still reaches gradients on
+`W_theta`, and 13.2's honesty applies — what is removed is a first-order confound at the starting
+point, not every difference between backbones.
+
+### 13.7 Budget allocation inside the structured arms (added 2026-08-05)
+
+Section 1 fixes the fairness contract as a matched TOTAL parameter count (+/-5%). Phase C
+measured that hitting it forces an allocation choice inside the structured arms, and this
+subsection declares the choice rather than leaving it to whatever a search happens to return.
+
+**Measured.** With a single width knob and `psi_hidden = pi_hidden = (width,)`, at
+`target = 10 000`, `d_z = 4`, `d_u = 1`, `r = 4`, `transformer_k` has **no rung inside the
+contract**: `width = 18` gives 9442 (**-5.58%**) and `width = 20` gives 11448 (**+14.48%**). The
+attention context costs ~`24 width^2` and `width` must stay divisible by `n_heads`, so the ladder
+steps by ~18% of the target near it. `mlp_k` and `ssm_k` do have a rung (`-0.39%` and `+0.12%`).
+This is a property of a quadratic knob at this scale, not of this particular target.
+
+**Declared.** `match_budget` searches the three structured arms in **two stages, identically for
+all three**: a coarse `width` (last rung at or below target), then a fine `psi_hidden`/`pi_hidden`
+(~26 params per unit, ~0.3% resolution). All six factorial cells land within +/-5%, verified
+against `sum(p.numel() for p in model.parameters() if p.requires_grad)` and never against
+`count_params` itself.
+
+**The consequence, stated rather than hidden.** The arms then differ in how the shared budget is
+split. Measured at `target = 10 000`, `d_z = 4`, `d_u = 1`:
+
+| arm | psi + pi | head | context |
+|---|---|---|---|
+| `mlp_k` | 20.4% | 12.5% | 67.1% |
+| `transformer_k` | 10.3% | 3.0% | 86.7% |
+| `ssm_k` | 15.7% | 7.7% | 76.6% |
+
+The **head** spread is not an allocation choice: the head is `Linear(d_context, 2r + 2r d_u)`, its
+output is the same 16 numbers in every arm, and only its input width follows `d_context` — which
+IS the backbone axis. The **psi/pi** spread (2x between `mlp_k` and `transformer_k`) is a real
+allocation difference, and it means "identical treatment, three backbones" holds for the *form* of
+psi, the head and the ZOH, not for the *capacity* of psi and pi.
+
+**Why the alternative was rejected, measured before deciding.** Pinning `psi_hidden`/`pi_hidden` to
+one common value across the three arms and letting `d_ff` absorb the transformer's granularity does
+hit +/-5% (checked at common hidden 32, 48, 64, 80). But it buys equal `psi`/`pi` at the price of a
+degenerate attention context: the search lands on `d_model = 4` — two heads of dimension 2 — with
+`d_ff` near 450. That is an MLP behind a 4-dimensional attention bottleneck, and it would bias the
+backbone effect the grid exists to measure. `psi` and `pi` are near-linear maps from `d_z = 4` to
+`2r = 8`; their capacity is very unlikely to be the bottleneck, while a 4-wide attention certainly
+would be. The asymmetry is therefore accepted in the place where it costs least.
+
+**What phase E must carry.** The backbone comparison **within the ON row**
+(`ssm_k` vs `transformer_k` vs `mlp_k`) is a comparison at matched total budget and **unmatched
+psi/pi capacity**. Any statement of the backbone effect on that row declares this table. The
+structure effect (`X-K` vs `X` at fixed backbone) is unaffected: it compares an arm against its own
+OFF counterpart, both at the same total budget.
