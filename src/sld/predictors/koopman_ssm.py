@@ -1,5 +1,13 @@
 """Koopman / structured-SSM predictor: a lifted linear-in-H recurrence.
 
+HISTORICAL PREDECESSOR OF ``ssm_k``, not a factorial cell. Amendment 4
+(PROTOCOL.md section 13, 2026-08-04) moved the structure axis onto the three
+``_k`` arms built on one shared transition, and this class is what the
+``(ssm, on)`` cell used to mean -- ``constrained: true``, ``alpha = -exp(nu)``.
+It stays constructible so the runs already on disk remain loadable, and it is
+REFUSED as a factorial cell before any run (registry.py:31). Nothing new is
+declared against it; ``ssm_k`` is the arm that carries the ON row now.
+
 The state is lifted by ``psi`` into an H-space of dimension ``d_h = 2*n_pairs``
 carried by ``RotationScalingBlocks`` (one conjugate eigenvalue pair per block),
 and read out by ``pi``. Three transition regimes span the Koopman axis of the

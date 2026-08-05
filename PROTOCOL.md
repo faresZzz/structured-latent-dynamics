@@ -1570,3 +1570,198 @@ would be. The asymmetry is therefore accepted in the place where it costs least.
 psi/pi capacity**. Any statement of the backbone effect on that row declares this table. The
 structure effect (`X-K` vs `X` at fixed backbone) is unaffected: it compares an arm against its own
 OFF counterpart, both at the same total budget.
+
+## 14. Amendment 5 — the phase-D gate budget and its execution contract (dated 2026-08-05)
+
+### 14.0 Scope, and why it is committed now
+
+Phase D runs this repo's first trainings under the 3x2 factorial. Rule R4 requires the
+amendment to precede the execution it authorizes, and section 12.5 named four things as
+"declared open, fixed at D0": the episode aggregation of the VPT, the gate budget, whether
+the D pilot may become part of E, and (deferred to E0, untouched here) the treatment of
+censored VPTs. Section 13.3 repeated the budget as due and stated that no cell of the 60-cell
+grid may execute until it is committed.
+
+This section fixes them, plus three things phase D's design surfaced that no earlier section
+covers: the capacity and data budget, the learning rate of the three structured arms, and the
+execution mechanics (crash-resume, logging, sharded concurrency) that the runs depend on.
+
+**Nothing in section 12.3 moves.** `H_gate = 25`, `gamma = 5`, `tau_1 = 3 * e_recon` with
+strict `<`, `tau = 0.5`, and the five-seeds-pass-individually rule of 12.4 are unchanged and
+are not reopened by anything below. This section fixes what is spent, never what is required.
+
+### 14.1 The gate budget
+
+- **Device: CPU, float32.** Not a preference — a statement of what exists. There is no device
+  placement code anywhere in `src/` (no `torch.device`, no `.to(...)`); `Trainer`'s docstring
+  already declares "Runs on CPU, float32, by default". MPS is additionally forbidden for the
+  audit module by its own doctrine (`audit/_common.py`), and at this model scale (~10^4
+  parameters, batch of 8 episodes, a 100-step sequential rollout) kernel-launch overhead makes
+  it an unlikely win. Any future GPU execution is a port, declared and measured, not a flag.
+- **Budget: 1000 optimizer updates**, ceiling 2000. In this repo `epochs` **is** the update
+  count: `Trainer.fit` takes one batch and one `optimizer.step()` per epoch. The 200 updates of
+  the phase-B grid are retained as the phase-B trace and are not this budget.
+- **`batch_episodes = 8`**, unchanged. One budget knob moves at a time; batch size and learning
+  rate interact, and this project has already paid once for a dose-crossed-with-LR design
+  (11.6).
+- **The same budget for all six arms**, in every stratum and seed. This is what protects the
+  comparison; equal outcomes are not promised by it and are not expected from it.
+- **`CosineAnnealingLR(T_max=epochs)`**: a short run is **not** a prefix of a long one. A budget
+  change is a new experiment, never a truncation or an extension of an existing one.
+- **Wall-clock ceiling**: 30 min per run, 8 h per campaign, as monitoring numbers. Exceeding
+  either stops the campaign for a re-plan; it is not a silent kill and not a terminal verdict.
+
+### 14.2 Capacity, data, and the learning rate of the structured arms
+
+- **`target_params = 10 000`** is retained as the entry value. Section 1 called it a default and
+  fixed only the +/-5% matching *procedure*; nothing pre-registers the number. It is probed
+  (14.3) rather than assumed.
+- **`n_episodes = 256`**, raised from 64. At the `(0.8, 0.1, 0.1)` split this is 208 training
+  episodes x T=100 = 20 800 transitions against ~14 600 trainable weights (10 000 predictor +
+  4 612 encoder), where 64 episodes gave 5 200 against the same 14 600. The measured evidence
+  from the 40 executed phase-B runs shows `val_loss ~ train_loss` throughout, never
+  `val >> train` — no overfitting signature at 64 episodes — and this raise moves further from
+  the regime where one could appear. It does **not** change the update count, which is 14.1's
+  budget, and it does not change per-update cost, which is set by `batch_episodes`.
+- **The encoder stays outside the matched budget**, as `budget.py` already declares. This is a
+  deliberate scope, not an oversight: phase D freezes ONE encoder per stratum, shared by all six
+  arms with an identical digest, so the six see identical embeddings and the encoder cannot
+  carry a between-arm effect. The Wave-3 reviewer's capacity confound (`wave3_round1_report.md`,
+  closed as a declared deferral) is answered by that design, not by counting. A later study with
+  a jointly trained per-arm encoder is a different experiment, and it would have to match total
+  capacity or declare that it does not.
+- **Learning rate is a property of the backbone, shared by its OFF and its ON arm**: `mlp` and
+  `mlp_k` at 1e-4, `transformer` and `transformer_k` at 1e-4, `ssm` and `ssm_k` at 3e-4, the
+  values selected in section 10. The three `_k` arms never had a rate selected, and selecting one
+  per ON arm would confound the structure effect (`X-K` vs `X` at fixed backbone) with a tuning
+  effect. If the probe of 14.3 shows an ON arm badly served by its backbone's rate, that is
+  **reported with its numbers**, not silently repaired: repairing it means changing the OFF arm
+  too, which is a new pre-registration.
+
+### 14.3 The calibration probe — exploratory, named, and bounded
+
+A budget chosen by assertion is a guess. The values in 14.1 and 14.2 are entry values, measured
+before D3 by a probe declared here in advance, under section 9's exploratory category:
+
+- **Namespace**: `results_probe_d/`, never merged into any gate or grid root.
+- **Scope**: one stratum, one seed, `mlp_k` (cheapest arm) with confirmation on `transformer_k`
+  (costliest). Four axes, one at a time: updates `{500, 1000, 2000, 4000}`; `h_fr` `{5, 10}`;
+  `target_params` `{10 000, 40 000}`; `n_episodes` `{64, 256}`. Plus one sanity rung on the
+  learning rate, `{1e-4, 3e-4}` on `mlp_k`, for 14.2's last paragraph.
+- **`h_fr` is on the list because training free-runs 5 steps and the gate scores 25.** That gap
+  has never been measured and is the parameter most likely to decide the gate.
+- **What the probe may move**: the four entry values of 14.1/14.2, once, in a dated addendum
+  committed before D3. Any value it moves is applied **uniformly to all six arms**.
+- **What the probe may not move**: anything in section 12.3 or 12.4. Thresholds are not informed
+  by model performance, which is the whole point of having declared them first.
+- **What it is for**: not tuning. It converts "the models were probably big enough" into a
+  measured statement — capacity probed at 4x, data at 4x, budget at 8x — so that a
+  `does_not_learn` verdict cannot be dismissed as, and is not mistaken for, a sizing artifact.
+
+### 14.4 Near-miss policy
+
+The gate verdict stays mechanical. The **margin ratios are the ones section 12.4 already
+defines**, in 12.4's direction — distance from passing, so that **`< 1` is a pass** and a
+larger number is a worse failure:
+
+    m_low = e_{H_gate} * gamma / min(e^pers, e^lin)          m_high = e_1 / tau_1
+
+This section does not introduce a second pair. An earlier draft of it defined the reciprocals
+under the same name; that draft was wrong, and it is recorded here rather than quietly removed
+because two quantities sharing one name is exactly the defect this protocol exists to prevent.
+Any code carrying these fields carries 12.4's direction.
+
+A cell is labelled `does_not_learn (near_miss)` when it fails and **every bound it fails fails
+by at most 1.5x** — that is, the maximum of the ratios of the failing bounds lies in `(1, 1.5]`.
+A cell that misses one bound by 1.1x and the other by 5x is not a near miss. It is published
+with both ratios, both curves and its terminal state.
+
+A near miss **does not** license moving a threshold: `gamma` does not become 4.5 because a cell
+landed at 4.7. It licenses exactly one dated decision by the project owner, among: accept it as
+a published failure and continue; re-declare the budget as a new named experiment (14.1, a
+budget change is a new experiment); or stop. A silent rerun is not among the options, per
+section 7's own rule.
+
+The distinction this makes explicit, because phase D contains both kinds of number:
+**pre-registered public thresholds** (12.3, 12.4 — frozen) versus **internal engineering
+tolerances** (the `< 1e-3` of the learned-oscillator control, the `1e-12` of closed float64
+constructions — adjustable with a measured justification, recorded where they live). The first
+kind carries a claim; the second is instrumentation.
+
+### 14.5 Episode aggregation of the VPT
+
+Fixed as required by 12.5: **VPT is computed per episode**, and the cell publishes the full
+per-episode vector plus its median. Non-crossing stays `inf` with status `censored` (12.2), and
+the count of censored episodes is published alongside. **No mean is taken at D** — how an `inf`
+enters a mean or a figure is 12.5's other open item and remains fixed at E0.
+
+This choice is the one 12.5 called closer to the published metric. It is also low-stakes here:
+the gate of 12.3 consumes `e_25` and `e_1`, never the VPT, which is a reported diagnostic in
+phase D and nothing more.
+
+### 14.6 The D artifacts are not reused in E
+
+Fixed as required by 12.5, and it confirms that section's standing recommendation.
+
+- `results_probe_d/` — the exploratory probe of 14.3.
+- `results_gate_d/` — the learned-oscillator control and the six-cell positive gate.
+- `results_pilot_d/` — the D5 pilot.
+- `results_factorial/` — phase E only (13.3), which re-runs every cell.
+
+No sentinel under a D root may be adopted by E, and no D root is merged into another. This is
+13.3's own rule applied to this repo's convenience a third time: the positive gate is 60 cells
+at the E budget, and it would be tempting to keep them. The reason not to is that if the gate
+finds a cell that does not learn and anything changes as a result, a merged grid would be
+invalidated in full, with no way to tell which cells predated the change.
+
+### 14.7 Execution mechanics that the runs depend on
+
+Declared here because they change what a killed run means, and a contract that ignores that
+would be a contract about an execution nobody performed.
+
+- **Crash-resume.** A training checkpoint is written atomically every 100 updates, carrying
+  model, optimizer, scheduler, epoch counter and RNG state; `fit` resumes from it when it exists
+  and its identity matches, and refuses it loudly when it does not. The requirement is
+  bit-identity: a run of N updates interrupted at N/2 and resumed must produce the same
+  `metrics.csv` bytes as an uninterrupted run. Anything less makes resume a second, undeclared
+  experiment. `ckpt.pt` and `run_complete.json` keep their existing meanings — a checkpoint is
+  still not a completion signal.
+- **No new hashed configuration key.** Only `results_root` is excluded from the config hash;
+  adding a knob for the checkpoint or log interval would change every `config_hash`, therefore
+  every run directory, therefore make every sentinel already on disk unreachable. Both intervals
+  are module constants.
+- **Per-run log.** Each run writes `train.log` in its own run directory: the resolved
+  configuration, `config_hash`, run directory and budget first, then one line per epoch
+  (`epoch, train_loss, val_loss, lr, elapsed, ETA`). This exists so a long run can be diagnosed
+  and cut early rather than waited out, and so a stall is distinguishable from slow progress.
+  `train.log` joins the stale-artifact cleanup: a killed run's log must not survive into the next
+  attempt at the same identity.
+- **Sharded concurrency.** Cells may be executed by 2-3 concurrent processes via `--shard i/k`.
+  Expansion and the collision preflight stay **global** in every shard, so the uniqueness check
+  keeps seeing the whole grid and disjointness is guaranteed by construction rather than by
+  correctly hand-editing several config files. `index.csv` becomes an atomic write and every
+  shard writes the **full** grid, since a shard writing only its own subset would silently drop
+  the other shards' completed cells from the index — artifacts on disk that the index denies.
+  A final unsharded pass, which skips every cell by sentinel, remains the authoritative index.
+
+### 14.8 Honesty declaration
+
+- **Decided, not derived**: 1000 updates with a 2000 ceiling, `n_episodes = 256`, the
+  `[1/1.5, 1)` near-miss band, backbone-shared learning rates, and the four separate result
+  roots. Each is the project owner's call, taken on the reasoning stated above and recorded
+  before the code that depends on it runs.
+- **Measured before deciding**: the per-update cost per family on this machine (mlp ~0.02-0.035
+  s, min_ssm ~0.035-0.075 s, koopman_ssm ~0.10-0.215 s, transformer ~0.225-0.52 s at 200
+  updates, reconstructed from artifact timestamps — the orchestrator prints a wall-clock and
+  persists none, which is itself fixed by 14.7's log); the absence of an overfitting signature in
+  the 40 executed phase-B runs; and the 5 200-transitions-against-14 600-weights ratio that
+  motivated 14.2.
+- **Inherited unchanged**: every threshold of 12.2, 12.3 and 12.4, and the +/-5% budget matching
+  of section 1.
+- **Known and left standing**: `min_ssm` shows recurring non-fatal `train_loss` excursions in the
+  phase-B trace (up to 4.7e14 on individual minibatches) while its `val_loss` stays smooth. They
+  are finite, so the divergence policy of 11.7 never fired. Raising the budget fivefold raises the
+  number of draws that could produce a non-finite one, which makes `ssm` and `ssm_k` the most
+  likely divergence candidates in D4. This is declared in advance so that a divergence there is
+  read as a known risk realized, not as a surprise — and 11.7 already says what happens: cell
+  level, no inference.
