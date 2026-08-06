@@ -344,6 +344,29 @@ def _time_major(split: dict, idx: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     return x, u
 
 
+def data_fingerprint(data: dict) -> str:
+    """The dataset generation spec's 8-hex fingerprint -- the ``data_hash``
+    half of a run identity (REGLES section 6, adversarial review round 2).
+
+    Module-level and public because two callers need the SAME number:
+    ``Trainer.resolve_run_dir`` (which builds the run directory from it) and
+    the ``sld-factorial`` runner (which keys a stratum's frozen
+    representation by the dataset it was pretrained on). A second
+    implementation of the same quantity is exactly what R2 forbids -- two
+    hashes that agree today and drift apart on the next schema change.
+
+    ``paths`` is excluded: it is infrastructure (where the data landed), not
+    the spec (what the data IS).
+    """
+    if "meta" not in data:
+        raise ValueError(
+            "data must carry its build_dataset 'meta' block: the dataset "
+            "generation spec is part of the run identity"
+        )
+    meta = {k: v for k, v in data["meta"].items() if k != "paths"}
+    return hashlib.sha1(json.dumps(meta, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:8]
+
+
 class Trainer:
     """Config-driven JEPA trainer: wires an encoder + one predictor family
     (of the four in ``sld.predictors``) through ONE code path -- teacher-forced
@@ -837,10 +860,7 @@ class Trainer:
                 "data must carry its build_dataset 'meta' block: the dataset "
                 "generation spec is part of the run identity"
             )
-        meta = {k: v for k, v in data["meta"].items() if k != "paths"}  # paths = infra
-        data_hash = hashlib.sha1(
-            json.dumps(meta, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:8]
+        data_hash = data_fingerprint(data)
         self.data_hash = data_hash
         self.run_dir = (
             Path(self.config["results_root"])

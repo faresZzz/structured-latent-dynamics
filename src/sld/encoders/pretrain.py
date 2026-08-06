@@ -26,7 +26,7 @@ alignment term pulls the encoder toward being INVARIANT across the temporal
 offset -- toward smoothing the dynamics out of the representation. The
 readout reconstruction term pulls the opposite way, toward STATE FIDELITY
 (the embedding must stay linearly decodable to the true state, which changes
-between the two views). ``_VIEW_OFFSET = 1`` (adjacent frames) keeps this
+between the two views). ``view_offset = 1`` (the default, ``_VIEW_OFFSET``) keeps this
 tension mild: two adjacent frames of a physical system are close in state
 space, so "invariant" and "decodable" are not yet in sharp conflict. A future
 reader who raises the offset trades a stronger invariance signal for a
@@ -268,10 +268,10 @@ class FrozenRepresentationArtifact:
 
 
 def _build_two_views(
-    train: dict, d_x: int, d_state: int
+    train: dict, d_x: int, d_state: int, view_offset: int = _VIEW_OFFSET
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The two self-distillation views (PROTOCOL.md section 14.10): view0 =
-    frame ``t``, view1 = frame ``t + _VIEW_OFFSET``, SAME episode. Row ``i``
+    frame ``t``, view1 = frame ``t + view_offset``, SAME episode. Row ``i``
     of ``x_view0``/``x_view1``/``x_true_view0`` all come from the same
     ``(episode, t)`` pair (identical slicing + reshape order on all three,
     so the pairing survives the flatten into a batch).
@@ -283,10 +283,25 @@ def _build_two_views(
     get right, so it is tested directly against hand-built, exactly-known
     frame values.
     """
-    x_view0 = torch.as_tensor(train["x"][:, :-_VIEW_OFFSET, :], dtype=torch.float32).reshape(-1, d_x)
-    x_view1 = torch.as_tensor(train["x"][:, _VIEW_OFFSET:, :], dtype=torch.float32).reshape(-1, d_x)
+    # view_offset >= 1 is enforced by the caller AND here: at offset 0 the
+    # slice `[:, :-0, :]` is EMPTY (a python slice trap), and the objective
+    # would silently become BYOL on two IDENTICAL views -- which is the
+    # collapsing configuration, not the pure-autoencoder ablation someone
+    # reaching for offset 0 would expect. That ablation is `w_align = 0`
+    # (PROTOCOL.md section 14.11); the two are NOT interchangeable, because
+    # the teacher is an EMA of the student, so an identical-view alignment
+    # term is still non-zero and still pulls.
+    if view_offset < 1:
+        raise ValueError(
+            f"view_offset must be >= 1, got {view_offset}; to remove the temporal "
+            "term entirely set w_align = 0 (the pure-autoencoder ablation of "
+            "PROTOCOL.md section 14.11) -- offset 0 would pair each frame with "
+            "ITSELF against an EMA teacher, which is the collapsing configuration"
+        )
+    x_view0 = torch.as_tensor(train["x"][:, :-view_offset, :], dtype=torch.float32).reshape(-1, d_x)
+    x_view1 = torch.as_tensor(train["x"][:, view_offset:, :], dtype=torch.float32).reshape(-1, d_x)
     x_true_view0 = torch.as_tensor(
-        train["z_true"][:, :-_VIEW_OFFSET, :], dtype=torch.float32
+        train["z_true"][:, :-view_offset, :], dtype=torch.float32
     ).reshape(-1, d_state)
     return x_view0, x_view1, x_true_view0
 
@@ -355,6 +370,7 @@ def pretrain_representation(
     lr: float = 1e-3,
     weight_decay: float = 0.0,
     tau_ema: float = 0.99,
+    view_offset: int = _VIEW_OFFSET,
     w_align: float = 1.0,
     w_var: float = 1.0,
     w_cov: float = 1.0,
@@ -365,7 +381,7 @@ def pretrain_representation(
     anywhere in this function. The objective has four terms:
 
     1. **Alignment**: a student encoder sees frame ``t`` (view0), a
-       stop-gradient EMA teacher sees frame ``t + _VIEW_OFFSET`` of the SAME
+       stop-gradient EMA teacher sees frame ``t + view_offset`` of the SAME
        episode (view1); ``sld.objectives.jepa.JEPALoss`` (``lambda_c=0``, no
        ``h_hat``/``lift``) compares the two RAW embeddings directly -- no
        head, no projector, no predictor between them.
@@ -403,7 +419,7 @@ def pretrain_representation(
 
     Raises:
         ValueError: ``data`` is missing a required split, the train split
-            has too few physical steps per episode for a ``_VIEW_OFFSET``
+            has too few physical steps per episode for a ``view_offset``
             pair, fewer than 2 view-pairs overall (VICReg's variance needs
             N >= 2), or the val split has fewer than 2 physical steps
             (``e_1_pers`` needs a step-1 target).
@@ -416,15 +432,20 @@ def pretrain_representation(
     d_x = train["x"].shape[-1]
     d_state = train["z_true"].shape[-1]
     steps_per_episode = train["z_true"].shape[1]
-    if steps_per_episode - _VIEW_OFFSET < 1:
+    if view_offset < 1:
+        raise ValueError(
+            f"view_offset must be >= 1, got {view_offset}; the pure-autoencoder "
+            "ablation is w_align = 0 (PROTOCOL.md section 14.11), NOT offset 0"
+        )
+    if steps_per_episode - view_offset < 1:
         raise ValueError(
             f"train split has {steps_per_episode} physical steps per episode, too few "
-            f"for a temporal offset of {_VIEW_OFFSET} (need at least {_VIEW_OFFSET + 1})"
+            f"for a temporal offset of {view_offset} (need at least {view_offset + 1})"
         )
-    n_pairs = train["z_true"].shape[0] * (steps_per_episode - _VIEW_OFFSET)
+    n_pairs = train["z_true"].shape[0] * (steps_per_episode - view_offset)
     if n_pairs < 2:
         raise ValueError(
-            f"train split has {n_pairs} view-pairs at offset {_VIEW_OFFSET}; VICReg "
+            f"train split has {n_pairs} view-pairs at offset {view_offset}; VICReg "
             "variance needs N >= 2"
         )
     if val["z_true"].shape[1] < 2:
@@ -447,10 +468,10 @@ def pretrain_representation(
     ema = EMATarget(encoder, tau=tau_ema)  # the TEACHER: reused, not rebuilt
     jepa = JEPALoss(lambda_c=0.0)  # "student vs sg[teacher], no head" -- reused, not rewritten
 
-    # two views, same episode, offset _VIEW_OFFSET: row i of view0 and view1
+    # two views, same episode, offset view_offset: row i of view0 and view1
     # both come from (episode, t) pair i (identical slicing + reshape order
     # on both, so the pairing survives the flatten)
-    x_view0, x_view1, x_true_view0 = _build_two_views(train, d_x, d_state)
+    x_view0, x_view1, x_true_view0 = _build_two_views(train, d_x, d_state, view_offset)
     n = x_view0.shape[0]
 
     params = list(encoder.parameters()) + list(readout_head.parameters())
@@ -532,7 +553,7 @@ def pretrain_representation(
         "tau1_threshold_factor": 3.0,
         "gated": gated,
         "objective": "14.10",  # two-view self-distillation; supersedes 14.9's loss
-        "view_offset": _VIEW_OFFSET,
+        "view_offset": view_offset,
         "tau_ema": float(tau_ema),
     }
 

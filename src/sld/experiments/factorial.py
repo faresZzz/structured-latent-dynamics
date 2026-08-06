@@ -50,7 +50,21 @@ from sld.data.regimes import (
 )
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training import trainer as trainer_mod
-from sld.training.trainer import FAILURE_FILENAME, RUN_COMPLETE_FILENAME, Trainer
+from sld.training.trainer import data_fingerprint, FAILURE_FILENAME, RUN_COMPLETE_FILENAME, Trainer
+
+# imported AFTER sld.training.trainer above, on purpose: sld.encoders.pretrain
+# imports sld.training.seeding, which (as part of importing the sld.training
+# PACKAGE) imports trainer.py -- trainer.py itself only lazy-imports pretrain
+# (see its own TYPE_CHECKING guard) to dodge that exact cycle. Importing
+# sld.training.trainer first means the package is already fully initialized
+# by the time this line runs, so no cycle here.
+from sld.encoders.pretrain import (
+    FrozenRepresentationArtifact,
+    load_frozen_representation,
+    pretrain_representation,
+    save_frozen_representation,
+    validate_shared_representation,
+)
 
 # explicit name -> class registries (v0: DampedPendulum + the four regimes,
 # per the factorial's design brief -- an unknown name lists the known ones
@@ -63,11 +77,32 @@ _REGIMES: dict[str, type] = {
     "AnisotropicRegime": AnisotropicRegime,
 }
 
-_TOP_KEYS = frozenset({"exp_name", "datasets", "base", "arms", "seeds"})
+_TOP_KEYS = frozenset({"exp_name", "datasets", "base", "arms", "seeds", "representation"})
 _REQUIRED_TOP_KEYS = frozenset({"exp_name", "datasets", "arms", "seeds"})
 _DATASET_KEYS = frozenset({"system", "regime", "obs", "n_episodes", "T", "dt", "seed"})
 _NAME_PARAMS_KEYS = frozenset({"name", "params"})
 _ARM_KEYS = frozenset({"backbone", "structure", "overrides"})
+
+# the pretraining budget + probe knobs (PROTOCOL.md sections 14.9-14.11) an
+# optional top-level `representation:` block may declare -- closed schema
+# like every other block here (F7): an unknown or misspelled key raises
+# before any dataset is built. Absent entirely, a config behaves exactly as
+# it did before Wave D2c (no key added to any cell's hashed config).
+_REPRESENTATION_KEYS = frozenset(
+    {
+        "epochs",
+        "lr",
+        "seed",
+        "w_align",
+        "w_var",
+        "w_cov",
+        "w_recon",
+        "view_offset",
+        "tau_ema",
+        "d_z",
+        "encoder_hidden",
+    }
+)
 
 _BACKBONES = ("mlp", "transformer", "ssm")
 _STRUCTURES = ("off", "on")
@@ -100,9 +135,11 @@ _FAMILY_BY_PAIR: dict[tuple[str, str], str] = {
 _NON_FACTORIAL_FAMILIES = frozenset({"koopman_ssm"})
 
 # keys the RUNNER injects into every cell's config (exp_name from the top
-# level, seed from the seed axis, family derived from backbone/structure) --
-# never settable by the user in base/overrides, the runner owns them (F7)
-_RUNNER_OWNED_KEYS = frozenset({"exp_name", "seed", "family"})
+# level, seed from the seed axis, family derived from backbone/structure,
+# stratum_system/stratum_regime from the dataset's own declared system/regime
+# names when a `representation:` block is present) -- never settable by the
+# user in base/overrides, the runner owns them (F7)
+_RUNNER_OWNED_KEYS = frozenset({"exp_name", "seed", "family", "stratum_system", "stratum_regime"})
 
 
 def _resolve(name: str, registry: dict[str, type], kind: str) -> None:
@@ -187,6 +224,37 @@ def _validate_arm(idx: int, arm: dict) -> str:
     return family
 
 
+def _validate_representation_block(rep_cfg: dict) -> None:
+    """Closed schema over the optional top-level ``representation:`` block
+    (F7's own discipline, extended): an unknown or misspelled key raises
+    here, before any dataset is built or any model constructed -- same
+    convention as ``_validate_dataset_entry``/``_validate_arm``.
+
+    ``view_offset`` gets one further, value-level check:
+    ``pretrain_representation`` (``sld.encoders.pretrain``) has no parameter
+    for it -- the two-view temporal offset is the module's own fixed
+    ``_VIEW_OFFSET`` constant. A config asking for a different value would
+    otherwise be silently ignored (the knob would sit in the block, get
+    validated as a known key, and then do nothing) -- refused instead, by
+    name, before any dataset is built.
+    """
+    unknown = sorted(set(rep_cfg) - _REPRESENTATION_KEYS)
+    if unknown:
+        raise ValueError(f"representation: unknown keys {unknown}")
+    missing = sorted(_REPRESENTATION_KEYS - set(rep_cfg))
+    if missing:
+        raise ValueError(f"representation: missing keys {missing}")
+    offset = rep_cfg["view_offset"]
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 1:
+        raise ValueError(
+            f"representation.view_offset={offset!r} must be an integer >= 1. "
+            "Offset 0 is NOT the pure-autoencoder ablation: it would pair each "
+            "frame with ITSELF against an EMA teacher, which is the collapsing "
+            "configuration. To remove the temporal term set w_align = 0 "
+            "(PROTOCOL.md section 14.11)."
+        )
+
+
 def _trainer_allowed_keys(families: set[str]) -> frozenset[str]:
     """Every key ``base``/``overrides`` may legally name, for ``families``.
 
@@ -219,7 +287,8 @@ def _validate_trainer_keys(location: str, keys: set[str], allowed: frozenset[str
     if runner_owned:
         raise ValueError(
             f"{location}: keys {runner_owned} are injected by the runner "
-            "(exp_name/seed/family), not settable in base/overrides"
+            "(exp_name/seed/family/stratum_system/stratum_regime), not settable "
+            "in base/overrides"
         )
     budget_owned = sorted(keys & trainer_mod._BUDGET_OWNED_KEYS)
     if budget_owned:
@@ -266,6 +335,9 @@ def expand(config: dict, dry_run: bool = False) -> list[dict]:
     base = config.get("base", {})
     arms = config["arms"]
     seeds = config["seeds"]
+    representation_cfg = config.get("representation")
+    if representation_cfg is not None:
+        _validate_representation_block(representation_cfg)
 
     for ds_name, ds_cfg in datasets_cfg.items():
         _validate_dataset_entry(ds_name, ds_cfg)
@@ -323,6 +395,17 @@ def expand(config: dict, dry_run: bool = False) -> list[dict]:
                     "family": family,
                     **overrides,
                 }
+                if representation_cfg is not None:
+                    # design decision 5: each cell of a stratum receives the
+                    # dataset's OWN declared system/regime names -- pure
+                    # config lookup, no dataset built and no artifact
+                    # resolved yet (that happens in main(), after datasets
+                    # exist). This is what makes the derived
+                    # representation_digest key (Trainer.__init__) and the
+                    # config_hash it feeds into depend on which stratum a
+                    # cell belongs to.
+                    run_config["stratum_system"] = datasets_cfg[ds_name]["system"]["name"]
+                    run_config["stratum_regime"] = datasets_cfg[ds_name]["regime"]["name"]
                 cells.append(
                     {
                         "index": idx,
@@ -347,7 +430,115 @@ def _build_dataset_for(ds_cfg: dict) -> dict:
     )
 
 
-def _preflight_resolve_and_check_collisions(cells: list[dict], datasets: dict) -> None:
+def _stratum_representation_path(
+    results_root: Path, exp_name: str, system: str, regime: str, data_hash: str
+) -> Path:
+    """The stable, digest-INDEPENDENT path one stratum's frozen
+    representation lives at: derived from the stratum's names AND the
+    fingerprint of the data it is pretrained on -- never from the artifact's
+    content digest, which is not known before the artifact is built. Same
+    directory level as this run's own ``index.csv`` -- infrastructure for
+    THIS experiment, not a cross-experiment cache.
+
+    ``data_hash`` is in the path deliberately. Keying by ``(system, regime)``
+    NAMES alone means two ``datasets:`` entries that declare the same system
+    and regime names but differ in their params, ``T``, ``dt`` or
+    ``n_episodes`` silently share ONE encoder -- built from whichever entry
+    the iteration reaches first -- so half the cells would train against a
+    representation pretrained on data they never see. Today's grid has two
+    differently-NAMED regimes so it never fires, which is precisely what
+    makes it dangerous later. ``data_fingerprint`` is reused from the trainer
+    rather than recomputed here (R2: one implementation of one quantity)."""
+    return (
+        results_root
+        / exp_name
+        / "representations"
+        / f"{system}__{regime}__{data_hash}.pt"
+    )
+
+
+def _load_or_build_representation(
+    path: Path, *, system: str, regime: str, data: dict, rep_cfg: dict
+) -> FrozenRepresentationArtifact:
+    """Build-if-absent, load-otherwise, idempotently (design decision 2).
+
+    Safe under concurrent ``--shard`` processes (design decision 3,
+    PROTOCOL.md section 14.7): pretraining is DETERMINISTIC given the same
+    data and seed, so two shards racing here build byte-identical artifacts;
+    ``save_frozen_representation``'s atomic temp-file + ``os.replace`` means
+    no reader ever observes a partially written file, regardless of which
+    shard's write wins. This function never trusts its OWN in-memory build --
+    after a build-and-save it ALWAYS re-loads from ``path``, so every caller
+    ends up validating (and using) exactly the bytes that landed on disk, not
+    a private copy that might differ from what another shard just wrote
+    there. An artifact that exists but is corrupt, or whose manifest stratum
+    disagrees with ``system``/``regime``, is refused by
+    ``load_frozen_representation``/``validate_shared_representation`` --
+    never silently rebuilt over, which would erase the evidence something
+    was wrong.
+    """
+    if not path.exists():
+        artifact = pretrain_representation(
+            data,
+            system=system,
+            regime=regime,
+            d_z=rep_cfg["d_z"],
+            encoder_hidden=tuple(rep_cfg["encoder_hidden"]),
+            seed=rep_cfg["seed"],
+            epochs=rep_cfg["epochs"],
+            lr=rep_cfg["lr"],
+            tau_ema=rep_cfg["tau_ema"],
+            view_offset=rep_cfg["view_offset"],
+            w_align=rep_cfg["w_align"],
+            w_var=rep_cfg["w_var"],
+            w_cov=rep_cfg["w_cov"],
+            w_recon=rep_cfg["w_recon"],
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        save_frozen_representation(artifact, path)
+    artifact = load_frozen_representation(path)
+    validate_shared_representation(artifact, system=system, regime=regime)
+    return artifact
+
+
+def _resolve_stratum_representations(
+    config: dict, results_root: Path, exp_name: str, datasets: dict
+) -> dict[str, FrozenRepresentationArtifact]:
+    """One artifact per cell (keyed by ``cell["dataset"]`` name), built or
+    loaded once per unique stratum: two dataset entries that are the SAME
+    stratum ON THE SAME DATA share the SAME artifact and the SAME build/load
+    call, never a second pretraining run.
+
+    The sharing key is ``(system name, regime name, data fingerprint)``, not
+    the names alone. Names alone would let two entries declaring the same
+    system and regime but differing in params, ``T``, ``dt`` or
+    ``n_episodes`` collapse onto one encoder built from whichever the
+    iteration reached first -- half the cells then training against a
+    representation pretrained on data they never see. See
+    ``_stratum_representation_path``.
+    """
+    representation_cfg = config["representation"]
+    by_stratum: dict[tuple[str, str, str], FrozenRepresentationArtifact] = {}
+    by_dataset: dict[str, FrozenRepresentationArtifact] = {}
+    for ds_name, ds_cfg in config["datasets"].items():
+        data_hash = data_fingerprint(datasets[ds_name])
+        stratum = (ds_cfg["system"]["name"], ds_cfg["regime"]["name"], data_hash)
+        if stratum not in by_stratum:
+            path = _stratum_representation_path(results_root, exp_name, *stratum)
+            by_stratum[stratum] = _load_or_build_representation(
+                path,
+                system=stratum[0],
+                regime=stratum[1],
+                data=datasets[ds_name],
+                rep_cfg=representation_cfg,
+            )
+        by_dataset[ds_name] = by_stratum[stratum]
+    return by_dataset
+
+
+def _preflight_resolve_and_check_collisions(
+    cells: list[dict], datasets: dict, representations: dict[str, FrozenRepresentationArtifact] | None = None
+) -> None:
     """Resolve every cell's ``Trainer`` + run identity BEFORE any training.
 
     Two purposes (adversarial review F8/F17): (1) every cell gets a
@@ -357,10 +548,20 @@ def _preflight_resolve_and_check_collisions(cells: list[dict], datasets: dict) -
     scientific bug -- two different treatments would silently share one
     artifact directory, the second run resuming/overwriting the first's.
     Raises ``ValueError`` listing every collision, before touching disk.
+
+    ``representations`` (Wave D2c, design decision 5), when given, maps each
+    cell's ``dataset`` name to the ``FrozenRepresentationArtifact`` its
+    stratum resolved to -- passed to ``Trainer(config, representation=...)``
+    at the SAME construction call this function already makes, so a config
+    carrying ``stratum_system``/``stratum_regime`` (injected by ``expand``)
+    is never constructed WITHOUT the artifact its preflight validation
+    needs. ``None`` (no ``representation:`` block) reproduces today's calls
+    byte-for-byte -- every cell gets ``representation=None``.
     """
+    representations = representations or {}
     by_run_dir: dict[Path, list[dict]] = {}
     for cell in cells:
-        trainer = Trainer(cell["config"])
+        trainer = Trainer(cell["config"], representation=representations.get(cell["dataset"]))
         run_dir = trainer.resolve_run_dir(datasets[cell["dataset"]])
         cell["trainer"] = trainer
         cell["run_dir"] = run_dir
@@ -806,6 +1007,20 @@ def main(argv: list[str] | None = None) -> int:
     results_root = Path(config.get("base", {}).get("results_root", "results"))
     datasets = {name: _build_dataset_for(cfg) for name, cfg in config["datasets"].items()}
 
+    # Wave D2c: one frozen representation per (system, regime) stratum,
+    # built-if-absent/loaded-otherwise, BEFORE the preflight below -- its
+    # digest feeds Trainer's config_hash (design decision 5), so the run
+    # identity every cell resolves to next depends on this. Safe under
+    # concurrent --shard processes (design decision 3): every shard runs
+    # this same resolution over the FULL dataset set, not just its own
+    # cells' subset, same "stay global" doctrine the collision preflight
+    # already follows below.
+    representations = (
+        _resolve_stratum_representations(config, results_root, exp_name, datasets)
+        if config.get("representation") is not None
+        else None
+    )
+
     # every cell's Trainer + run_dir resolved up front, and any identity
     # collision rejected before touching disk (F8c) -- nothing has been
     # attempted yet at this point, so no index is written on this path,
@@ -814,7 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
     # (14.7): the uniqueness check must keep seeing every cell, not just
     # this shard's, so disjointness across shards is guaranteed by
     # construction rather than by a human hand-editing several configs.
-    _preflight_resolve_and_check_collisions(cells, datasets)
+    _preflight_resolve_and_check_collisions(cells, datasets, representations)
 
     run_cells = _shard_cells(cells, args.shard)
 

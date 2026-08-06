@@ -731,3 +731,33 @@ def test_build_two_views_uses_a_genuine_nonzero_offset():
     assert not torch.equal(x_view0, x_view1)
     torch.testing.assert_close(x_view1 - x_view0, torch.full_like(x_view0, float(_VIEW_OFFSET)))
     torch.testing.assert_close(x_view0, x_true_view0)
+
+
+def test_build_two_views_refuses_offset_below_one_directly():
+    # The guard INSIDE _build_two_views is defence in depth against the
+    # python slice trap: `x[:, :-0, :]` is EMPTY, not "the whole array", so
+    # an offset of 0 reaching this function would silently produce zero
+    # view-pairs rather than raising. pretrain_representation guards it too,
+    # which is exactly why this one needs its OWN test -- a mutation that
+    # removes it leaves the whole suite green through the outer guard.
+    import numpy as np
+
+    from sld.encoders.pretrain import _build_two_views
+
+    train = {"x": np.zeros((2, 5, 2)), "z_true": np.zeros((2, 5, 2))}
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="view_offset must be >= 1"):
+            _build_two_views(train, 2, 2, bad)
+    # and the positive control: offset 1 yields the expected pair count
+    v0, v1, t0 = _build_two_views(train, 2, 2, 1)
+    assert v0.shape[0] == v1.shape[0] == t0.shape[0] == 2 * (5 - 1)
+
+
+def test_pretrain_representation_refuses_offset_below_one():
+    from sld.encoders.pretrain import pretrain_representation
+
+    with pytest.raises(ValueError, match="view_offset must be >= 1"):
+        pretrain_representation(
+            _small_dataset(), system="DampedPendulum", regime="OURegime",
+            d_z=4, seed=0, epochs=1, view_offset=0,
+        )

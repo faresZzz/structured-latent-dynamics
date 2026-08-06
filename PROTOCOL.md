@@ -1875,8 +1875,16 @@ would change on a partially observed or higher-dimensional stratum.
 
 - `w_align` in `{0, 1, 10}` — 0 being the pure autoencoder-plus-VICReg alternative, which is
   the serious competing design and deserves a measurement rather than an argument;
-- `view_offset` in `{0, 1}` — 0 disabling the temporal term entirely, which separates "the
-  offset is too small to matter" from "the term helps".
+- `view_offset` in `{1, 2}` — **corrected 2026-08-06 from `{0, 1}`, which was wrong.** Offset 0
+  does not disable the temporal term: the teacher is an EMA of the student, so pairing a frame
+  with ITSELF still yields a non-zero alignment term pulling student toward teacher. That is
+  BYOL on identical views — the collapsing configuration this section's own reasoning warns
+  about — not the pure-autoencoder ablation. Worse, `x[:, :-0, :]` is an EMPTY slice in Python,
+  so an unguarded offset 0 produces zero view-pairs rather than raising. The ablation was
+  already covered by `w_align = 0`; the two axes were redundant at that point and wrong at it.
+  The offset axis now asks the question only it can ask — whether the offset is too small to
+  matter — and `view_offset < 1` is refused, in `pretrain_representation` and again in
+  `_build_two_views`, each with its own test.
 
 Scored on `e_recon`, on the latent's `cond(Sigma)`, and on `e_25` for the cheapest arm. The
 retained values enter the same dated addendum as 14.3's other axes, committed before D3.

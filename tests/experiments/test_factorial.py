@@ -15,13 +15,25 @@ import os
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 
+from sld.encoders.pretrain import (
+    load_frozen_representation,
+    pretrain_representation,
+    representation_digest,
+    save_frozen_representation,
+)
 from sld.experiments.factorial import (
+    _build_dataset_for,
     _cell_status,
     _final_val_loss,
+    _load_or_build_representation,
     _parse_shard,
+    _preflight_resolve_and_check_collisions,
+    _resolve_stratum_representations,
     _shard_cells,
+    _stratum_representation_path,
     _validate_completion_sentinel,
     expand,
     main,
@@ -1490,3 +1502,476 @@ def test_shard_flag_rejects_malformed_values(tmp_path, capsys, bad_value, fragme
     err = capsys.readouterr().err
     print(f"[factorial] --shard {bad_value!r} rejected: {err.strip().splitlines()[-1]!r}")
     assert fragment in err
+
+
+# ==========================================================================
+# Wave D2c: the frozen shared representation, WIRED into the runner.
+# src/sld/encoders/pretrain.py builds/saves/loads the artifact and
+# Trainer(config, representation=...) already accepts it (Wave D2b) -- this
+# wave is ONLY the wiring: one build-or-load per (system, regime) stratum,
+# `stratum_system`/`stratum_regime` injected into each cell of that
+# stratum, and the loaded artifact threaded into every cell's OWN
+# Trainer(..., representation=...) construction (design decisions 1-5,
+# task brief). R7's whole point: an implementation that expands, preflights,
+# trains and writes a green index while never passing `representation=` to
+# Trainer would pass every test that only checks the code PATH exists --
+# the tests below check the call site itself.
+# ==========================================================================
+
+
+def _rep_cfg(**overrides) -> dict:
+    cfg = {
+        "epochs": 2,
+        "lr": 1e-2,
+        "seed": 0,
+        "w_align": 1.0,
+        "w_var": 1.0,
+        "w_cov": 1.0,
+        "w_recon": 1.0,
+        "view_offset": 1,
+        "tau_ema": 0.99,
+        "d_z": 4,
+        "encoder_hidden": [8],
+    }
+    cfg.update(overrides)
+    return cfg
+
+
+def _repr_run_config(results_root: Path, **overrides) -> dict:
+    config = {
+        "exp_name": "repr_mini",
+        "datasets": {"ou": _minimal_dataset_entry(n_episodes=10, T=10)},
+        "base": {
+            "d_x": 2,
+            "d_z": 4,  # must match _rep_cfg()'s d_z: Trainer loads the
+            "d_u": 1,  # frozen encoder's state_dict into its OWN, config-
+            "epochs": 1,  # built FrameMLPEncoder(d_x, d_z, encoder_hidden)
+            "batch_episodes": 2,
+            "target_params": 500,
+            "encoder_hidden": [8],  # must match _rep_cfg()'s encoder_hidden
+            "results_root": str(results_root),
+        },
+        "representation": _rep_cfg(),
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    config.update(overrides)
+    return config
+
+
+def _prepare_cells(config: dict, results_root: Path):
+    """Mirrors ``main()``'s OWN pre-training setup (expand -> build datasets
+    -> resolve representations -> preflight) by calling the exact SAME
+    private functions ``main()`` calls, in the same order -- a test built on
+    this exercises the real call site (REGLES 7.1), not a parallel
+    reimplementation that could drift from what ``main()`` actually does."""
+    cells = expand(config, dry_run=False)
+    exp_name = config["exp_name"]
+    datasets = {name: _build_dataset_for(cfg) for name, cfg in config["datasets"].items()}
+    representations = (
+        _resolve_stratum_representations(config, results_root, exp_name, datasets)
+        if config.get("representation") is not None
+        else None
+    )
+    _preflight_resolve_and_check_collisions(cells, datasets, representations)
+    return cells, datasets, representations
+
+
+# -- schema: `representation:` is closed, and its one value-level check -----
+
+
+def test_unknown_key_in_representation_block_raises_before_any_dataset_built():
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "representation": {**_rep_cfg(), "w_alignn": 1.0},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="w_alignn"):
+        expand(config, dry_run=False)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "1", True])
+def test_representation_view_offset_below_one_is_refused(bad):
+    # view_offset is a REAL parameter of pretrain_representation now, so any
+    # integer >= 1 is legal. Offset 0 is refused ON PURPOSE and is NOT the
+    # pure-autoencoder ablation: the teacher is an EMA of the student, so
+    # pairing a frame with ITSELF still yields a non-zero alignment term --
+    # that is BYOL on identical views, the CONFIGURATION THAT COLLAPSES.
+    # The ablation is w_align = 0 (PROTOCOL.md section 14.11).
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "representation": _rep_cfg(view_offset=bad),
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="view_offset"):
+        expand(config, dry_run=False)
+
+
+def test_representation_view_offset_two_is_accepted_and_changes_the_artifact(tmp_path):
+    # the axis PROTOCOL.md section 14.11 puts on the probe must actually be
+    # executable, and must actually change what is produced -- a knob that
+    # is accepted but inert is the defect this project keeps paying for.
+    results_root = tmp_path / "results"
+    digests = {}
+    for offset in (1, 2):
+        config = _repr_run_config(
+            results_root, exp_name=f"offset{offset}", datasets={"ou": _minimal_dataset_entry(n_episodes=10, T=10)}
+        )
+        config["representation"]["view_offset"] = offset
+        _cells, _datasets, reps = _prepare_cells(config, results_root)
+        digests[offset] = reps["ou"].manifest["digest"]
+        assert reps["ou"].manifest["view_offset"] == offset
+    print(f"[factorial D2c] view_offset digests: {digests}")
+    assert digests[1] != digests[2]
+
+
+# -- no `representation:` block: byte-for-byte unchanged ---------------------
+
+
+def test_no_representation_block_leaves_cell_config_untouched():
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    assert len(cells) == 1
+    assert "stratum_system" not in cells[0]["config"]
+    assert "stratum_regime" not in cells[0]["config"]
+
+
+def test_no_representation_block_pins_the_same_config_hash_as_before_this_wave(tmp_path):
+    # POSITIVE, the identity regression this wave is riskiest on (same
+    # doctrine as test_trainer.py's D2b pin): a config with no
+    # `representation:` block must resolve to the IDENTICAL config_hash a
+    # pre-Wave-D2c factorial.py would produce. Pinned as a literal so a
+    # future change to the wiring cannot silently move every existing run's
+    # identity.
+    config = {
+        "exp_name": "hash_pin",
+        "datasets": {"d1": _minimal_dataset_entry(n_episodes=10, T=10)},
+        "base": {
+            "d_x": 2,
+            "d_z": 2,
+            "d_u": 1,
+            "epochs": 1,
+            "batch_episodes": 2,
+            "target_params": 200,
+            "results_root": str(tmp_path / "results"),
+        },
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    trainer = Trainer(cells[0]["config"])
+    print(f"[factorial D2c] no-representation config_hash = {trainer.config_hash}")
+    assert trainer.config_hash == "8c438faa"
+
+
+# -- the wiring test, and the point of the wave (R7) --------------------------
+
+
+def test_representation_wired_into_trainer_at_the_call_site(tmp_path):
+    """Not "the code path exists" -- the Trainer object main()'s own
+    preflight constructs actually CARRIES the loaded artifact, by identity,
+    and that artifact's digest is the one recorded in the run's own
+    config.yaml/ckpt.pt. The unwired defect this wave exists to prevent
+    (``Trainer(cell["config"])`` with no ``representation=`` kwarg) would
+    still expand/preflight/train/write a green index -- every assertion
+    below is exactly what that defect would fail.
+    """
+    results_root = tmp_path / "results"
+    config = _repr_run_config(results_root)
+    cells, datasets, representations = _prepare_cells(config, results_root)
+
+    assert len(cells) == 1
+    cell = cells[0]
+    trainer = cell["trainer"]
+    expected_artifact = representations["ou"]
+
+    # the call-site assertion itself: IDENTITY, not merely "a" representation
+    assert trainer.representation is expected_artifact
+    assert trainer.config["representation_digest"] == representation_digest(expected_artifact)
+
+    result = trainer.fit(datasets["ou"])
+    config_yaml_text = Path(result["paths"]["config"]).read_text()
+    assert f"representation_digest: {representation_digest(expected_artifact)}" in config_yaml_text
+    ckpt = torch.load(result["paths"]["ckpt"], map_location="cpu", weights_only=False)
+    assert ckpt["config"]["representation_digest"] == representation_digest(expected_artifact)
+
+
+# -- the digest table: one stratum, one digest; two strata, two digests -----
+
+
+def test_representation_digest_shared_within_stratum_differs_across_strata(tmp_path):
+    results_root = tmp_path / "results"
+    config = _repr_run_config(
+        results_root,
+        exp_name="digest_table",
+        datasets={
+            "ou_a": _minimal_dataset_entry(n_episodes=10, T=10),
+            # SAME stratum NAMES as ou_a (DampedPendulum/OURegime) but
+            # DIFFERENT params: these are genuinely different data, so they
+            # must NOT share an encoder. Keying by names alone would have
+            # given ou_b an encoder pretrained on ou_a's data -- half the
+            # cells training against a representation they never saw.
+            "ou_b": _minimal_dataset_entry(
+                n_episodes=10, T=10, regime={"name": "OURegime", "params": {"theta_ou": 5.0}}
+            ),
+            "aniso": _minimal_dataset_entry(
+                n_episodes=10,
+                T=10,
+                regime={"name": "AnisotropicRegime", "params": {"ic_scales": [1.0, 1.0]}},
+            ),
+        },
+        arms=[{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+    )
+    cells, datasets, representations = _prepare_cells(config, results_root)
+    assert len(cells) == 3
+    digests = {cell["dataset"]: cell["trainer"].config["representation_digest"] for cell in cells}
+    print(f"[factorial D2c] digest table: {digests}")
+    # same names, different data => DIFFERENT representations (the footgun)
+    assert digests["ou_a"] != digests["ou_b"]
+    assert representations["ou_a"] is not representations["ou_b"]
+    # a different stratum name => different too
+    assert digests["aniso"] != digests["ou_a"]
+
+
+# -- idempotence: 2nd invocation loads, never rebuilds -----------------------
+
+
+def test_second_invocation_loads_existing_artifact_zero_pretrain_calls(tmp_path, monkeypatch):
+    import sld.experiments.factorial as factorial_mod
+
+    results_root = tmp_path / "results"
+    config = _repr_run_config(results_root)
+    _cells1, _datasets1, representations1 = _prepare_cells(config, results_root)
+    assert representations1["ou"].manifest.get("digest")  # first invocation built + saved
+
+    calls = []
+    real_pretrain = factorial_mod.pretrain_representation
+
+    def _counting_pretrain(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_pretrain(*args, **kwargs)
+
+    monkeypatch.setattr(factorial_mod, "pretrain_representation", _counting_pretrain)
+
+    _cells2, _datasets2, representations2 = _prepare_cells(config, results_root)
+    print(f"[factorial D2c] pretrain_representation calls on 2nd invocation: {len(calls)}")
+    assert len(calls) == 0
+    assert representations2["ou"].manifest["digest"] == representations1["ou"].manifest["digest"]
+
+
+# -- shard-race safety: simulated interleaving, not a docstring claim -------
+
+
+def test_shard_race_concurrent_builds_are_atomic_and_idempotent(tmp_path, monkeypatch):
+    """Simulates the --shard interleaving design decision 3 declares safe:
+    two 'shards' both find no artifact on disk and BOTH pretrain
+    independently -- the actual race window is BEFORE either has saved.
+    Pretraining is deterministic given the same data/seed, so their
+    in-memory artifacts hash identically; ``save_frozen_representation``
+    writes temp-file + ``os.replace``, so whichever save physically lands
+    first leaves a COMPLETE file and the other's save (also atomic) simply
+    replaces it with byte-identical content -- no reader of ``path``, at any
+    instant, ever observes a torn file.
+    """
+    import sld.encoders.pretrain as pretrain_mod
+
+    ds_cfg = _minimal_dataset_entry(n_episodes=10, T=10)
+    data = _build_dataset_for(ds_cfg)
+    rep_cfg = _rep_cfg()
+    path = tmp_path / "reps" / "DampedPendulum__OURegime.pt"
+    path.parent.mkdir(parents=True)
+
+    def _build():
+        return pretrain_representation(
+            data,
+            system="DampedPendulum",
+            regime="OURegime",
+            d_z=rep_cfg["d_z"],
+            encoder_hidden=tuple(rep_cfg["encoder_hidden"]),
+            seed=rep_cfg["seed"],
+            epochs=rep_cfg["epochs"],
+            lr=rep_cfg["lr"],
+            tau_ema=rep_cfg["tau_ema"],
+            w_align=rep_cfg["w_align"],
+            w_var=rep_cfg["w_var"],
+            w_cov=rep_cfg["w_cov"],
+            w_recon=rep_cfg["w_recon"],
+        )
+
+    # both shards build BEFORE either saves -- the real race window
+    artifact_shard_a = _build()
+    artifact_shard_b = _build()
+
+    replace_calls = []
+    real_replace = os.replace
+
+    def _spy_replace(src, dst):
+        assert Path(src).stat().st_size > 0  # never rename a partial write
+        replace_calls.append(Path(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(pretrain_mod.os, "replace", _spy_replace)
+
+    # shard B "wins": its atomic save lands first
+    digest_b = save_frozen_representation(artifact_shard_b, path)
+    # shard A saves SECOND, onto the SAME path -- an atomic overwrite, never
+    # a moment where a reader could see a torn file
+    digest_a = save_frozen_representation(artifact_shard_a, path)
+
+    print(f"[factorial D2c] shard race: digest_a={digest_a} digest_b={digest_b} replace_calls={replace_calls}")
+    assert digest_a == digest_b  # deterministic pretraining -> identical bytes
+    assert len(replace_calls) == 2  # both writes went through the atomic path
+    assert all(p == path for p in replace_calls)
+
+    # a THIRD shard, arriving after the dust settles, gets a valid artifact
+    # for the stratum regardless of which write physically landed last
+    loaded = _load_or_build_representation(
+        path, system="DampedPendulum", regime="OURegime", data=data, rep_cfg=rep_cfg
+    )
+    assert representation_digest(loaded) == digest_a
+
+
+def test_load_or_build_representation_save_path_is_atomic_replace(tmp_path, monkeypatch):
+    # pins the MECHANISM at the exact call site build-then-save happens
+    # inside _load_or_build_representation: a kill mid-write must never
+    # leave a partial artifact at `path` -- same discipline as
+    # run_complete.json/index.csv (trainer.py / factorial.py). A mutant that
+    # bypasses save_frozen_representation's temp-file + os.replace and
+    # writes the final payload straight to `path` (e.g. a bare
+    # torch.save(payload, path)) calls os.replace ZERO times here and
+    # reddens this.
+    import sld.encoders.pretrain as pretrain_mod
+
+    ds_cfg = _minimal_dataset_entry(n_episodes=10, T=10)
+    data = _build_dataset_for(ds_cfg)
+    rep_cfg = _rep_cfg()
+    path = tmp_path / "reps" / "atomic.pt"
+
+    calls = []
+    real_replace = os.replace
+
+    def _spy_replace(src, dst):
+        assert Path(src).stat().st_size > 0  # never rename an empty/partial stub
+        calls.append((Path(src), Path(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(pretrain_mod.os, "replace", _spy_replace)
+
+    _load_or_build_representation(
+        path, system="DampedPendulum", regime="OURegime", data=data, rep_cfg=rep_cfg
+    )
+    print(f"[factorial D2c] os.replace calls during build-and-save: {calls}")
+    assert len(calls) == 1
+    src, dst = calls[0]
+    assert dst == path
+    assert src.name == path.name + ".tmp"
+    assert src.parent == dst.parent  # same directory -- same filesystem, atomic on POSIX
+
+
+# -- discoverability: path, digest, stratum all traceable after a run -------
+
+
+def test_representation_path_digest_and_stratum_are_discoverable_after_a_run(tmp_path):
+    results_root = tmp_path / "results"
+    config = _repr_run_config(results_root)
+    config_path = tmp_path / "repr.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert main(["--config", str(config_path)]) == 0
+
+    # discovered from disk, not reconstructed: the path carries the stratum
+    # names AND the data fingerprint, and exactly one artifact exists here
+    rep_dir = results_root / config["exp_name"] / "representations"
+    found = sorted(rep_dir.glob("DampedPendulum__OURegime__*.pt"))
+    assert len(found) == 1, sorted(pp.name for pp in rep_dir.iterdir())
+    expected_path = found[0]
+    # and the name is exactly the scheme _stratum_representation_path builds
+    data_hash = expected_path.stem.rsplit("__", 1)[1]
+    assert expected_path == _stratum_representation_path(
+        results_root, config["exp_name"], "DampedPendulum", "OURegime", data_hash
+    )
+    artifact = load_frozen_representation(expected_path)  # readable, valid
+    digest = artifact.manifest["digest"]
+    assert artifact.manifest["system"] == "DampedPendulum"
+    assert artifact.manifest["regime"] == "OURegime"
+
+    index_path = results_root / config["exp_name"] / "index.csv"
+    rows = list(csv.DictReader(index_path.open()))
+    assert len(rows) == 1
+    run_dir = Path(rows[0]["run_dir"])
+    run_config = yaml.safe_load((run_dir / "config.yaml").read_text())
+    assert run_config["representation_digest"] == digest
+    assert run_config["stratum_system"] == "DampedPendulum"
+    assert run_config["stratum_regime"] == "OURegime"
+
+
+# -- negatives: exception type + distinctive message fragment ---------------
+
+
+def test_stale_artifact_with_wrong_stratum_on_disk_is_refused(tmp_path):
+    ds_cfg = _minimal_dataset_entry(n_episodes=10, T=10)
+    data = _build_dataset_for(ds_cfg)
+    rep_cfg = _rep_cfg()
+    path = tmp_path / "wrong.pt"
+    # an artifact genuinely built (and saved) for a DIFFERENT stratum
+    _load_or_build_representation(
+        path, system="OtherSystem", regime="OtherRegime", data=data, rep_cfg=rep_cfg
+    )
+    with pytest.raises(ValueError, match="stratum mismatch"):
+        _load_or_build_representation(
+            path, system="DampedPendulum", regime="OURegime", data=data, rep_cfg=rep_cfg
+        )
+
+
+def test_corrupt_artifact_on_disk_is_refused_never_silently_rebuilt(tmp_path, monkeypatch):
+    ds_cfg = _minimal_dataset_entry(n_episodes=10, T=10)
+    data = _build_dataset_for(ds_cfg)
+    rep_cfg = _rep_cfg()
+    path = tmp_path / "corrupt.pt"
+    path.write_bytes(b"not a torch checkpoint")
+
+    import sld.experiments.factorial as factorial_mod
+
+    calls = []
+    real_pretrain = factorial_mod.pretrain_representation
+    monkeypatch.setattr(
+        factorial_mod,
+        "pretrain_representation",
+        lambda *a, **k: (calls.append(1), real_pretrain(*a, **k))[1],
+    )
+
+    with pytest.raises(RuntimeError, match="corrupt or unreadable"):
+        _load_or_build_representation(
+            path, system="DampedPendulum", regime="OURegime", data=data, rep_cfg=rep_cfg
+        )
+    print(f"[factorial D2c] pretrain_representation calls after a corrupt file: {calls}")
+    assert calls == []  # refused, never silently rebuilt over
+
+
+def test_cell_stratum_mismatch_against_loaded_artifact_refused_before_first_batch(tmp_path):
+    # simulates the exact defect this wave exists to prevent from ever
+    # reaching Trainer.fit's first batch: a representation for the WRONG
+    # stratum wired in as if it were "ou"'s. The preflight (construction of
+    # every cell's Trainer, BEFORE the run loop) must refuse it.
+    results_root = tmp_path / "results"
+    config = _repr_run_config(results_root)
+    cells = expand(config, dry_run=False)
+    datasets = {name: _build_dataset_for(cfg) for name, cfg in config["datasets"].items()}
+    wrong_artifact = _load_or_build_representation(
+        results_root / "wrong.pt",
+        system="NotDampedPendulum",
+        regime="NotOURegime",
+        data=datasets["ou"],
+        rep_cfg=config["representation"],
+    )
+    with pytest.raises(ValueError, match="stratum mismatch"):
+        _preflight_resolve_and_check_collisions(cells, datasets, {"ou": wrong_artifact})
