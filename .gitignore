@@ -86,6 +86,11 @@ GEMINI.md
 # --- Run artifacts (never committed; assets/ holds the final figures) ---
 /results/
 /results_amended/
+# phase-D roots (PROTOCOL.md section 14.6's four disjoint namespaces)
+/results_probe_d/
+/results_gate_d/
+/results_pilot_d/
+/results_factorial/
 *.npz
 
 # --- Private planning / candidacy context (never publish) ---
