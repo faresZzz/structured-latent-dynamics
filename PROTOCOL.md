@@ -1891,3 +1891,255 @@ retained values enter the same dated addendum as 14.3's other axes, committed be
 `cond(Sigma)` is on the list because this project has already been damaged once by
 badly-conditioned latents: the mu_J campaign measured 62.7, 1.5e7 and 1.3e5 across families,
 and per-coordinate normalization amplified the low-variance directions rather than taming them.
+
+## 15. Amendment 6 — the phase-D gate repairs and the second probe (dated 2026-08-07)
+
+### 15.0 Scope, and why it is committed now
+
+Probe round 1 (14.3) trained fifteen cells and scored all fifteen against the 12.3 gate;
+none passed (`results_probe_d/report.json`, read below). Rule R4 requires this amendment
+to be committed **before** the runs it authorizes: the second probe round, D3, D4. It is
+committed now, before any of the three executes.
+
+**What does NOT change**, stated explicitly so nothing below is read as reopening it:
+`gamma = 5`, `H_gate = 25`, `tau = 0.5`, the five-seeds-pass-individually rule of 12.4, the
+`e_h` metric of 12.1, and all of section 13 and section 14 except where this section
+expressly amends a specific paragraph (section 4's `h_fr`, in 15.2 below). The
+lower bound of 12.3 (`e_{H_gate} < min(e_pers, e_lin) / gamma`) is untouched; only the
+upper bound (`tau_1`) is superseded, and only for D3/D4 onward.
+
+### 15.1 The upper bound, second version — supersedes 12.3's `tau_1` rule for D3/D4 onward
+
+**The defect, derived a priori.** 12.3's `tau_1 = 3 * e_recon` was calibrated against "the
+score a perfect latent predictor would obtain": a predictor that outputs exactly the
+encoder's embedding of the next true state, which inherits the readout's own error and
+nothing else. That premise assumes zero *dynamical* error. Any predictor that is actually
+trained on a transition carries a component `delta` — the error of predicting the next
+latent from the current one — that is independent of `e_recon` and does not shrink when
+the encoder improves. The gate `e_1 < 3 * e_recon` therefore requires `delta <~ 2 *
+e_recon` to pass, which means a *better* encoder (lower `e_recon`) makes the bound
+*harder* for the predictor to clear, while a *worse* encoder loosens it. D2's own success
+at shrinking `e_recon` tightens D4 toward a bound the predictor cannot reach, and a
+degraded encoder would have made D4 easier — the incentive points the wrong way for a
+quantity that is supposed to be a floor, not a target. The pre-registered sanity condition
+of 12.3 (`3 * e_recon < e_1_pers`) only ever monitors one direction of this defect — a gate
+that is too loose (the trivial baseline beats the ceiling) — and has no corresponding check
+for the other direction, a ceiling so tight it is unattainable regardless of how well the
+predictor learns.
+
+**Causality, declared.** This amendment was motivated by a specification review conducted
+after the 14.3 probe's fifteen cells failed the gate. The argument above is a priori; the
+impulse to seek it was not, and this sentence exists so that no reader has to discover that
+from the git history.
+
+**The new rule.** `tau_1 = e_1_pers / gamma_1`, strict `<` comparison unchanged. `e_1_pers`
+is measured per-stratum at D2, on the same held-out split as `e_recon` (**val** —
+`pretrain.py`'s freeze step measures both `e_recon` and `e_1_pers` on the `val` split,
+never `test`), with zero trained predictors: it is already the quantity the artifact
+manifest carries (`FrozenRepresentationArtifact.manifest["e_1_pers"]`), so this rule adds
+no new measurement to D2, only a new use of one already made.
+
+**`gamma_1 = 2`, a declared judgment call**, bracketed the way `gamma` is bracketed in
+12.3:
+
+- `gamma_1 = 1` sets `tau_1 = e_1_pers` exactly — the gate would only require beating
+  one-step persistence, which is a cosmetic bar (persistence is beaten by construction
+  once a model does anything at all resembling the local dynamics).
+- On the probed stratum, `gamma_1 >~ 4` puts the bound *below* the measurement chain's
+  floor: `tau_1 < e_recon` once `gamma_1 > e_1_pers / e_recon`. Measured on the probe's
+  baseline representation (`results_probe_d/representations/DampedPendulum__OURegime__
+  a2aaac76__8012e421.pt`, the artifact `mlp_k__baseline` and ten of the fifteen probe-1
+  cells share): `e_1_pers = 0.0391210...` and `e_recon = 0.0096466...`
+  (`results_probe_d/report.json`, `mlp_k__baseline`), giving `e_1_pers / e_recon =
+  4.0554...` — so `gamma_1 ~= 4` is the point past which the bound is unattainable by
+  construction, independent of any predictor's quality.
+- The log-scale midpoint of the interval `(1, 4)` is `sqrt(1 * 4) = 2`. As with `k` in
+  12.3 and `gamma` in 12.3, **no literature standard exists for this factor**; it is
+  recorded as a judgment with its bracketing, not derived.
+
+**The two validity conditions, checked at D2, published, never adjusted:**
+
+- *discriminance*: `tau_1 < e_1_pers`. True by construction as soon as `gamma_1 > 1` —
+  12.3's old discriminance condition (the upper bound must sit strictly inside what
+  trivial persistence already achieves) is absorbed by the form of this rule, not
+  reasserted separately.
+- *attainability* (the direction 12.3 was missing): `tau_1 > e_recon`, i.e. `gamma_1 *
+  e_recon < e_1_pers`. A stratum that fails this is published **"ungated (upper bound
+  unattainable)"**, with its numbers unadjusted — the same non-negotiable stance 12.3
+  already takes for a failure of its own sanity condition.
+
+**The effect on the current stratum, quantified.** On the probe's baseline stratum:
+
+```
+tau_1 (old, 12.3) = 3 * e_recon        = 3 * 0.0096466... = 0.028940 (~0.0289)
+tau_1 (new, 15.1) = e_1_pers / gamma_1 = 0.039121... / 2   = 0.019561 (~0.0196)
+```
+
+`0.0196 < 0.0289`: the new rule **tightens** the bound on this stratum — a model needs a
+*smaller* `e_1` to pass than under the old rule. This is stated explicitly so that no
+reading of "the threshold was loosened after a failed probe" is possible; on the one
+stratum measured so far, the opposite happened.
+
+**The old reading stays published.** Section 12.3 is not edited by this section. The
+fifteen probe-1 cells' verdicts computed under the 12.3 rule remain on record in
+`phaseD-REVIEW-PACKET.md` section 5.3, untouched — the same precedent section 10 set for
+section 5's superseded constants and 14.10 set for 14.9's superseded loss: the old reading
+stays visible beside the new one, not overwritten.
+
+### 15.2 The training free-running horizon — supersedes section 4's `h_fr` for phase-D trainings
+
+`h_fr` goes from **5 to 25** (`= H_gate`) for all phase-D trainings from here on: probe
+round 2, D3, D4. Uniform across all families and arms — this is section 4's own fairness
+criterion ("no family gets a silently different schedule") applied to a knob section 4
+itself fixed. Section 4 is not edited; it remains Wave 3's v0 choice, on record as what it
+was. `E` is re-declared at `E0` if phase E inherits this budget.
+
+**Legitimacy, three arguments:**
+
+(i) **Ordering.** Section 4 (Wave 3) precedes the gate: `H_gate = 25` was fixed later, by
+amendment 3 (section 12.3). Training a model free-running on 5 steps while scoring it on
+25 is an inconsistency between two pre-registrations of different ages — the older one
+simply predates the number it now looks miscalibrated against — not a value chosen after
+seeing performance.
+
+(ii) **The gap was named in advance.** Section 14.3 itself listed `h_fr` as an axis
+"because training free-runs 5 steps and the gate scores 25... the parameter most likely to
+decide the gate." The intent to measure this gap was committed before the probe ran; only
+the authorization to *move* the entry value was missing (`h_fr` is not among the four
+14.1/14.2 entry values 14.3 declared the probe allowed to move).
+
+(iii) **The mechanism is measured.** The learned operator of the `mlp_k` arm (a
+context-scheduled `Ā(c_t)` — LPV/cocycle, never "Koopman", REGLES section 3) exposes a
+state-dependent field of local spectra via `local_operator`/`local_spectra_field`
+(`sld.audit.spectral`), display/screening only, never a stability certificate (REGLES
+section 5). Re-derived here, read-only, from the two checkpoints already on disk
+(`results_probe_d/runs/mlp_k__baseline` at `h_fr=5`, `results_probe_d/runs/mlp_k__h_fr_25`
+at `h_fr=25`), by sampling the field at every step of a genuine `H=25` free rollout on the
+probe's held-out (test) split: the median `|eigenvalue|` (max over the two-block spectrum,
+per sampled step) over that rollout goes from **1.229** at `h_fr=5` to **1.051** at
+`h_fr=25`; the value read at the rollout's first step goes from 1.166 to 1.051. Both
+readings support the same qualitative claim — a local spectral radius of roughly `~1.2` at
+`h_fr=5` collapsing to roughly `~1.05` at `h_fr=25` — and the intermediate checkpoints
+(`h_fr=10`, `h_fr=15`, also on disk) fall monotonically in between (median `1.093`,
+`1.066`). The `h_fr=5` field is also far less well-behaved along the rollout: its own
+maximum over the 25 sampled steps reaches `1.866`, against `1.053` at `h_fr=25` — training
+free-running only 5 steps leaves the operator's local behavior beyond step 5 essentially
+unconstrained, exactly what (i) and (ii) predict. This is a screening reading, not a
+stability proof, and it is reported as one.
+
+**Cost consequence, stated, not measured in this wave.** The free-running term grows from
+5 to 25 steps per update; for the family whose per-step cost is itself non-constant in
+sequence length (`transformer_k`), this is a superlinear increase in per-update cost, not
+a 5x one. This wave does not run the probe, so the actual wall-clock is not measured here;
+it is measured in probe round 2, against section 14.1's own monitoring ceilings (30
+min/run, 8h/campaign) — never hand-estimated, and never used as anything but a monitoring
+number per 14.1.
+
+### 15.3 Divergence at evaluation time (fills the gap between 11.7 and 12.4)
+
+Section 11.7 governs a training loss that becomes non-finite. It says nothing about an
+*evaluation* rollout — one built from a checkpoint that finished training cleanly — that
+itself leaves the finite domain during free-running scoring. That gap is declared closed
+here.
+
+**New terminal class, cell-seed level: `divergence (evaluation)`**, distinct from `ok`,
+`missing`, and the training-time `divergence` of section 11.7.
+
+- It **fails the gate**, in the spirit of section 12.4: an evaluation that never produced a
+  finite `e_h` curve has no eligible curve to compare against `tau_1`/`gamma`. No
+  substitution is allowed — the same rule section 12.4 already states for a diverged
+  training run.
+- Deterministic re-evaluation is allowed, because evaluation is a **pure function** of a
+  fixed checkpoint: unlike a training re-run (11.7 withdraws any determinism claim there),
+  two evaluations of the same checkpoint against the same split are measurable, not merely
+  asserted, to produce identical bytes — this is a checkable property, not a promise.
+- **Durable artifact.** The evaluator writes `eval_failure.json` atomically (tmp file +
+  `os.replace`, the same pattern already used for `results_probe_d/report.json` and for
+  section 14.7's checkpoints) into the run directory, carrying `config_hash`, `data_hash`,
+  `representation_digest`, `horizon`, `first_nonfinite_step` (or `null` if the curve never
+  went non-finite but some other refusal fired), `reason` (the exception message), and
+  `rule: "15.3"`. Idempotent on re-evaluation — re-running against the same checkpoint
+  overwrites the file with the same content, not a second, drifting copy.
+
+**Motivation.** Probe round 1 already had to improvise this case three times without a
+declared policy: `sld/experiments/probe.py`'s own `_fmt` docstring records that three
+separate printers in that module crashed on a divergent cell's `None` fields before a
+formatting helper was added, and `_run_cell` currently distinguishes a genuine rollout
+divergence from a real defect by string-matching `"non-finite"` in the caught exception's
+message — a single ad hoc filter standing in for a declared terminal class. That the gap
+had to be patched three times on one fifteen-cell probe is itself the evidence that it
+sits squarely on D4's path, not an edge case.
+
+### 15.4 The probe: round-1 regularization and round 2
+
+**(a) Round-1 regularization.** Section 14.3 committed `h_fr` in `{5, 10}`. The `mlp_k`
+axis table that actually ran (`sld/experiments/probe.py::_MLP_AXES`) includes `h_fr` values
+`{10, 15, 25}` in addition to the `h_fr=5` baseline — the `h_fr=15` and `h_fr=25` cells
+(`mlp_k__h_fr_15`, `mlp_k__h_fr_25`) exceed what 14.3 pre-registered before they ran. This
+ordering error — execution before authorization — is **noted and kept on record**, in the
+style of section 14.4's own treatment of a wrong earlier draft: not hidden, not deleted.
+Both cells are classified as valid exploratory results under section 9's journal, their
+numbers published exactly as measured (`results_probe_d/report.json`); they are not
+discarded, and they are the direct empirical input to 15.2(iii) above.
+
+**(b) Probe round 2, declared.** Namespace `results_probe_d/` (unchanged), one seed,
+exploratory under section 9 — it cannot move any threshold, per 14.3's own rule, carried
+forward unchanged. **Nine cells, a closed list:**
+
+| # | cell | knobs vs baseline |
+|---|---|---|
+| 1 | `mlp_k__hfr25_updates_2000` | h_fr=25, epochs=2000 |
+| 2 | `mlp_k__hfr25_updates_4000` | h_fr=25, epochs=4000 |
+| 3 | `mlp_k__hfr25_lr_3e-4` | h_fr=25, lr=3e-4 |
+| 4 | `mlp_k__hfr25_updates_4000_lr_3e-4` | h_fr=25, epochs=4000, lr=3e-4 |
+| 5 | `mlp_k__hfr25_walign_0` | h_fr=25, w_align=0 (pure autoencoder encoder) |
+| 6 | `transformer_k__hfr25` | h_fr=25 |
+| 7 | `transformer_k__hfr25_updates_2000` | h_fr=25, epochs=2000 |
+| 8 | `ssm_k__baseline` | h_fr=5, lr=3e-4 (14.2: the ssm backbone's own rate; the missing ssm comparison point) |
+| 9 | `ssm_k__hfr25` | h_fr=25, lr=3e-4 |
+
+Cells 8-9 exist because section 14.8 already names `ssm`/`ssm_k` as the most likely
+divergence candidate in D4 (repeated non-fatal `train_loss` excursions in the phase-B
+trace); round 1 never touched this family, and D4 would otherwise discover that blind.
+
+**Screening columns added to the report**: `rho_max_rollout` (the maximum, over the
+rollout, of the spectral radius of the field of local spectra — vocabulary per REGLES
+section 3, never "the spectrum" for a state-dependent operator) and `phi_norm_at_h` (the
+2-norm of the composed propagator at the last finite step). Both are **declared
+display/screening only, never a stability certificate**, per REGLES section 5 — the same
+doctrine `sld.audit.spectral`'s own module docstring already states for every function in
+that file.
+
+**Pre-declared reading criterion**, fixed before any of the nine cells runs: does there
+exist a cell with `m_low < 1` **and** `m_high < 1` under the committed gate (12.3 for the
+lower bound, 15.1 for the upper)? Whatever the result — yes or no — it is published with
+its margins, not with a bare label.
+
+### 15.5 Honesty declaration
+
+- **The `H_gate = 25` justification does not describe the OU stratum used by the probe.**
+  Measured, read-only, on the probe's own baseline representation and dataset (true
+  `sigma_train`, `DampedPendulum`/`OURegime`, `theta_ou=1.0`, the regime every phase-D
+  probe cell actually trains and evaluates on): the persistence baseline's `e_h` rises to
+  `e_25 = 0.7546` (matching `results_probe_d/report.json`'s own `e_25_persistence` for
+  `mlp_k__baseline` exactly) and **keeps rising** past `h=25` — `e_50 = 1.2798`, `e_60 =
+  1.3709` — with the maximum over `h in [1, 60]` occurring at `h=60`, not at `h=25`. There
+  is no peak at 25 on this stratum, unlike the `u=0` default-IC regime 12.3's own
+  justification measured (persistence rising to `2.07` at `h=25` and falling back to
+  `1.74` at `h=50` — a genuine peak, because the undriven pendulum oscillates). `H_gate =
+  25` is **kept** as a shared judgment call — one horizon, common to all six cells of every
+  stratum, is still the point of the 3x2 design (12.3) — but 12.3's *justification* is
+  re-scoped here to the regime where it was actually measured (`u = 0`); nothing in 12.3
+  is edited, the correction lives here.
+- **Split convention, declared.** `e_recon` and `e_1_pers` (hence `tau_1`) are measured on
+  **val** (`sld/encoders/pretrain.py`'s freeze step, both quantities); the gate itself
+  evaluates on **test** (`sld/experiments/gate.py::evaluate_run_free_rollout`, called from
+  `probe.py::_run_cell` with `data["test"]`). These are two i.i.d. draws from the same
+  distribution, not the same data scored twice — stated here so no future reader discovers
+  it as an inconsistency between 12.1's split and 12.3's floor.
+- **Decided, not derived**: `gamma_1 = 2`; `h_fr = 25` for phase D; the nine-cell list of
+  15.4(b).
+- **Measured before deciding**: `rho`/local-spectral-radius readings at the `h_fr=5` and
+  `h_fr=25` checkpoints (15.2); the ratio `e_1_pers / e_recon ~= 4.055` on the probed
+  stratum (15.1); the absence of a persistence peak through `h=60` on the OU stratum
+  (above).
