@@ -2143,3 +2143,215 @@ its margins, not with a bare label.
   `h_fr=25` checkpoints (15.2); the ratio `e_1_pers / e_recon ~= 4.055` on the probed
   stratum (15.1); the absence of a persistence peak through `h=60` on the OU stratum
   (above).
+
+## 16. Amendment 7 — the entry values retained from the probe, and probe round 3 (dated 2026-08-07)
+
+### 16.0 Scope, and why it is committed now
+
+Round 2 of the calibration probe has run and been read under 15.4(b)'s pre-declared
+criterion: **no cell passes both bounds**. The best cell,
+`mlp_k__hfr25_updates_4000_lr_3e-4`, misses at `m_low = 2.3246` / `m_high = 2.8673`
+(`results_probe_d/report.json`, 24 cells). Section 14.3 authorized exactly one
+consequence: the probe may move the entry values of 14.1/14.2, once, in a dated addendum
+committed before D3, applied uniformly to all six arms. Section 14.11 put the
+representation weights on the same addendum. This is that addendum. Per rule R4 it
+precedes every execution it authorizes — including probe round 3 (16.4), which it
+declares.
+
+The five author decisions it instantiates, each recorded 2026-08-07:
+
+- **D-i (budget)**: entry value 4000 updates; one measured doubling rung at 8000 read by
+  the pre-declared criterion of 16.1; ceiling = 2x the retained value.
+- **D-ii (learning-rate policy)**: option (b) of the decisions packet — uniform
+  re-selection at the D regime, all three backbones, by the declared procedure of 16.2.
+  The author's stated ground: the section-10 rates were selected under a regime that no
+  longer exists, and the goal is a system that trains, not fidelity to a pre-project
+  number.
+- **D-iii (ssm)**: covered by D-ii. If no listed rate trains the ssm family at the D
+  regime, that is a published result, not a repair item — no silent third path.
+- **D-iv (monitoring numbers)**: 30 min per run and 10 h per shard, 3 shards, at the
+  4000-update budget; both double mechanically if 8000 is retained (16.1).
+- **D-v (representation weights)**: neither keep `w_align = 1` by default nor retain
+  `w_align = 0` on quarter-budget evidence — measure the missing full-budget cell first
+  and decide by the two-sided criterion of 16.3.
+
+**Nothing in section 12.3 or 12.4 moves** — `H_gate = 25`, `γ = 5`, `τ = 0.5`, 15.1's
+`tau_1` rule with `gamma_1 = 2`, and the five-seeds-pass-individually rule are untouched,
+per 14.3's own boundary ("thresholds are not informed by model performance"). Also
+unmoved: the device (CPU, float32), `batch_episodes = 8`, `h_fr = 25` (15.2), the four
+namespace roots of 14.6, and the two remaining entry axes of 14.2:
+
+- **`target_params = 10 000` stands.** The probed alternative (40 000) left the gate
+  unreadable — `divergence_rollout`, published in the report — and nothing else was
+  measured; there is no basis for moving it.
+- **`n_episodes = 256` stands.** The 64-episode encoder is worse at its own job on both
+  of 14.11's encoder scores — `e_recon` 0.017597 vs 0.009647, `cond(Σ)` 4.899 vs 1.873 —
+  and no `h_fr = 25` cell ran at 64 episodes, so no evidence at the retained regime
+  weighs against 14.2's original data-to-parameter basis. The 64-episode cell's lower
+  raw `e_25` at the `h_fr = 5` baseline config (1.4525 vs 5.1837, one seed, both far
+  from the gate) is noted, not hidden; it does not outweigh the encoder-quality
+  measurements.
+
+### 16.1 The budget: entry value 4000, one measured rung at 8000, ceiling 2x
+
+- **Entry value: 4000 optimizer updates** (was 1000). Measured basis, at `h_fr = 25`,
+  one seed: `e_25` improves monotonically and does not saturate — 0.7393 → 0.6180 →
+  0.4241 for 1000/2000/4000 (−16.4 %, then −31.4 %); `e_1` drops −44.9 % then −46.4 %
+  over the same doublings; and the combined cell (4000 updates, lr 3e-4) improves BOTH
+  bounds at once (`e_1` 0.0561, `e_25` 0.3084), retiring round 1's apparent bound
+  conflict.
+- **The author's question — "and if 4000 is not enough?" — is answered by measurement,
+  not assertion.** Round 3 carries one budget rung: `mlp_k`, 8000 updates, `h_fr = 25`,
+  at the mlp backbone's retained rate (16.2). Criterion, fixed now: **8000 becomes the
+  entry value iff its `e_25`, read under 16.4's rules, improves on its 4000 twin by at
+  least 10 % (relative); otherwise 4000 stands.** Basis for the 10 % (decided, not
+  derived): the two measured doublings bought −16.4 % and −31.4 %; a doubling that buys
+  less than 10 % does not justify doubling the wall-clock of the entire 60-run campaign.
+- **Ceiling: 2x the retained value** (8000 if 4000 is retained, 16 000 if 8000 is) — the
+  same headroom ratio 14.1 set with 1000/2000. A budget above the ceiling is a new
+  amendment, and `CosineAnnealingLR(T_max=epochs)` still makes every budget its own
+  experiment, never a truncation or an extension of another (14.1, unchanged).
+- **Monitoring numbers (14.4's second category, re-declared with their measured basis)**:
+  **30 min per run** and **10 h per shard, 3 shards**, at the 4000 budget — the shard
+  ceiling supersedes 14.1's 8 h campaign ceiling, which 60 runs at the measured per-run
+  cost cannot fit. Basis, re-derived from the run artifacts (`train.log`, not from a
+  planning document): `mlp_k` at 4000 x `h_fr` 25 took 895.35 s and 861.59 s;
+  `transformer_k` at 2000 x `h_fr` 25 took 673.87 s, extrapolating to ~22.5 min at 4000;
+  60 runs x 15–25 min = 15–25 h sequential, 5–9 h on the proven `--shard i/k` mechanics
+  (14.7). If 8000 is retained, both numbers double (60 min per run, 20 h per shard).
+  Exceeding either stops the campaign for a re-plan; not a silent kill, not a terminal
+  verdict (14.1, unchanged).
+
+### 16.2 The learning rate: re-selected at the D regime, uniformly, by a declared procedure
+
+**What is kept from 14.2**: the learning rate is a property of the **backbone**, shared
+by its OFF and its ON arm, never a per-arm tuning — selecting per ON arm would confound
+the structure effect with a tuning effect, exactly as 14.2 said. **What moves**: the
+selection regime. Section 10's rates were selected at 200 updates, in the μ_J era,
+without a frozen encoder, at `h_fr = 5` — a regime nothing in phase D uses. 14.2 itself
+named the repair path ("repairing it means changing the OFF arm too, which is a new
+pre-registration"); this subsection is that pre-registration.
+
+The evidence that forces it, from the report:
+
+- `ssm_k` dies **in training** at its section-10 rate (3e-4) in both round-2 cells —
+  `failure.json` at epoch 30 (`h_fr = 5`) and epoch 36 (`h_fr = 25`), non-finite
+  `train_loss`/`val_loss` — the risk 14.8 named (min_ssm excursions to 4.7e14), realized
+  by the x20 budget. `h_fr = 25` does not save it.
+- `mlp_k` at the D budget is better served by 3e-4 than by its section-10 1e-4 **on both
+  bounds** (`e_25` 0.3084 vs 0.4241, `e_1` 0.0561 vs 0.1261, one seed).
+
+**The procedure** (mechanical; every rule below is fixed before any round-3 run):
+
+1. **Sweep** — nine runs: the three OFF arms (`mlp`, `transformer`, `min_ssm`) x lr in
+   {1e-4, 3e-4, 1e-3}, at 4000 updates, `h_fr = 25`, the stratum's frozen shipped
+   encoder, `n_episodes = 256`, `target_params = 10 000`, `batch_episodes = 8`, one
+   seed.
+2. **Selection criterion** — per backbone, the listed rate minimizing the OFF arm's
+   `e_25` under 16.4's reading rules (val split — never test, never an ON arm). A run
+   that fails to train or to evaluate finitely is excluded from the argmin; a diverged
+   run cannot win.
+3. **ON finitude screen** — declared as a screen, not a tuning: the backbone's ON arm
+   must complete training (11.7's `failure.json` absent) at the selected rate, 4000
+   updates, `h_fr = 25`, one seed. If the screen fails, the next lower listed rate is
+   taken for that backbone — OFF and ON both, preserving the shared-rate rule — and the
+   screen re-runs. No metric of the screen run is consulted for selection; only
+   completion is.
+4. **Exhaustion branch** — if the screen fails at 1e-4, the lowest listed rate, the
+   backbone has no trainable rate at the D regime among the declared list. That is a
+   result: D4 publishes it as such for that family (11.7 semantics, no inference), and
+   the comparative grid carries the fact rather than hiding the family. No off-list rate
+   is tried.
+5. **No redundant re-runs** — a screen cell whose exact configuration already ran to
+   completion in round 2 is satisfied by that artifact and is cited, not re-executed
+   (e.g. `mlp_k__hfr25_updates_4000_lr_3e-4` if mlp's selected rate is 3e-4).
+
+The selected rates apply to D3 and D4, OFF and ON arms both, and are recorded in the
+round-3 report plus a dated line in the phase-D progress note — outputs of this
+procedure, never new decisions.
+
+### 16.3 The representation weights: the full-budget measurement decides `w_align`
+
+The evidence on record, both stages, one seed: the `w_align = 0` encoder beats the
+shipped default on both encoder scores (`e_recon` 0.008524 vs 0.009647, `cond(Σ)` 1.321
+vs 1.873) and, at equal predictor config (`h_fr` 25, 1000 updates, lr 1e-4), on the
+gate's primary score (`e_25` 0.5643 vs 0.7393) — the opposite of 14.10's expected
+direction, on this fully observed stratum, as 14.11 itself named possible. Against it:
+its `e_1` is worse (0.4693 vs 0.4273) and its `m_high` reaches 23.99 — at a quarter of
+the D budget. The cell that would decide — `w_align = 0` at the full budget — does not
+exist. Round 3 adds it rather than deciding on quarter-budget evidence (decision D-v).
+
+- **The cell**: `mlp_k`, 4000 updates, `h_fr = 25`, the mlp backbone's retained rate
+  (16.2), on the `w_align = 0` encoder already pretrained and digest-pinned under
+  `results_probe_d/representations/`. Its **twin** is the same predictor config on the
+  shipped (`w_align = 1`) encoder — the 16.2 screen cell or its round-2 equivalent.
+- **Reading criterion, fixed now**: **`w_align = 0` is retained iff its cell completes
+  (training and evaluation both finite) AND strictly improves `e_25` AND does not worsen
+  `m_high`, versus the twin, under 16.4's reading rules. Mixed evidence keeps the
+  shipped default.** Basis for the two-sided rule: phase D freezes ONE encoder per
+  stratum, shared by all six arms (14.2) — an encoder that buys the long horizon by
+  degrading the one-step bound degrades `m_high` for the entire campaign, not for one
+  cell.
+- **If retained**: the pretraining objective is, in effect, 14.9's loss again —
+  reconstruction plus VICReg, no temporal term — and this section says plainly that the
+  measurement, at both stages, did not support 14.10's direction on this stratum; the
+  `view_offset` axis disappears with the term it parameterized. **If not retained**:
+  `w_align = 1` and `view_offset = 1` stand as shipped, and the tension 14.11 declared
+  stays declared.
+
+### 16.4 Probe round 3 — declared, closed, bounded
+
+- **Namespace** `results_probe_d/` (the four roots of 14.6 stay four), one seed,
+  exploratory under section 9. It moves no threshold — 14.3's rule, carried forward
+  unchanged. It is declared here, before any of its runs execute (R4).
+- **The closed list, in stage order** — later stages take earlier stages' mechanical
+  outputs (the retained rates) as inputs; the dependency is declared, never chosen after
+  looking:
+
+| stage | runs | cells |
+|---|---|---|
+| 1 | 9 | `{mlp, transformer, min_ssm}` x lr `{1e-4, 3e-4, 1e-3}`, 4000 updates, `h_fr = 25` (16.2 sweep) |
+| 2 | ≤ 3 + re-screens | `{mlp_k, transformer_k, ssm_k}` at the selected rate, 4000 x `h_fr` 25 (16.2 screen; round-2 artifacts satisfy identical configs) |
+| 3 | 2 | `mlp_k` 8000 x `h_fr` 25 x retained rate (16.1 rung); `mlp_k` 4000 x `h_fr` 25 x retained rate x `w_align = 0` encoder (16.3) |
+
+- **Reading rules, fixed now**: every selection or retention reading in this amendment —
+  16.1's rung, 16.2's argmin, 16.3's retention — is taken on the **val split**. Test is
+  never consulted for a decision; test-split numbers are published as measured, as
+  always, and decide nothing here. This extends 15.5's declared split convention: the
+  gate scores on test; anything that *selects* reads val. Where a criterion compares a
+  round-3 cell to a round-2 twin, the twin is **re-evaluated read-only on val from its
+  committed checkpoint** — evaluation is a pure function of a fixed checkpoint (15.3);
+  no twin is retrained.
+- **Cost, measured basis**: stage 1 ≈ 9 x 15–25 min ≈ 3 h; stage 2 ≤ 1 h; stage 3 ≈
+  45 min. Total ≈ 4–5 h CPU, within one session.
+- **Report columns** unchanged from 15.4(b), including the two screening columns —
+  display and screening only, never a stability certificate (REGLES section 5).
+
+### 16.5 Honesty declaration
+
+- **Decided, not derived**: the 10 % rung criterion (16.1); the rate list
+  {1e-4, 3e-4, 1e-3}; the two-sided `w_align` rule (16.3); the 2x ceiling ratio; the
+  30 min / 10 h x 3 monitoring numbers. Each carries its stated basis above; none is a
+  measurement.
+- **Measured before deciding**: every number cited in 16.0–16.3 was re-derived at the
+  decision session from `results_probe_d/report.json` (24 cells) or the run artifacts
+  themselves (`train.log` wall-clocks 895.35 s / 861.59 s / 673.87 s; the two ssm
+  `failure.json` files at epochs 30 and 36; the encoder scores), never copied from a
+  planning document (REGLES 7.2).
+- **The chain**: 14.3 declared what the probe may move; 14.11 put the representation
+  weights on the same addendum; the probe ran and was read under 15.4(b)'s pre-declared
+  criterion (no cell passes; best margin 2.87x); this amendment converts that reading
+  into entry values and mechanical criteria; and it is committed before round 3, D3, or
+  D4 executes anything it governs. The values round 3 pins (the rates, 4000-vs-8000,
+  `w_align`) are outputs of criteria fixed here — the entry values move once, by this
+  amendment, and nothing is chosen after looking at the runs it authorizes.
+- **Two known asymmetries, declared**: the rate sweep runs on the shipped encoder while
+  16.3 may retain the `w_align = 0` encoder, and the rates are selected at 4000 updates
+  while 16.1 may retain 8000; the rates are re-selected in neither event. One seed,
+  exploratory: the rate is a backbone property measured under a frozen encoder either
+  way, and each stage-3 comparison holds the rate fixed on both sides. If D4's measured
+  behavior contradicts these assumptions, that is reported, not repaired.
+- **The evaluation-path change this amendment requires is mechanical, not scientific**:
+  `probe.py` currently passes `data["test"]` to the evaluation path; round 3's selection
+  readings pass `data["val"]` to the same unchanged `gate.py` functions. No new
+  measurement is defined.
