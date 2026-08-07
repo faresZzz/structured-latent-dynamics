@@ -2355,3 +2355,111 @@ exist. Round 3 adds it rather than deciding on quarter-budget evidence (decision
   `probe.py` currently passes `data["test"]` to the evaluation path; round 3's selection
   readings pass `data["val"]` to the same unchanged `gate.py` functions. No new
   measurement is defined.
+
+## 17. Amendment 8 — the gradient guard, and the clipped re-run of round 3's ssm cells (dated 2026-08-07)
+
+### 17.0 Scope, and why it is committed now
+
+Round 3 published `min_ssm` diverging in training at all three listed rates (16.2's
+sweep: epoch 2, `inf train_loss`, every rate). Before that line is interpreted as a fact
+about the architecture, the author ordered a check: architecture, or harness? The answer
+is measured first, corroborated second:
+
+- **Measured, this repo, read-only instrumentation**: the global gradient norm at the
+  FIRST optimizer step is **2.4e18** for `min_ssm` against **28.2** for `mlp` — same
+  harness, same data, and a healthy epoch-0 forward loss (0.807 vs 1.547; `min_ssm`'s
+  forward pass at initialization is fine). Death occurs in ONE AdamW step: the epoch-1
+  loss scales quadratically with the learning rate (6.44e24 at 1e-4, 6.44e26 at 1e-3),
+  the signature of a single oversized parameter step, not of a drifting optimization.
+  The state transition itself is stable by construction (`A_bar = exp(delta * a_cont)`
+  in `(0, 1)`, the standard exponential parameterization) — the **gradients** explode
+  through the 25-step closed-loop BPTT, never the states.
+- **The literature** treats an unclipped optimizer under closed-loop multi-step BPTT as
+  an incomplete harness for any recurrent backbone: gradient-norm clipping is standard
+  in every published SSM world model (PlaNet at 1000; the Dreamer family at 100; R2I at
+  1000 for the world model; DRAMA at 100), the failure mode has a direct published
+  precedent (TD-MPC "sometimes diverges due to exploding gradients" — the TD-MPC2
+  paper, arXiv:2310.16828), and the theory for selective state-dependent gating losing
+  the LTI stability guarantees exists (Zubic & Scaramuzza, arXiv:2505.11602). No
+  published work trains an SSM's dynamics loss on a 25-step self-consumed rollout from
+  initialization without such a guard.
+
+This amendment adds ONE uniform optimizer guard (17.1), re-runs ONLY the ssm portion of
+round 3 under it plus one no-op verification cell (17.2), and stops there. **Nothing in
+section 12.3 or 12.4 moves.** Section 16's retained values — the rates, the 8000
+budget, `w_align = 1` — are not reopened: they stand conditioned on 17.2's no-op check,
+which is mechanical.
+
+### 17.1 The guard: global gradient-norm clipping, uniform, hashed
+
+- **`grad_clip = 100`**: the global L2 norm of the optimizer's parameter gradients is
+  clipped to 100 (`torch.nn.utils.clip_grad_norm_`) immediately before every optimizer
+  step.
+- **Uniform**: all six arms, every stratum, every seed, D3/D4 onward, and every
+  round-3c cell below. An optimizer guard is a budget/optimizer property, like the
+  learning rate (14.1's own doctrine: one budget for all six arms) — never a per-arm
+  tuning.
+- **The value, decided not derived**: the published range is 20-1000; 100 is the
+  Dreamer-family standard and sits more than 3x above the largest healthy-arm gradient
+  norm this repo has measured (~28-30), so the guard is a measured no-op for the arms
+  that already train and only intercepts pathological steps.
+- **Run identity**: `grad_clip` is an OPTIONAL config key. Absent, there is no clipping
+  and the canonical config — hence `config_hash` — is byte-identical to before this
+  amendment: every existing artifact keeps its identity and its resume. Present, it is
+  validated (finite, strictly positive, noisy refusal otherwise) and it is hashed: a
+  clipped run is a different experiment and carries a different identity, exactly as a
+  budget change does.
+- **Measurement added**: the trainer records the PRE-clip global gradient norm each
+  epoch as a metrics column, so the guard's activity is published wherever the run is —
+  a guard whose bite is not measured would be a silent knob.
+
+### 17.2 Round 3c — the clipped re-run, a closed list, and the no-op gate
+
+Namespace `results_probe_d/` (unchanged), one seed, exploratory under section 9, the
+reading rules of 16.4 verbatim (val decides, test published). The unclipped round-3
+records remain published untouched — round-3c cells carry NEW cell_ids (`__r3c_`), so a
+published divergence is never overwritten by its clipped sibling.
+
+Execution order is part of the declaration:
+
+| order | cell | knobs | role |
+|---|---|---|---|
+| 1 | `mlp__r3c_lr_1e-3` | = `mlp__r3_lr_1e-3` + grad_clip 100 | **no-op gate** |
+| 2-4 | `min_ssm__r3c_lr_1e-4/3e-4/1e-3` | 4000 updates, h_fr 25, grad_clip 100 | clipped sweep |
+| 5 | `ssm_k__r3c_screen_lr_<selected>` | 16.2(3) mechanics, grad_clip 100 | ON screen |
+
+- **The no-op gate, pre-declared reading**: a clip that never binds multiplies
+  gradients by exactly 1.0, so cell 1 must reproduce `mlp__r3_lr_1e-3` exactly — same
+  logged loss trajectory, same `e_25_val`. **Equal → the no-op is proven and every
+  section-16 retained value stands unconditionally. Not equal → STOP: cells 2-5 do not
+  run, the discrepancy is published, and the author decides.** No third path.
+- **ssm selection**: 16.2's procedure verbatim, restricted to the ssm backbone, over
+  cells 2-4 (argmin of `e_25_val` on val among cells that trained and evaluated
+  finitely; the screen's drop-down and exhaustion rules unchanged).
+- **Outcomes, both declared**: if the screen passes, the ssm backbone's rate joins
+  16.2's outputs and D3/D4 carry six trainable arms. If exhaustion repeats UNDER the
+  guard, 16.2(4)'s line stands — now robust: the interpretation "no trainable rate at
+  the D regime" henceforth carries "with the standard gradient guard in place", which
+  is the defensible form of the claim.
+
+### 17.3 Honesty declaration
+
+- **Decided, not derived**: the norm 100; re-running only the ssm cells — the no-op
+  gate is the declared bridge that lets every other section-16 value stand without a
+  full re-run.
+- **Measured before deciding**: 2.4e18 vs 28.2 (first-step gradient norms); the
+  quadratic-in-lr epoch-1 losses; the healthy epoch-0 forward loss; the healthy arms'
+  ~28-30 norms that anchor the choice of 100.
+- **A known deviation, named and kept**: AdamW applies weight decay uniformly here,
+  including to `a_log`/`W_delta`, where official Mamba practice exempts them
+  (`A_log._no_weight_decay` in state-spaces/mamba). Kept deliberately: per-family
+  optimizer recipes would break the uniformity this comparison rests on. Recorded so a
+  reader sees a choice, not an oversight.
+- **Not adopted, and why**: free-running weight/horizon curricula (they would reopen
+  15.2's measured `h_fr = 25`) and structurally bounded latents (SimNorm and kin —
+  representation design, 14.9/14.10 territory). Both remain available to a future
+  amendment if the guard alone does not settle the ssm question.
+- **The chain**: round 3 published the divergences; the author ordered the check; the
+  mechanism was measured before any remedy was declared; this amendment precedes every
+  run it authorizes (R4), and the unclipped records it responds to stay published
+  exactly as measured.
