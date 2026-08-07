@@ -24,7 +24,7 @@ from sld.experiments import probe
 from sld.experiments import protocol
 from sld.experiments.gate import RolloutDivergence
 from sld.experiments.protocol import GAMMA_1
-from sld.training.trainer import Trainer
+from sld.training.trainer import FAILURE_FILENAME, Trainer
 
 
 def _tiny_cell(cell_id: str = "test_cell") -> dict:
@@ -421,3 +421,128 @@ def test_representation_key_insensitive_to_h_fr(tmp_path, monkeypatch):
     w_align_other_knobs = dict(baseline_knobs, w_align=0.0)
     _resolve(w_align_other_knobs)
     assert len(calls) == 2
+
+
+# --------------------------------------------------------------------------
+# PROTOCOL.md section 11.7: training-time divergence, same object-not-message
+# doctrine as 15.3's RolloutDivergence handling above. Regression coverage
+# for the round-2 incident (ssm_k__baseline diverged at epoch 30, killing the
+# campaign at cell 23/24 because _run_cell had no handler for it -- only the
+# evaluation-time case was covered).
+# --------------------------------------------------------------------------
+
+
+def _write_failure_json(run_dir, *, config_hash: str, data_hash: str, epoch: int, reason: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    failure = {
+        "config_hash": config_hash,
+        "data_hash": data_hash,
+        "epoch": epoch,
+        "reason": reason,
+        "nonfinite_fields": ["train_loss", "val_loss"],
+        "train_loss": "nan",
+        "val_loss": "nan",
+        "exception_class": "RuntimeError",
+    }
+    (run_dir / FAILURE_FILENAME).write_text(_json.dumps(failure))
+
+
+def test_run_cell_training_divergence_returns_record_with_failure_json(tmp_path, monkeypatch):
+    """Positive: ``fit`` writes a terminal ``failure.json`` (the trainer's own
+    11.7 behaviour) and then raises -- ``_run_cell`` must RETURN a
+    ``divergence_training`` record, never propagate the exception."""
+    monkeypatch.setattr(probe, "PROBE_ROOT", tmp_path / "results_probe_d")
+    cell = _tiny_cell("ssm_k_divergence_cell")
+    ctx = probe.ProbeContext()
+
+    def diverging_fit(self, data):
+        _write_failure_json(
+            self.run_dir,
+            config_hash=self.config_hash,
+            data_hash=self.data_hash,
+            epoch=3,
+            reason="non-finite loss",
+        )
+        raise RuntimeError("nonfinite loss at epoch 3: train=nan, val=nan")
+
+    monkeypatch.setattr(Trainer, "fit", diverging_fit)
+
+    record = probe._run_cell(ctx, cell)
+    print(f"[probe] training divergence record: status={record['status']} verdict={record['verdict']} "
+          f"detail={record['divergence_detail']!r}")
+
+    assert record["status"] == "divergence_training"
+    assert record["verdict"] == "divergence"
+    assert record["e_25"] is None
+    assert record["e_1"] is None
+    assert record["rho_max_rollout"] is None
+    assert record["phi_norm_at_h"] is None
+    assert record["first_nonfinite_step"] is None
+    assert "non-finite loss" in record["divergence_detail"]
+    assert "epoch 3" in record["divergence_detail"]
+    # the representation-artifact fields remain computable and ARE filled in
+    # (11.7's "aborts without success artifacts" is about the PREDICTOR,
+    # never about the frozen, already-built representation)
+    assert record["e_recon"] is not None
+    assert record["readout_r2"] is not None
+    assert record["tau_1"] is not None
+    # NOT 15.3's file -- that governs evaluation only
+    assert not (Path(record["run_dir"]) / "eval_failure.json").exists()
+
+
+def test_run_cell_runtime_error_without_failure_json_propagates(tmp_path, monkeypatch):
+    """Negative (the one that counts): a bare ``RuntimeError`` with NO
+    ``failure.json`` on disk is an infrastructure defect, not a diagnosed
+    divergence -- it must propagate, never get labelled ``divergence_training``."""
+    monkeypatch.setattr(probe, "PROBE_ROOT", tmp_path / "results_probe_d")
+    cell = _tiny_cell("infra_crash_cell")
+    ctx = probe.ProbeContext()
+
+    def crashing_fit(self, data):
+        raise RuntimeError("CUDA out of memory")  # no failure.json written
+
+    monkeypatch.setattr(Trainer, "fit", crashing_fit)
+
+    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+        probe._run_cell(ctx, cell)
+
+
+def test_resume_preserves_training_divergence_without_retraining(tmp_path, monkeypatch):
+    """PROTOCOL.md 11.7: 'resume preserves it and does not retrain'. A
+    run_dir pre-seeded with ``failure.json`` (and no ``run_complete.json``)
+    must be classified ``divergence_training`` with ZERO calls to
+    ``Trainer.fit`` -- the object's mere existence is enough, fit() is never
+    re-attempted (pattern mirrors ``test_resume_skips_complete_cell_but_trains_incomplete_one``)."""
+    monkeypatch.setattr(probe, "PROBE_ROOT", tmp_path / "results_probe_d")
+    cell = _tiny_cell("resume_divergence_cell")
+    ctx = probe.ProbeContext()
+
+    knobs = cell["knobs"]
+    artifact, data, _cond_sigma = probe._get_representation(
+        ctx, knobs["n_episodes"], knobs["w_align"], knobs["view_offset"]
+    )
+    trainer_cfg = probe._trainer_config(cell)
+    probe_trainer = Trainer(trainer_cfg, representation=artifact)
+    run_dir = probe_trainer.resolve_run_dir(data)
+    _write_failure_json(
+        run_dir,
+        config_hash=probe_trainer.config_hash,
+        data_hash=probe_trainer.data_hash,
+        epoch=1,
+        reason="non-finite loss",
+    )
+
+    calls = []
+    real_fit = Trainer.fit
+
+    def counting_fit(self, data):
+        calls.append(1)
+        return real_fit(self, data)
+
+    monkeypatch.setattr(Trainer, "fit", counting_fit)
+
+    record = probe._run_cell(ctx, cell)
+    print(f"[probe] resume-preserves-divergence: status={record['status']} calls={len(calls)}")
+    assert record["status"] == "divergence_training"
+    assert len(calls) == 0  # 11.7: resume preserves it, never retrains
+    assert record["run_dir"] == str(run_dir)

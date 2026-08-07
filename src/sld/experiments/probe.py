@@ -86,7 +86,7 @@ from sld.experiments.protocol import H_GATE as _H_GATE
 from sld.experiments.protocol import TAU_VPT as _TAU_VPT
 from sld.predictors.base import PredictorState
 from sld.systems.damped_pendulum import DampedPendulum
-from sld.training.trainer import Trainer, data_fingerprint
+from sld.training.trainer import FAILURE_FILENAME, Trainer, data_fingerprint
 
 # --------------------------------------------------------------------------
 # Namespace root (PROTOCOL.md 14.3/14.6): a module-level Path, read
@@ -503,7 +503,16 @@ def _run_cell(ctx: ProbeContext, cell: dict) -> dict:
     (factorial's own sentinel discipline -- ``_factorial._validate_completion_sentinel``),
     and score it through ``gate.py``. Every value under ``e_*``/``m_*``/
     ``verdict``/``near_miss`` below is READ from ``evaluate_run_free_rollout``'s
-    return value, never recomputed (R1/R2)."""
+    return value, never recomputed (R1/R2).
+
+    A training-time divergence (PROTOCOL.md 11.7) is classified the SAME way
+    as an evaluation-time one (15.3) below: by the existence of the
+    trainer's own terminal artifact (``failure.json``), never by matching
+    ``fit``'s exception message. ``load_run``/``_operator_screening``/
+    ``evaluate_run_free_rollout`` all need a genuine checkpoint, so none of
+    them run on that path -- 11.7's own wording, "aborts without success
+    artifacts".
+    """
     knobs = cell["knobs"]
     artifact, data, cond_sigma = _get_representation(
         ctx, knobs["n_episodes"], knobs["w_align"], knobs["view_offset"]
@@ -513,12 +522,31 @@ def _run_cell(ctx: ProbeContext, cell: dict) -> dict:
     trainer = Trainer(trainer_cfg, representation=artifact)
     run_dir = trainer.resolve_run_dir(data)
     _require_under_root(run_dir)
+    failure_path = run_dir / FAILURE_FILENAME
 
     t0 = time.perf_counter()
     sentinel = _factorial._validate_completion_sentinel(run_dir)
-    if sentinel is None:
-        trainer.fit(data)
-        status = "trained"
+    if sentinel is None and failure_path.exists():
+        # PROTOCOL.md 11.7: "resume preserves it and does not retrain" -- a
+        # terminal failure.json from a PRIOR invocation of this exact cell,
+        # classified by its existence alone (same object-not-message
+        # doctrine as the RolloutDivergence handling below, 15.3). fit() is
+        # never called.
+        status = "divergence_training"
+    elif sentinel is None:
+        try:
+            trainer.fit(data)
+        except RuntimeError:
+            if not failure_path.exists():
+                # No terminal artifact from the trainer: an infrastructure
+                # defect (OOM, a bad config, ...), not a diagnosed
+                # divergence -- re-raised as-is so the campaign dies loudly
+                # instead of mislabeling it (mirrors 15.3's corruption/
+                # divergence split, on the training side).
+                raise
+            status = "divergence_training"
+        else:
+            status = "trained"
     else:
         status = "skipped_resume"
     wall_clock_s = time.perf_counter() - t0
@@ -529,17 +557,13 @@ def _run_cell(ctx: ProbeContext, cell: dict) -> dict:
     # (this module), never by regenerating the artifact. tau1_condition_holds
     # below stays exactly as it was: the historical trace of the OLD (12.3)
     # condition, recorded on the artifact at D2, never rewritten here.
+    # These are all properties of the REPRESENTATION artifact (built before
+    # the predictor stage, shared across cells), so they are computable and
+    # filled in even when the predictor's own training diverged below.
     e_1_pers = float(artifact.manifest["e_1_pers"])
     e_recon = float(artifact.e_recon)
     tau_1 = protocol.tau_1(e_1_pers)
     tau1_validity = protocol.tau1_validity(e_recon, e_1_pers)
-
-    # PROTOCOL.md 15.2(iii)/15.4(b): the field-of-local-spectra screening,
-    # independent of gate.py, computed unconditionally (unlike the e_*/m_*
-    # gate quantities below, this is not fabricated by a divergence -- it is
-    # informative EVEN WHEN the model's decoded rollout diverges).
-    run = load_run(run_dir)
-    rho_max_rollout, phi_norm_at_h, _last_finite_step = _operator_screening(run, artifact, data, _H_GATE)
 
     common = {
         "cell_id": cell["cell_id"],
@@ -562,9 +586,38 @@ def _run_cell(ctx: ProbeContext, cell: dict) -> dict:
         "readout_cond": float(artifact.readout.cond),
         "readout_indeterminate": bool(artifact.readout.indeterminate),
         "latent_cond_sigma": float(cond_sigma),
-        "rho_max_rollout": rho_max_rollout,
-        "phi_norm_at_h": phi_norm_at_h,
     }
+
+    if status == "divergence_training":
+        # 11.7's own durable artifact, read (never rewritten, never
+        # replaced) for its detail string. This is NOT 15.3's
+        # eval_failure.json -- that governs evaluation only, and is never
+        # written on this path: the trainer's failure.json already IS the
+        # terminal artifact 11.7 requires.
+        failure_payload = json.loads(failure_path.read_text())
+        return {
+            **common,
+            "status": status,
+            "divergence_detail": (
+                f"training diverged (11.7): {failure_payload['reason']} "
+                f"at epoch {failure_payload['epoch']}"
+            ),
+            "first_nonfinite_step": None,
+            "e_1": None, "e_25": None, "e_25_persistence": None, "e_25_linear": None,
+            "m_low": None, "m_high": None, "verdict": "divergence", "near_miss": None,
+            "rho_max_rollout": None, "phi_norm_at_h": None,
+        }
+
+    # PROTOCOL.md 15.2(iii)/15.4(b): the field-of-local-spectra screening,
+    # independent of gate.py, computed unconditionally on a genuinely
+    # trained/resumed run (unlike the e_*/m_* gate quantities below, this is
+    # not fabricated by a divergence -- it is informative EVEN WHEN the
+    # model's decoded rollout diverges). Never reached on the
+    # divergence_training path above: there is no checkpoint to load.
+    run = load_run(run_dir)
+    rho_max_rollout, phi_norm_at_h, _last_finite_step = _operator_screening(run, artifact, data, _H_GATE)
+    common["rho_max_rollout"] = rho_max_rollout
+    common["phi_norm_at_h"] = phi_norm_at_h
 
     try:
         result = evaluate_run_free_rollout(
@@ -627,7 +680,10 @@ _REPORT_SCHEMA = {
     "config_hash": "Trainer.config_hash for this cell's predictor run",
     "data_hash": "fingerprint of the dataset this cell trained/evaluated on",
     "run_dir": "where the predictor run's artifacts live, under results_probe_d/runs/",
-    "status": "'trained' (this invocation ran it) or 'skipped_resume' (already complete on disk)",
+    "status": "'trained' (this invocation ran it), 'skipped_resume' (already complete on disk), "
+    "'divergence_rollout' (15.3, evaluation-time divergence -- durable artifact = this module's own "
+    "eval_failure.json) or 'divergence_training' (11.7, training-time divergence -- durable artifact "
+    "= the trainer's own failure.json, classified by its existence, never retrained on resume)",
     "wall_clock_s": "seconds spent in the train-or-skip decision this invocation",
     "e_1": "gate.py's e_h at h=1 (free-running)",
     "e_25": "gate.py's e_h at h=H_gate=25 (free-running) -- PROTOCOL.md 12.3's primary score",
