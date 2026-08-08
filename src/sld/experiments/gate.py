@@ -333,22 +333,20 @@ def evaluate_free_rollout(
     )
 
 
-def evaluate_run_free_rollout(
-    run_dir: str | Path,
-    representation: FrozenRepresentationArtifact,
-    eval_split: dict,
-    *,
-    horizon: int,
-    tau: float,
-    h_gate: int,
-    gamma: float,
-    tau_1: float,
-) -> FreeRolloutResult:
-    """``evaluate_free_rollout``, resolved from a finished run directory.
+def load_run_double(
+    run_dir: str | Path, representation: FrozenRepresentationArtifact
+) -> tuple[nn.Module, nn.Module, dict]:
+    """Load ``run_dir``'s checkpoint, refuse an artifact this run was not
+    trained with, and return CPU FLOAT64 copies of its encoder/predictor plus
+    the run's own resolved config -- the shared preamble ``evaluate_run_free_rollout``
+    below needs, and that ``sld.experiments.oscillator_gold``'s D3 scoring
+    pass (PROTOCOL.md section 19.2's spectral/action bounds, which need the
+    raw predictor rather than a rollout) reuses rather than reimplements (R2:
+    one implementation of "is this artifact the one this run trained with").
 
     Loads ``{"encoder", "predictor", "config"}`` via ``load_run`` and refuses,
-    BEFORE any rollout, an artifact that is not the one this run actually
-    trained with: ``representation``'s own tamper/stratum preflight
+    BEFORE any use, an artifact that is not the one this run actually trained
+    with: ``representation``'s own tamper/stratum preflight
     (``validate_shared_representation``, against the run's recorded
     ``stratum_system``/``stratum_regime``) AND a direct digest comparison
     against the run's own recorded ``config["representation_digest"]`` -- two
@@ -359,8 +357,7 @@ def evaluate_run_free_rollout(
     ``load_run`` reconstructs the checkpoint's own float32 (training-time)
     modules; this function makes the float64 COPY audit doctrine requires
     (``sld.audit._common``) -- a fresh ``copy.deepcopy(...).double()``, never
-    mutating the checkpoint's own objects in place -- before handing them to
-    ``evaluate_free_rollout``.
+    mutating the checkpoint's own objects in place.
 
     Raises:
         ValueError: the run's config has no recorded ``representation_digest``
@@ -393,6 +390,34 @@ def evaluate_run_free_rollout(
 
     encoder64 = copy.deepcopy(run["encoder"]).double().eval()
     predictor64 = copy.deepcopy(run["predictor"]).double().eval()
+    return encoder64, predictor64, cfg
+
+
+def evaluate_run_free_rollout(
+    run_dir: str | Path,
+    representation: FrozenRepresentationArtifact,
+    eval_split: dict,
+    *,
+    horizon: int,
+    tau: float,
+    h_gate: int,
+    gamma: float,
+    tau_1: float,
+) -> FreeRolloutResult:
+    """``evaluate_free_rollout``, resolved from a finished run directory.
+
+    The run-vs-artifact preamble (``load_run`` + the digest/stratum refusal +
+    the float64 copy) is ``load_run_double`` above; this function is now
+    exactly that plus the ``evaluate_free_rollout`` call.
+
+    Raises:
+        ValueError: the run's config has no recorded ``representation_digest``
+            (a representation-less run has nothing to evaluate against here);
+            ``representation``'s own digest does not match it; or
+            ``validate_shared_representation`` refuses (tamper/stratum
+            mismatch/unusable ``e_recon``).
+    """
+    encoder64, predictor64, _cfg = load_run_double(run_dir, representation)
 
     return evaluate_free_rollout(
         encoder64,
@@ -454,6 +479,43 @@ _MEASURE_KEYS = frozenset(
 )
 
 
+def _read_run_digests(run_dir: Path) -> dict:
+    """``{"config_hash", "data_hash", "representation_digest"}``, RE-READ from
+    ``run_dir``'s own artifacts on disk -- never from caller memory.
+    ``config_hash``/``data_hash`` come from a freshly re-validated completion
+    sentinel (``sld.experiments.factorial._validate_completion_sentinel``,
+    the exact same validator ``sld-factorial`` itself trusts, reused rather
+    than reimplemented); ``representation_digest`` comes from the run's own
+    ``config.yaml``. A caller's in-memory bookkeeping could be stale (an
+    artifact rebuilt between resolving the cell and writing a verdict); the
+    bytes on disk cannot lie about themselves this way.
+
+    Shared by ``write_gate_artifact`` below and
+    ``sld.experiments.oscillator_gold``'s D3 ``d3_gold.json`` writer -- R2:
+    one implementation of "what digests does this run's own disk state
+    carry", not a second copy that could drift.
+
+    Raises:
+        ValueError: ``run_dir`` has no valid completion sentinel, or
+            ``config.yaml`` is unreadable.
+    """
+    sentinel = _validate_completion_sentinel(run_dir)
+    if sentinel is None:
+        raise ValueError(
+            f"run at {run_dir} has no valid completion sentinel (run_complete.json) -- "
+            "refusing to read digests for a run that is not verified complete"
+        )
+    try:
+        run_config = yaml.safe_load((run_dir / "config.yaml").read_text())
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"run at {run_dir}: config.yaml is unreadable ({exc!r})") from exc
+    return {
+        "config_hash": sentinel["config_hash"],
+        "data_hash": sentinel["data_hash"],
+        "representation_digest": run_config.get("representation_digest") if isinstance(run_config, dict) else None,
+    }
+
+
 def write_gate_artifact(
     run_dir: str | Path,
     result: FreeRolloutResult | RolloutDivergence,
@@ -506,21 +568,7 @@ def write_gate_artifact(
         if not math.isfinite(float(value)):
             raise ValueError(f"protocol[{key!r}] = {value!r} must be finite")
 
-    sentinel = _validate_completion_sentinel(run_dir)
-    if sentinel is None:
-        raise ValueError(
-            f"run at {run_dir} has no valid completion sentinel (run_complete.json) -- "
-            "refusing to write a gate artifact for a run that is not verified complete"
-        )
-    try:
-        run_config = yaml.safe_load((run_dir / "config.yaml").read_text())
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        raise ValueError(f"run at {run_dir}: config.yaml is unreadable ({exc!r})") from exc
-    digests = {
-        "config_hash": sentinel["config_hash"],
-        "data_hash": sentinel["data_hash"],
-        "representation_digest": run_config.get("representation_digest") if isinstance(run_config, dict) else None,
-    }
+    digests = _read_run_digests(run_dir)
 
     if isinstance(result, RolloutDivergence):
         status = "divergence"

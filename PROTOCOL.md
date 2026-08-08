@@ -2883,3 +2883,115 @@ optional key, recognised by the validator, still absent from `_DEFAULTS`, so 17.
 than fixed quietly, because a protocol value that no configuration could carry is exactly
 the class of defect this document exists to make visible — a declaration is worth what its
 wiring is worth (R7).
+
+## 20. Amendment 11 — D3's verdict: the path is proven, exact identification is not reached, and why that does not block D4 (dated 2026-08-08)
+
+### 20.0 What was run, and what it returned
+
+The D3 control of 19.7 executed in full: **10 cells** (`mlp_k`, `transformer_k` x 5 seeds)
+on `CoupledOscillators`, 8000 updates each, `results_d3_oscillator/`. **10/10 completed,
+zero divergence**, scored by `sld-d3-gate` into one `d3_gold.json` per run.
+
+| bound | threshold | result | median | spread |
+|---|---|---|---|---|
+| gain vs the two trivial baselines | `m_low < 1` | **10/10 PASS** | `0.156` | `0.148`-`0.170` |
+| state error at `H=100` | `< 1e-3` | **0/10** | `0.189` | `0.120`-`0.492` |
+| spectral, on `J_x` | `< 1e-3` | **0/10** | `0.112` | `0.070`-`0.158` |
+| action, on `J_u` | `< 1e-3` | **0/10** | `0.198` | `0.141`-`0.340` |
+
+`m_low = 0.156` means the models beat persistence and linear extrapolation by roughly
+**32x**, against the `gamma = 5` the gate demands. They learn. They do not identify.
+
+### 20.1 The failure is attributed, not assumed — four independent checks
+
+Each candidate explanation was tested and eliminated by its own measurement:
+
+1. **Not the data.** Ordinary least squares on the *same* training split (24 480
+   transitions) recovers the operator: spectral error **2.11e-08**, action **1.58e-07**,
+   free-rollout `e_100` **7.98e-14**. All three clear the 1e-3 bound by five to eleven
+   decades. *(A cross-check falls out of this: the LS spectral error `2.1141e-08` lands on
+   the RK4-vs-exact-ZOH gap 19.7 declared, `2.114e-08` — LS recovers the RK4 propagator to
+   machine precision and its residual **is** the integrator gap, confirmed by a path
+   entirely independent of the one that declared it.)*
+2. **Not the architecture.** The phase-C gold, parameters planted, reproduces the exact ZOH
+   solution at `1.9e-15` — the optimum exists inside the hypothesis class the runs used.
+3. **Not the budget, at any proportionate scale.** The validation curve's decay flattens
+   from `-1.66` decades per 1000 updates over epochs 0-1000 to `-0.023` over 6000-8000.
+   Closing 1.24 decades at the terminal rate would take **50 000-100 000 further updates**
+   — 7 to 13 times the declared budget — under a log-linear extrapolation that such curves
+   flatter, not honour.
+4. **Not over-parameterised state-dependence.** The hypothesis that the contextual head
+   spends its freedom overfitting an LTI truth was **tested and refuted**: forcing
+   `W_theta = 0` (the exactly-constant operator, the LTI form) makes both bounds *worse* —
+   spectral `0.130 -> 0.190`, action `0.138 -> 0.947`. The learned state-dependence carries
+   real signal, and the action response is almost entirely context-driven.
+
+**What remains, by elimination and by measurement**: under the declared regime — AdamW at
+`lr = 1e-3`, 8000 updates, batch of 8 episodes, the JEPA-style latent loss with
+`h_fr = 25` — gradient descent converges to a solution roughly **200x** worse than one
+ordinary least squares finds in closed form on the same data. **The threshold is not
+mis-specified**: 19.7's `1e-3` is attainable, demonstrably, and is therefore left exactly
+where it was. No threshold moves in this section.
+
+### 20.2 The decision
+
+**Author's decision, this date**: D3 is closed with its declared purpose met and its
+exactness bounds published as a **documented negative result** — the same treatment
+section 18 gave the `ssm` family, and for the same reason: what was tried, what each
+attempt proved, and why it does not reach, are all on record before the conclusion is
+drawn.
+
+- **D3's declared purpose is met.** Section 6 of the phase-D plan states it: *"le chemin
+  train→checkpoint→rollout est alors prouvé"*. It is — 10/10 complete, zero divergence,
+  verdicts computed from disk artifacts and persisted atomically.
+- **The exactness bounds are a named negative**, published with 20.1's four checks
+  attached. They are not retried, not softened, and not quietly dropped.
+- **D3 does not block D4**, and the reason is a difference in kind, not convenience:
+  D4's gate is **relative** — beat the trivial baselines by `gamma`, and hold `e_1` under
+  `tau_1` — while D3's failing bounds are **absolute** fidelity to an analytic solution.
+  D3's own cells pass the relative criterion **10/10 with a 32x margin**, which is direct
+  positive evidence on the very criterion D4 applies. A gate may proceed on a criterion its
+  own control passed.
+- **The caveat this creates is carried forward, not shed.** Every statement D4 and phase E
+  make about the structured arms is a statement about what the declared optimizer reaches,
+  never about what the structure can express. Wherever the 2x2 grid's results are
+  published, this is published with them.
+
+### 20.3 What this result is worth
+
+It is not a disappointment to be managed. On a linear system whose exact solution is
+representable by the architecture **and** recoverable from the data by ordinary least
+squares, the declared training regime lands two decades away. That is a measured statement
+about the optimisation landscape of structured latent dynamics: **the structural prior
+contains the exact solution without making it reachable by gradient descent.** It bears
+directly on the project's thesis, and it is the kind of negative that is only available to
+someone who built the analytic reference first.
+
+### 20.4 Two dated precisions to section 19
+
+- **19.1's `e_recon = 3.3e-8`** was measured on the evaluator's fixture, not on this
+  stratum. Measured on the oscillator stratum itself: `e_recon = 2.60e-08`,
+  `e_1_pers = 0.0777`, attainability margin **1.5e6x**. The conclusion is unchanged and the
+  precise number now belongs to the stratum it describes.
+- **19.3's diagnostic is realised as the floor measurement.** "The same trained cells
+  through the frozen chain" is not executable — a predictor trained in one latent cannot be
+  evaluated in another. What carries 19.1's whole argument is the floor, and it was
+  measured on the same oscillator stratum with D4's own declared representation
+  hyperparameters: **`e_recon` identity `2.60e-08` versus pretrained `0.0288`**. The frozen
+  chain's floor sits **28.8x ABOVE** D3's 1e-3 bound on this system. Had D3 run through it,
+  as the plan literally prescribed, the milestone would have been arithmetically impossible
+  to pass and the repo would have published "the structured predictors do not learn" when
+  the measured fact is "the shared representation does not reconstruct this finely". This
+  is the single most expensive error the amendment avoided, and it is recorded as such.
+
+### 20.5 Honesty declaration
+
+- **Decided, not derived**: that the exactness failure is published rather than chased, and
+  that it does not block D4. The evidence in 20.1 is measured; the decision on what to do
+  about it is mine.
+- **A hypothesis of mine was refuted by its own test** (20.1, check 4) and the refutation is
+  recorded rather than the hypothesis quietly dropped.
+- **No threshold moved.** Attainability was established *before* deciding what to do, which
+  is what makes leaving `1e-3` in place an argument rather than a stubbornness.
+- **R4**: this section precedes the D4 execution that its "does not block" clause
+  authorizes.

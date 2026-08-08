@@ -91,6 +91,12 @@ GEMINI.md
 /results_gate_d/
 /results_pilot_d/
 /results_factorial/
+# D3 control (PROTOCOL.md section 19.7): a fifth root, disjoint from the four
+# above -- a control is not a gate, its resume sentinels must not be
+# adoptable by one. D3's own non-gating section 19.3 diagnostic writes to a
+# sixth, separate root.
+/results_d3_oscillator/
+/results_d3_diagnostic/
 *.npz
 
 # --- Private planning / candidacy context (never publish) ---

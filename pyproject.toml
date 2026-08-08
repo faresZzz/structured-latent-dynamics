@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 sld-factorial = "sld.experiments.factorial:main"
 sld-gate = "sld.experiments.gate:main"
+sld-d3-gate = "sld.experiments.oscillator_gold:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
