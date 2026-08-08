@@ -23,16 +23,30 @@ is exactly two things:
    or a scale refit on the evaluation split -- and refuse an artifact whose
    digest does not match the digest the run recorded at train time
    (``evaluate_run_free_rollout``).
+
+This file gained a second half (the gate PERSISTENCE + CAMPAIGN section
+below): the verdict ``evaluate_free_rollout``/``evaluate_run_free_rollout``
+compute was, until then, always calculated and immediately discarded -- no
+``gate.json``, no per-run persistence, no campaign, nothing indexed. The
+split is structural, not just a comment: everything ABOVE this point is pure
+computation (no ``json``/``os``/``csv``/``yaml`` touched), everything BELOW
+reads or writes disk.
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
+import csv
+import json
+import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 from torch import nn
 
 from sld.audit._common import require_cpu_float64_module
@@ -46,6 +60,16 @@ from sld.audit.rollout import (
 )
 from sld.encoders.pretrain import FrozenRepresentationArtifact, apply_readout, representation_digest
 from sld.encoders.pretrain import validate_shared_representation
+from sld.experiments import protocol as protocol_mod
+from sld.experiments.factorial import (
+    _build_dataset_for,
+    _parse_shard,
+    _preflight_resolve_and_check_collisions,
+    _resolve_stratum_representations,
+    _shard_cells,
+    _validate_completion_sentinel,
+    expand,
+)
 from sld.experiments.loading import load_run
 
 
@@ -382,3 +406,541 @@ def evaluate_run_free_rollout(
         gamma=gamma,
         tau_1=tau_1,
     )
+
+
+# ==============================================================================
+# PERSISTENCE (I/O starts here). Nothing above this line touches disk; every
+# function below does. ``gate.json`` is this module's own ``run_complete.json``
+# -- same discipline, deliberately copied: written LAST, atomically (temp file
+# + ``os.replace`` in the SAME directory), and read back through a validator
+# that trusts nothing about the bytes on disk (``sld.training.trainer``'s
+# ``RUN_COMPLETE_FILENAME``/``_validate_completion_sentinel`` doctrine, reused
+# rather than reinvented -- R2).
+# ==============================================================================
+
+_SCHEMA_VERSION = "gate/1"
+_STATUSES = frozenset({"learns", "does_not_learn", "divergence"})
+
+# closed schemas, exactly like factorial._SENTINEL_KEYS: a missing OR an
+# extra key both fail validation, never silently tolerated.
+_TOP_KEYS = frozenset(
+    {"schema", "identity", "digests", "split", "protocol", "measures", "status", "first_step"}
+)
+_IDENTITY_KEYS = frozenset({"cell_id", "arm", "seed", "stratum_system", "stratum_regime", "run_dir"})
+_DIGEST_KEYS = frozenset({"config_hash", "data_hash", "representation_digest"})
+# every threshold the verdict was ACTUALLY computed from, plus what tau_1 was
+# derived from (PROTOCOL.md section 15.1) -- so a later change to any one of
+# them is detectable against a gate.json already on disk (read_gate_artifact's
+# ``expected_protocol``).
+_PROTOCOL_KEYS = frozenset(
+    {"h_gate", "gamma", "tau_1", "tau_vpt", "horizon", "gamma_1", "e_1_pers", "e_recon", "attainable"}
+)
+_MEASURE_KEYS = frozenset(
+    {
+        "e_h",
+        "persistence_e_h",
+        "linear_e_h",
+        "e_1",
+        "e_h_gate",
+        "m_low",
+        "m_high",
+        "lower_bound",
+        "upper_bound",
+        "near_miss",
+        "vpt_median",
+        "vpt_censored",
+        "per_episode_vpt",
+    }
+)
+
+
+def write_gate_artifact(
+    run_dir: str | Path,
+    result: FreeRolloutResult | RolloutDivergence,
+    *,
+    identity: dict,
+    protocol: dict,
+    split: str,
+) -> Path:
+    """Persist one run's positive-control verdict to ``run_dir/gate.json``.
+
+    ``result`` is either the successful ``FreeRolloutResult``
+    ``evaluate_run_free_rollout`` returned, or the ``RolloutDivergence`` it
+    raised -- the caller catches that exception and hands the exception
+    OBJECT straight to this function rather than re-deriving a status from a
+    caught message, so ``first_step`` is carried through structurally.
+
+    ``identity`` (``cell_id``/``arm``/``seed``/``stratum_system``/
+    ``stratum_regime``/``run_dir``) is an opaque echo of whatever the caller
+    (the campaign) already resolved for this cell -- it is NOT re-derived
+    here, because none of it (which grid cell this is, which backbone/
+    structure arm) is recoverable from the run's own artifacts alone.
+
+    ``digests`` (``config_hash``/``data_hash``/``representation_digest``),
+    by contrast, are NEVER taken from the caller: they are re-read from the
+    run's own artifacts on disk right here -- ``config_hash``/``data_hash``
+    from a freshly re-validated completion sentinel
+    (``sld.experiments.factorial._validate_completion_sentinel``, the exact
+    same validator ``sld-factorial`` itself trusts, reused rather than
+    reimplemented), ``representation_digest`` from the run's own
+    ``config.yaml``. A caller's in-memory bookkeeping could be stale (an
+    artifact rebuilt between resolving the cell and writing the gate); the
+    bytes on disk cannot lie about themselves this way.
+
+    Raises:
+        ValueError: ``identity`` or ``protocol`` does not carry exactly its
+            required keys; a ``protocol`` threshold is non-finite; ``run_dir``
+            has no valid completion sentinel (refuses to gate an unfinished
+            or unverified run); ``config.yaml`` is unreadable; ``result`` is
+            neither a ``FreeRolloutResult`` nor a ``RolloutDivergence``.
+    """
+    run_dir = Path(run_dir)
+
+    if set(identity) != _IDENTITY_KEYS:
+        raise ValueError(f"identity must carry exactly {sorted(_IDENTITY_KEYS)}, got {sorted(identity)}")
+    if set(protocol) != _PROTOCOL_KEYS:
+        raise ValueError(f"protocol must carry exactly {sorted(_PROTOCOL_KEYS)}, got {sorted(protocol)}")
+    for key, value in protocol.items():
+        if key == "attainable":
+            continue
+        if not math.isfinite(float(value)):
+            raise ValueError(f"protocol[{key!r}] = {value!r} must be finite")
+
+    sentinel = _validate_completion_sentinel(run_dir)
+    if sentinel is None:
+        raise ValueError(
+            f"run at {run_dir} has no valid completion sentinel (run_complete.json) -- "
+            "refusing to write a gate artifact for a run that is not verified complete"
+        )
+    try:
+        run_config = yaml.safe_load((run_dir / "config.yaml").read_text())
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"run at {run_dir}: config.yaml is unreadable ({exc!r})") from exc
+    digests = {
+        "config_hash": sentinel["config_hash"],
+        "data_hash": sentinel["data_hash"],
+        "representation_digest": run_config.get("representation_digest") if isinstance(run_config, dict) else None,
+    }
+
+    if isinstance(result, RolloutDivergence):
+        status = "divergence"
+        first_step = result.first_step
+        measures = None
+    elif isinstance(result, FreeRolloutResult):
+        pc = result.positive_control
+        status = pc.verdict
+        first_step = None
+        measures = {
+            "e_h": result.e_h.tolist(),
+            "persistence_e_h": result.persistence_e_h.tolist(),
+            "linear_e_h": result.linear_e_h.tolist(),
+            "e_1": float(result.e_h[0]),
+            "e_h_gate": float(result.e_h[protocol["h_gate"] - 1]),
+            "m_low": pc.m_low,
+            "m_high": pc.m_high,
+            "lower_bound": pc.lower_bound,
+            "upper_bound": pc.upper_bound,
+            "near_miss": pc.near_miss,
+            "vpt_median": result.vpt_median,
+            "vpt_censored": result.vpt_censored,
+            "per_episode_vpt": result.vpt_value.tolist(),
+        }
+    else:
+        raise ValueError(
+            f"result must be a FreeRolloutResult or a RolloutDivergence, got {type(result)!r}"
+        )
+
+    payload = {
+        "schema": _SCHEMA_VERSION,
+        "identity": identity,
+        "digests": digests,
+        "split": split,
+        "protocol": protocol,
+        "measures": measures,
+        "status": status,
+        "first_step": first_step,
+    }
+
+    gate_path = run_dir / "gate.json"
+    tmp_path = gate_path.with_name(gate_path.name + ".tmp")
+    tmp_path.write_text(json.dumps(payload))
+    os.replace(tmp_path, gate_path)
+    return gate_path
+
+
+def read_gate_artifact(
+    run_dir: str | Path,
+    *,
+    expected_protocol: dict | None = None,
+    expected_digests: dict | None = None,
+) -> dict:
+    """Load and VALIDATE ``run_dir/gate.json`` -- trusts nothing about the
+    bytes on disk, same doctrine as ``factorial._validate_completion_sentinel``.
+
+    ``expected_protocol``/``expected_digests`` are the caller's OWN current
+    values (e.g. the live ``protocol.py`` constants, or a freshly recomputed
+    representation digest); any key present there that disagrees with what
+    is recorded in ``gate.json`` is a refusal naming that key -- this is
+    what makes "a threshold changed after the run" or "the representation
+    moved since this verdict was written" detectable rather than silently
+    stale.
+
+    Raises:
+        ValueError: ``gate.json`` is missing, corrupt/unreadable, not schema
+            ``"gate/1"``, missing a required key at any level, carries an
+            unknown ``status``, carries a non-finite value where one is
+            required (NaN is refused everywhere; the VPT fields additionally
+            permit ``inf`` -- a censored VPT is a legitimate value, per
+            PROTOCOL.md section 14.5), is internally inconsistent (a
+            ``"divergence"`` status with non-null ``measures``, or a non-
+            ``"divergence"`` status with a non-null ``first_step``), or
+            disagrees with a caller-supplied ``expected_protocol``/
+            ``expected_digests`` entry.
+    """
+    run_dir = Path(run_dir)
+    path = run_dir / "gate.json"
+    if not path.exists():
+        raise ValueError(f"no gate.json at {path}")
+    try:
+        payload = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeError) as exc:
+        raise ValueError(f"gate.json at {path} is corrupt or unreadable ({exc!r})") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"gate.json at {path} is not a JSON object")
+
+    if payload.get("schema") != _SCHEMA_VERSION:
+        raise ValueError(
+            f"gate.json at {path} has schema {payload.get('schema')!r}, expected {_SCHEMA_VERSION!r}"
+        )
+    missing_top = _TOP_KEYS - set(payload)
+    if missing_top:
+        raise ValueError(f"gate.json at {path} is missing top-level keys {sorted(missing_top)}")
+
+    identity = payload["identity"]
+    if not isinstance(identity, dict) or set(identity) != _IDENTITY_KEYS:
+        raise ValueError(f"gate.json at {path}: identity must carry exactly {sorted(_IDENTITY_KEYS)}")
+
+    digests = payload["digests"]
+    if not isinstance(digests, dict) or set(digests) != _DIGEST_KEYS:
+        raise ValueError(f"gate.json at {path}: digests must carry exactly {sorted(_DIGEST_KEYS)}")
+
+    protocol = payload["protocol"]
+    if not isinstance(protocol, dict) or set(protocol) != _PROTOCOL_KEYS:
+        raise ValueError(f"gate.json at {path}: protocol must carry exactly {sorted(_PROTOCOL_KEYS)}")
+    for key, value in protocol.items():
+        if key == "attainable":
+            continue
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            raise ValueError(f"gate.json at {path}: protocol[{key!r}] = {value!r} is not a finite number")
+
+    status = payload["status"]
+    if status not in _STATUSES:
+        raise ValueError(f"gate.json at {path}: unknown status {status!r}")
+
+    first_step = payload["first_step"]
+    measures = payload["measures"]
+    if status == "divergence":
+        if measures is not None:
+            raise ValueError(f"gate.json at {path}: status is 'divergence' but measures is not null")
+        if not isinstance(first_step, int) or isinstance(first_step, bool) or first_step < 1:
+            raise ValueError(
+                f"gate.json at {path}: status is 'divergence', first_step must be a positive "
+                f"int, got {first_step!r}"
+            )
+    else:
+        if first_step is not None:
+            raise ValueError(
+                f"gate.json at {path}: status is {status!r} but first_step is not null "
+                f"(got {first_step!r})"
+            )
+        if not isinstance(measures, dict) or set(measures) != _MEASURE_KEYS:
+            raise ValueError(f"gate.json at {path}: measures must carry exactly {sorted(_MEASURE_KEYS)}")
+        for key in ("e_h", "persistence_e_h", "linear_e_h"):
+            values = measures[key]
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"gate.json at {path}: measures[{key!r}] must be a non-empty list")
+            if not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                for v in values
+            ):
+                raise ValueError(f"gate.json at {path}: measures[{key!r}] contains a non-finite value")
+        for key in ("e_1", "e_h_gate", "m_low", "m_high"):
+            value = measures[key]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+                raise ValueError(f"gate.json at {path}: measures[{key!r}] = {value!r} is not a finite number")
+        for key in ("lower_bound", "upper_bound", "near_miss"):
+            if not isinstance(measures[key], bool):
+                raise ValueError(f"gate.json at {path}: measures[{key!r}] must be a boolean")
+        vpt_median = measures["vpt_median"]
+        if (
+            not isinstance(vpt_median, (int, float))
+            or isinstance(vpt_median, bool)
+            or math.isnan(vpt_median)
+        ):
+            raise ValueError(f"gate.json at {path}: measures['vpt_median'] = {vpt_median!r} is NaN or invalid")
+        vpt_censored = measures["vpt_censored"]
+        if not isinstance(vpt_censored, int) or isinstance(vpt_censored, bool) or vpt_censored < 0:
+            raise ValueError(
+                f"gate.json at {path}: measures['vpt_censored'] must be a non-negative int, "
+                f"got {vpt_censored!r}"
+            )
+        per_episode_vpt = measures["per_episode_vpt"]
+        if not isinstance(per_episode_vpt, list) or not per_episode_vpt:
+            raise ValueError(f"gate.json at {path}: measures['per_episode_vpt'] must be a non-empty list")
+        if any(
+            not isinstance(v, (int, float)) or isinstance(v, bool) or math.isnan(v)
+            for v in per_episode_vpt
+        ):
+            raise ValueError(f"gate.json at {path}: measures['per_episode_vpt'] contains NaN")
+
+    if expected_protocol is not None:
+        for key, expected_value in expected_protocol.items():
+            if key not in _PROTOCOL_KEYS:
+                raise ValueError(f"expected_protocol names unknown threshold {key!r}")
+            if protocol[key] != expected_value:
+                raise ValueError(
+                    f"gate.json at {path}: protocol threshold {key!r} changed since this run's "
+                    f"gate was written -- recorded {protocol[key]!r}, expected {expected_value!r}"
+                )
+
+    if expected_digests is not None:
+        for key, expected_value in expected_digests.items():
+            if key not in _DIGEST_KEYS:
+                raise ValueError(f"expected_digests names unknown digest {key!r}")
+            if digests[key] != expected_value:
+                raise ValueError(
+                    f"gate.json at {path}: digest {key!r} changed since this run's gate was "
+                    f"written -- recorded {digests[key]!r}, expected {expected_value!r}"
+                )
+
+    return payload
+
+
+# ------------------------------------------------------------------------
+# The campaign: the same experiment YAML sld-factorial trains from, walked
+# again -- read-only over the trained runs, never a second training path.
+# ------------------------------------------------------------------------
+
+
+def _gate_cell_status(run_dir: Path) -> tuple[str, str, str]:
+    """``(status, m_low, m_high)`` for one cell's ``run_dir``, read from
+    ``gate.json`` alone -- mirrors ``factorial._cell_status``'s discipline:
+    read from DISK, never from what this process happened to compute, so a
+    shard that never touched this cell still reports another shard's
+    already-written verdict correctly."""
+    gate_path = Path(run_dir) / "gate.json"
+    if not gate_path.exists():
+        return "missing", "", ""
+    try:
+        payload = read_gate_artifact(run_dir)
+    except ValueError:
+        # present but untrustworthy -- distinct from both a valid verdict
+        # and a cell that was never gated at all (same M9 doctrine
+        # factorial._cell_status applies to an invalid run_complete.json)
+        return "invalid_gate", "", ""
+    status = payload["status"]
+    measures = payload.get("measures")
+    if not measures:
+        return status, "", ""
+    return status, str(measures["m_low"]), str(measures["m_high"])
+
+
+def _write_gate_index(results_root: Path, exp_name: str, cells: list[dict]) -> None:
+    """Regenerate ``results_root/exp_name/gate_index.csv`` from the full,
+    resolved cell list -- ``factorial._write_index``'s own contract, copied:
+    ALWAYS the full expected grid (never just this shard's slice), atomic
+    write (temp file + ``os.replace`` in the same directory). A cell this
+    invocation never touched, or never trained at all, appears with status
+    ``"missing"`` rather than being silently absent from the file.
+    """
+    index_dir = results_root / exp_name
+    index_dir.mkdir(parents=True, exist_ok=True)
+    final_path = index_dir / "gate_index.csv"
+    tmp_path = final_path.with_name(final_path.name + ".tmp")
+    with open(tmp_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["run_dir", "regime", "family", "structure", "seed", "status", "m_low", "m_high"])
+        for cell in cells:
+            run_dir = cell["run_dir"]
+            status, m_low, m_high = _gate_cell_status(run_dir)
+            writer.writerow(
+                [run_dir, cell["dataset"], cell["family"], cell["structure"], cell["seed"], status, m_low, m_high]
+            )
+    os.replace(tmp_path, final_path)
+
+
+def _evaluate_gate_cell(
+    cell: dict,
+    datasets: dict[str, dict],
+    representations: dict[str, FrozenRepresentationArtifact],
+    results_root: Path,
+    n: int,
+) -> dict:
+    """Gate one cell: refuse loudly if its run is not complete, evaluate the
+    free rollout on the TEST split (PROTOCOL.md section 15.5/16.4: "the gate
+    scores on test; anything that *selects* reads val" -- this function
+    never touches ``val``), write ``gate.json``, and return a small summary
+    dict. NEVER raises for a merely-incomplete or diverged cell -- both are
+    reported, by name, and the campaign loop continues (``factorial.main``'s
+    own F17d discipline: one bad cell must not silently drop every other
+    cell's already-computed verdict from the index).
+    """
+    run_dir = cell["run_dir"]
+    label = (
+        f"[{cell['index'] + 1}/{n}] {cell['dataset']} {cell['backbone']} "
+        f"{cell['structure']} {cell['family']} seed={cell['seed']}"
+    )
+    sentinel = _validate_completion_sentinel(run_dir)
+    if sentinel is None:
+        print(f"{label} -> {run_dir} (REFUSED: no valid run_complete.json -- run is not complete)")
+        return {"index": cell["index"], "run_dir": str(run_dir), "status": "missing"}
+
+    representation = representations[cell["dataset"]]
+    eval_split = datasets[cell["dataset"]]["test"]
+    e_1_pers = representation.manifest["e_1_pers"]
+    e_recon = representation.e_recon
+    tau_1_value = protocol_mod.tau_1(e_1_pers)
+    attainable = protocol_mod.tau1_validity(e_recon, e_1_pers)["attainable"]
+
+    protocol = {
+        "h_gate": protocol_mod.H_GATE,
+        "gamma": protocol_mod.GAMMA,
+        "tau_1": tau_1_value,
+        "tau_vpt": protocol_mod.TAU_VPT,
+        # no separate "evaluation horizon" constant is declared anywhere in
+        # this repo -- H_GATE is scored at exactly, never a longer horizon
+        # padded on top of it (ponytail: the smallest horizon that satisfies
+        # evaluate_positive_control's own length requirement).
+        "horizon": protocol_mod.H_GATE,
+        "gamma_1": protocol_mod.GAMMA_1,
+        "e_1_pers": e_1_pers,
+        "e_recon": e_recon,
+        "attainable": attainable,
+    }
+    identity = {
+        "cell_id": cell["index"],
+        "arm": {"backbone": cell["backbone"], "structure": cell["structure"], "family": cell["family"]},
+        "seed": cell["seed"],
+        "stratum_system": cell["config"]["stratum_system"],
+        "stratum_regime": cell["config"]["stratum_regime"],
+        "run_dir": str(run_dir.relative_to(results_root)),
+    }
+
+    try:
+        result = evaluate_run_free_rollout(
+            run_dir,
+            representation,
+            eval_split,
+            horizon=protocol_mod.H_GATE,
+            tau=protocol_mod.TAU_VPT,
+            h_gate=protocol_mod.H_GATE,
+            gamma=protocol_mod.GAMMA,
+            tau_1=tau_1_value,
+        )
+    except RolloutDivergence as exc:
+        write_gate_artifact(run_dir, exc, identity=identity, protocol=protocol, split="test")
+        print(f"{label} -> {run_dir} (DIVERGENCE at free-running step {exc.first_step})")
+        return {"index": cell["index"], "run_dir": str(run_dir), "status": "divergence"}
+
+    gate_path = write_gate_artifact(run_dir, result, identity=identity, protocol=protocol, split="test")
+    print(f"{label} -> {run_dir} (OK, verdict={result.positive_control.verdict})")
+    return {
+        "index": cell["index"],
+        "run_dir": str(run_dir),
+        "status": result.positive_control.verdict,
+        "gate_path": str(gate_path),
+    }
+
+
+def evaluate_gate_campaign(config_path: str | Path, *, shard: tuple[int, int] | None = None) -> list[dict]:
+    """Score every cell of ``config_path``'s grid against its already-trained
+    run, writing one ``gate.json`` per cell plus one campaign-wide
+    ``gate_index.csv``.
+
+    Reuses ``sld.experiments.factorial.expand`` to build the cell list --
+    never a parallel expansion that could drift from what ``sld-factorial``
+    itself trained (R2) -- and the SAME global preflight
+    (``_preflight_resolve_and_check_collisions``) over the FULL grid, before
+    ``shard`` narrows which cells THIS invocation evaluates. ``shard`` never
+    narrows the expansion, the preflight, or ``gate_index.csv``'s coverage --
+    only the evaluation loop, exactly like ``sld-factorial --shard``
+    (PROTOCOL.md section 14.7).
+
+    Args:
+        config_path: the experiment YAML -- the SAME file (and schema)
+            ``sld-factorial --config`` trained the grid from.
+        shard: ``(i, k)``, 1-indexed shard ``i`` of ``k``, or ``None`` to
+            evaluate every cell.
+
+    Returns:
+        One summary dict per evaluated cell (``run_cells`` order): at least
+        ``{"index", "run_dir", "status"}``, plus ``"gate_path"`` when a
+        ``gate.json`` was written. ``status`` is one of ``"learns"``,
+        ``"does_not_learn"``, ``"divergence"``, or ``"missing"`` (the run at
+        this cell has no valid completion sentinel -- reported here, never
+        silently dropped from the list, so nothing downstream can aggregate
+        over ``run_cells`` and mistake a missing seed for one that was
+        evaluated and passed).
+
+    Raises:
+        ValueError: the config carries no ``representation:`` block (the
+            gate always scores against the frozen shared representation a
+            run was trained with); anything ``expand``/the preflight/
+            ``evaluate_run_free_rollout`` itself refuses (a digest mismatch,
+            an insufficient split, a config schema error) -- these are
+            campaign-wide identity/data problems, not a per-seed fluke, so
+            they abort the whole campaign rather than being swallowed
+            per-cell.
+    """
+    config_path = Path(config_path)
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    cells = expand(config, dry_run=False)
+    if config.get("representation") is None:
+        raise ValueError(
+            f"{config_path}: evaluate_gate_campaign requires a `representation:` block -- "
+            "the positive-control gate always scores a run against the frozen shared "
+            "representation it was trained with (PROTOCOL.md sections 14.9-14.11)"
+        )
+
+    exp_name = config["exp_name"]
+    results_root = Path(config.get("base", {}).get("results_root", "results"))
+    datasets = {name: _build_dataset_for(cfg) for name, cfg in config["datasets"].items()}
+    representations = _resolve_stratum_representations(config, results_root, exp_name, datasets)
+
+    # global preflight over the FULL grid (F8/F17, mirrored from
+    # factorial.main): every cell's run_dir resolved and collision-checked
+    # BEFORE any evaluation, and BEFORE sharding narrows the loop below.
+    _preflight_resolve_and_check_collisions(cells, datasets, representations)
+
+    run_cells = _shard_cells(cells, shard)
+    n = len(cells)
+    results = [_evaluate_gate_cell(cell, datasets, representations, results_root, n) for cell in run_cells]
+
+    _write_gate_index(results_root, exp_name, cells)
+    return results
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="sld-gate")
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument(
+        "--shard",
+        type=_parse_shard,
+        default=None,
+        metavar="i/k",
+        help=(
+            "score only cells i-1::k of the grid (1<=i<=k); expansion and the collision "
+            "preflight stay global, same convention as sld-factorial --shard "
+            "(PROTOCOL.md section 14.7)."
+        ),
+    )
+    args = parser.parse_args(argv)
+    results = evaluate_gate_campaign(args.config, shard=args.shard)
+    any_failed = any(r["status"] in ("missing", "divergence") for r in results)
+    return 1 if any_failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

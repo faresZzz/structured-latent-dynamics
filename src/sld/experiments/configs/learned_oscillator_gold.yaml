@@ -1,0 +1,120 @@
+# PHASE D, JALON D3 -- the learned-oscillator control. Every value here is
+# fixed by PROTOCOL.md section 19 (Amendment 10), committed BEFORE this file's
+# first run (R4). Section 19.7 declares them all with, for each, either the
+# section it is inherited from or the measurement that chose it.
+#
+# WHAT THIS CONTROL ASKS. Phase C proved that this architecture CONTAINS this
+# system analytically: with parameters planted by hand it reproduces the exact
+# ZOH solution to 3.331e-16 at one step and 3.886e-15 over H=100. D3 asks the
+# other half of the question -- whether the declared optimizer, under the
+# declared budget, FINDS it. It is a capability control on the predictor and
+# the optimizer, not a comparison between arms.
+#
+# WHY THE REPRESENTATION IS THE IDENTITY (section 19.1). A predictor that is
+# perfect in the latent still decodes W . enc(x_1), whose error against x_1 is
+# exactly e_recon -- so e_1 >= e_recon for ANY predictor. On the pretrained
+# representation e_recon = 9.6e-3, ten times the 1e-3 bound: routed through
+# it, this control would score the representation and classify a perfectly
+# trained predictor as a failure. That is the defect section 15.1 named for
+# tau_1, in a second place. With the identity representation e_recon = 3.3e-8
+# (measured, the float32 floor), four decades below the bound. D4 keeps the
+# pretrained representation for all four arms -- there the shared latent is
+# exactly what makes the comparison fair.
+#
+# The verdict is NOT written by this file's runner: `sld-factorial` trains,
+# `sld-gate` scores from the artifacts on disk (section 19.4).
+exp_name: learned_oscillator_gold
+
+datasets:
+  oscillator:
+    system:
+      name: CoupledOscillators
+      params: {}          # m1=m2=1, k1=1, k_c=0.5, k2=1.5, c=0.1, u_max=2
+      # MEASURED, because the phase-C gold's hypotheses are preconditions and
+      # not assumptions: the continuous spectrum is two conjugate pairs at
+      # -0.05 +- 1.518722i and -0.05 +- 1.090176i (underdamped), diagonalizable
+      # with cond(V) = 1.52. Note the four eigenvalues share the SAME real
+      # part -- the damping is identical on both masses -- so the ordering
+      # ambiguity section 19.2 requires optimal pairing for is this system's
+      # exact configuration, not a hypothetical.
+    regime:
+      name: OURegime
+      params:
+        theta_ou: 1.0
+      # NarrowPolicyRegime is excluded for a stated reason: it requires
+      # system.energy(), which CoupledOscillators does not define, and
+      # inventing an energy for a damped coupled system is a physics decision
+      # no config is entitled to make.
+    obs: null             # fully observed => d_x = state_dim = 4
+    n_episodes: 256       # 14.2
+    T: 120                # H=100 needs 102 states and 101 actions per episode;
+                          # 120 leaves margin. A short split is a REFUSAL,
+                          # never a silent min(H, T).
+    dt: 0.05              # 19.7: the phase-C gold's own step. MEASURED: the RK4
+                          # propagator that generates the data differs from the
+                          # exact-ZOH reference by 2.114e-08 relative -- 4.7
+                          # decades below the 1e-3 bound, so the bound measures
+                          # learning and not the integrator. dt=0.02 would put
+                          # H=100 at 0.35 of a period (degenerate); dt=0.1
+                          # raises the gap to 6.78e-07.
+    seed: 0
+
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  delta: 0.05             # the latent operator's ZOH step. REQUIRED for structured
+                          # arms (the trainer refuses the family without it) and
+                          # equal to the dataset's dt by identity: the predictor
+                          # advances exactly one dataset step.
+  r: 2                    # 19.2 -- 2r = d = 4, the phase-C gold's proven
+                          # configuration. The bounds are taken in state
+                          # coordinates and are well-posed for any r; this is a
+                          # choice to stay in the configuration where the
+                          # optimum is PROVEN to exist, not a precondition.
+  encoder_hidden: []      # REQUIRED in identity mode: the Trainer builds its own
+                          # FrameMLPEncoder from this key, and the default
+                          # [64, 64] would not match the single-layer identity
+                          # artifact (load_state_dict shape mismatch).
+  target_params: 10000    # 14.2
+  epochs: 8000            # 16.1
+  h_fr: 25                # 15.2 -- note: training rolls 25 steps, bound 1 scores
+                          # at H=100. The control deliberately asks for
+                          # extrapolation four times past the trained horizon
+                          # (19.7); a model that had merely memorised its
+                          # training horizon would fail it.
+  grad_clip: 100          # 17.1
+  step_subsample: 1.0
+  results_root: results_d3_oscillator   # 19.7 -- disjoint from 14.6's four roots:
+                                        # a control is not a gate, and its resume
+                                        # sentinels must not be adoptable by one.
+
+representation:
+  kind: identity          # 19.1
+  d_z: 4                  # refused unless equal to d_x
+
+arms:
+  # The two structured arms of the D3 gate (18.1). ssm_k was withdrawn: no
+  # trainable rate under this regime, still divergent under the standard
+  # gradient guard proven a no-op elsewhere -- a documented negative result
+  # (18.0), never a silently absent cell.
+  #
+  # lr = 1e-3 is 16.2's re-selection at the D regime, a property of the
+  # backbone shared by its OFF and ON arms.
+- backbone: mlp
+  structure: 'on'
+  overrides:
+    mu_j: 0.0
+    lr: 0.001
+- backbone: transformer
+  structure: 'on'
+  overrides:
+    mu_j: 0.0
+    lr: 0.001
+
+seeds:      # 12.4 -- the five pass INDIVIDUALLY; no reducer, no averaging
+- 0
+- 1
+- 2
+- 3
+- 4

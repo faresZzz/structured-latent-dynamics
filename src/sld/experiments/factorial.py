@@ -48,6 +48,7 @@ from sld.data.regimes import (
     NarrowPolicyRegime,
     OURegime,
 )
+from sld.systems.coupled_oscillators import CoupledOscillators
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training import trainer as trainer_mod
 from sld.training.trainer import data_fingerprint, FAILURE_FILENAME, RUN_COMPLETE_FILENAME, Trainer
@@ -59,6 +60,7 @@ from sld.training.trainer import data_fingerprint, FAILURE_FILENAME, RUN_COMPLET
 # sld.training.trainer first means the package is already fully initialized
 # by the time this line runs, so no cycle here.
 from sld.encoders.pretrain import (
+    build_identity_representation,
     FrozenRepresentationArtifact,
     load_frozen_representation,
     pretrain_representation,
@@ -68,8 +70,15 @@ from sld.encoders.pretrain import (
 
 # explicit name -> class registries (v0: DampedPendulum + the four regimes,
 # per the factorial's design brief -- an unknown name lists the known ones
-# rather than raising an opaque KeyError)
-_SYSTEMS: dict[str, type] = {"DampedPendulum": DampedPendulum}
+# rather than raising an opaque KeyError). CoupledOscillators (PROTOCOL.md
+# section 19, D3's control) added Wave D3 -- registered here but its
+# datasets must use OURegime: NarrowPolicyRegime.sample_episode requires
+# system.energy(x) (sld/data/regimes.py), which CoupledOscillators does not
+# define (a damped-and-coupled system has no single natural "energy target"
+# to shape toward -- inventing one is a physics judgment out of this wave's
+# scope, not a wiring gap), so a config pairing them raises AttributeError
+# at run time, not at expand()/validation time.
+_SYSTEMS: dict[str, type] = {"DampedPendulum": DampedPendulum, "CoupledOscillators": CoupledOscillators}
 _REGIMES: dict[str, type] = {
     "OURegime": OURegime,
     "ActionConditionedRegime": ActionConditionedRegime,
@@ -88,6 +97,17 @@ _ARM_KEYS = frozenset({"backbone", "structure", "overrides"})
 # like every other block here (F7): an unknown or misspelled key raises
 # before any dataset is built. Absent entirely, a config behaves exactly as
 # it did before Wave D2c (no key added to any cell's hashed config).
+#
+# `kind` (Wave D3, PROTOCOL.md section 19.1) selects between this
+# (`"pretrained"`, the default -- these 11 keys, UNCHANGED) and
+# `"identity"` (PROTOCOL_KEYS_IDENTITY below): the two schemas are disjoint
+# ON PURPOSE -- an identity representation has no epochs/lr/w_align/etc. to
+# tune, and accepting one silently (validated as a known key, then doing
+# nothing) is exactly the defect this repo's closed-schema discipline
+# exists to catch. `kind` itself is never part of either frozenset below:
+# it is stripped before the unknown/missing checks run, so an explicit
+# `kind: "pretrained"` (or its absence, today's only spelling) validates
+# identically to every config written before this key existed.
 _REPRESENTATION_KEYS = frozenset(
     {
         "epochs",
@@ -103,6 +123,13 @@ _REPRESENTATION_KEYS = frozenset(
         "encoder_hidden",
     }
 )
+# identity mode (PROTOCOL.md section 19.1): d_z is the ONLY meaningful key
+# left -- and it is required (not derived here) so a config declaring the
+# wrong width is refused BY NAME at validation time, before any dataset is
+# built, rather than surfacing later as a shape-mismatch deep inside
+# build_identity_representation/load_state_dict.
+_REPRESENTATION_KEYS_IDENTITY = frozenset({"d_z"})
+_REPRESENTATION_KINDS = ("pretrained", "identity")
 
 _BACKBONES = ("mlp", "transformer", "ssm")
 _STRUCTURES = ("off", "on")
@@ -140,6 +167,20 @@ _NON_FACTORIAL_FAMILIES = frozenset({"koopman_ssm"})
 # names when a `representation:` block is present) -- never settable by the
 # user in base/overrides, the runner owns them (F7)
 _RUNNER_OWNED_KEYS = frozenset({"exp_name", "seed", "family", "stratum_system", "stratum_regime"})
+
+# Trainer config keys that are legal and hashed when present, but have NO
+# entry in trainer_mod._DEFAULTS (PROTOCOL.md section 17.1: grad_clip is
+# deliberately absent from _DEFAULTS so a config that never declares it
+# keeps the EXACT config_hash it had before grad_clip existed -- pinned by
+# tests/experiments/test_probe.py's "42cf513a" literal). _trainer_allowed_keys
+# used to derive its allow-list FROM _DEFAULTS, so this deliberate omission
+# fell through as "unknown Trainer config key" -- `base: {grad_clip: 100}`
+# was refused by expand() even though Trainer itself has always accepted and
+# hashed it (trainer.py's own grad_clip validation, section 17.1). Named
+# here explicitly, unioned into the allow-list below, and NEVER merged into
+# _DEFAULTS -- that distinction (legal-but-undefaulted vs defaulted) is the
+# whole point.
+_OPTIONAL_UNDEFAULTED_TRAINER_KEYS = frozenset({"grad_clip"})
 
 
 def _resolve(name: str, registry: dict[str, type], kind: str) -> None:
@@ -230,18 +271,50 @@ def _validate_representation_block(rep_cfg: dict) -> None:
     here, before any dataset is built or any model constructed -- same
     convention as ``_validate_dataset_entry``/``_validate_arm``.
 
-    ``view_offset`` gets one further, value-level check:
-    ``pretrain_representation`` (``sld.encoders.pretrain``) has no parameter
-    for it -- the two-view temporal offset is the module's own fixed
-    ``_VIEW_OFFSET`` constant. A config asking for a different value would
-    otherwise be silently ignored (the knob would sit in the block, get
-    validated as a known key, and then do nothing) -- refused instead, by
-    name, before any dataset is built.
+    ``kind`` (Wave D3, PROTOCOL.md section 19.1) selects the schema:
+    ``"pretrained"`` (the default -- absent entirely reproduces every config
+    written before this key existed, byte for byte) or ``"identity"``. It is
+    stripped before either branch's unknown/missing check runs, so an
+    explicit ``kind: "pretrained"`` validates identically to leaving it out.
+
+    ``view_offset`` (pretrained mode only) gets one further, value-level
+    check: ``pretrain_representation`` (``sld.encoders.pretrain``) has no
+    parameter for it -- the two-view temporal offset is the module's own
+    fixed ``_VIEW_OFFSET`` constant. A config asking for a different value
+    would otherwise be silently ignored (the knob would sit in the block,
+    get validated as a known key, and then do nothing) -- refused instead,
+    by name, before any dataset is built.
     """
-    unknown = sorted(set(rep_cfg) - _REPRESENTATION_KEYS)
+    kind = rep_cfg.get("kind", "pretrained")
+    if kind not in _REPRESENTATION_KINDS:
+        raise ValueError(
+            f"representation.kind={kind!r} must be one of {_REPRESENTATION_KINDS}"
+        )
+    body = {k: v for k, v in rep_cfg.items() if k != "kind"}
+
+    if kind == "identity":
+        # the 11 pretrained-mode keys have NO meaning for an identity
+        # representation (PROTOCOL.md section 19.1: no training happens, so
+        # epochs/lr/w_align/... tune nothing) -- a closed schema over the
+        # ONE key that still means something, same discipline as the
+        # pretrained branch below, not a looser one.
+        unknown = sorted(set(body) - _REPRESENTATION_KEYS_IDENTITY)
+        if unknown:
+            raise ValueError(
+                f"representation (kind='identity'): unknown keys {unknown} -- "
+                "the pretrained-mode keys (epochs/lr/seed/w_align/w_var/w_cov/"
+                "w_recon/view_offset/tau_ema/encoder_hidden) have no meaning "
+                "for an identity representation (PROTOCOL.md section 19.1)"
+            )
+        missing = sorted(_REPRESENTATION_KEYS_IDENTITY - set(body))
+        if missing:
+            raise ValueError(f"representation (kind='identity'): missing keys {missing}")
+        return
+
+    unknown = sorted(set(body) - _REPRESENTATION_KEYS)
     if unknown:
         raise ValueError(f"representation: unknown keys {unknown}")
-    missing = sorted(_REPRESENTATION_KEYS - set(rep_cfg))
+    missing = sorted(_REPRESENTATION_KEYS - set(body))
     if missing:
         raise ValueError(f"representation: missing keys {missing}")
     offset = rep_cfg["view_offset"]
@@ -270,6 +343,7 @@ def _trainer_allowed_keys(families: set[str]) -> frozenset[str]:
         frozenset(trainer_mod._DEFAULTS)
         | (frozenset(trainer_mod._REQUIRED_KEYS) - _RUNNER_OWNED_KEYS)
         | family_keys
+        | _OPTIONAL_UNDEFAULTED_TRAINER_KEYS
     )
 
 
@@ -476,24 +550,38 @@ def _load_or_build_representation(
     ``load_frozen_representation``/``validate_shared_representation`` --
     never silently rebuilt over, which would erase the evidence something
     was wrong.
+
+    ``rep_cfg["kind"]`` (Wave D3, PROTOCOL.md section 19.1, default
+    ``"pretrained"`` -- see ``_validate_representation_block``) selects the
+    builder: ``"identity"`` calls ``build_identity_representation`` (no
+    training, ``d_z`` only); anything else (today, only ``"pretrained"``)
+    reproduces the ``pretrain_representation`` call below UNCHANGED. Either
+    way the result is an ordinary ``FrozenRepresentationArtifact``, saved,
+    reloaded and validated identically -- this function's caller never knows
+    which builder ran.
     """
     if not path.exists():
-        artifact = pretrain_representation(
-            data,
-            system=system,
-            regime=regime,
-            d_z=rep_cfg["d_z"],
-            encoder_hidden=tuple(rep_cfg["encoder_hidden"]),
-            seed=rep_cfg["seed"],
-            epochs=rep_cfg["epochs"],
-            lr=rep_cfg["lr"],
-            tau_ema=rep_cfg["tau_ema"],
-            view_offset=rep_cfg["view_offset"],
-            w_align=rep_cfg["w_align"],
-            w_var=rep_cfg["w_var"],
-            w_cov=rep_cfg["w_cov"],
-            w_recon=rep_cfg["w_recon"],
-        )
+        if rep_cfg.get("kind", "pretrained") == "identity":
+            artifact = build_identity_representation(
+                data, system=system, regime=regime, d_z=rep_cfg["d_z"]
+            )
+        else:
+            artifact = pretrain_representation(
+                data,
+                system=system,
+                regime=regime,
+                d_z=rep_cfg["d_z"],
+                encoder_hidden=tuple(rep_cfg["encoder_hidden"]),
+                seed=rep_cfg["seed"],
+                epochs=rep_cfg["epochs"],
+                lr=rep_cfg["lr"],
+                tau_ema=rep_cfg["tau_ema"],
+                view_offset=rep_cfg["view_offset"],
+                w_align=rep_cfg["w_align"],
+                w_var=rep_cfg["w_var"],
+                w_cov=rep_cfg["w_cov"],
+                w_recon=rep_cfg["w_recon"],
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         save_frozen_representation(artifact, path)
     artifact = load_frozen_representation(path)

@@ -10,6 +10,7 @@ attribute 'resolve_run_dir'``; every other test here is independent of it.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,15 +30,18 @@ from sld.experiments.factorial import (
     _cell_status,
     _final_val_loss,
     _load_or_build_representation,
+    _OPTIONAL_UNDEFAULTED_TRAINER_KEYS,
     _parse_shard,
     _preflight_resolve_and_check_collisions,
     _resolve_stratum_representations,
     _shard_cells,
     _stratum_representation_path,
+    _trainer_allowed_keys,
     _validate_completion_sentinel,
     expand,
     main,
 )
+from sld.training import trainer as trainer_mod
 from sld.training.trainer import Trainer
 
 _CONFIGS = Path(__file__).resolve().parents[2] / "src" / "sld" / "experiments" / "configs"
@@ -200,6 +204,42 @@ def test_unknown_registry_name_raises():
     }
     with pytest.raises(ValueError, match="unknown system"):
         expand(config)
+
+
+def test_coupled_oscillators_is_a_registered_system():
+    # Wave D3 (PROTOCOL.md section 19): CoupledOscillators wired into the
+    # factorial's system registry, same convention as DampedPendulum.
+    # POSITIVE: a config declaring it expands cleanly and builds a real
+    # dataset at its own state_dim (4), not silently coerced to some other
+    # shape. NEGATIVE, same test (an unrelated bogus name must still be
+    # refused, with the SAME message the registry has always used --
+    # widening the accepted set must not weaken the refusal path).
+    config = {
+        "exp_name": "x",
+        "datasets": {
+            "ou": _minimal_dataset_entry(
+                system={"name": "CoupledOscillators", "params": {}},
+                regime={"name": "OURegime", "params": {"theta_ou": 1.0}},
+            )
+        },
+        "base": {"d_x": 4, "d_z": 4, "d_u": 1},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    assert len(cells) == 1
+    data = _build_dataset_for(config["datasets"]["ou"])
+    assert data["train"]["x"].shape[-1] == 4  # CoupledOscillators.state_dim
+    assert data["train"]["u"].shape[-1] == 1  # CoupledOscillators.action_dim
+    print("[factorial D3] CoupledOscillators expands + builds a 4-D/1-D dataset")
+
+    with pytest.raises(ValueError, match="unknown system"):
+        expand(
+            {
+                **config,
+                "datasets": {"ou": _minimal_dataset_entry(system={"name": "NotASystem", "params": {}})},
+            }
+        )
 
 
 def test_null_override_raises_in_run_mode_but_not_dry_run():
@@ -1726,6 +1766,336 @@ def _prepare_cells(config: dict, results_root: Path):
 
 
 # -- schema: `representation:` is closed, and its one value-level check -----
+
+
+# -- Wave D3 / Travail 4 (PROTOCOL.md section 17.1): grad_clip is declarable
+# without ever moving the config_hash of a run that predates it -----------
+
+
+def test_grad_clip_declarable_in_base_and_reaches_the_trainer(tmp_path):
+    # POSITIVE: `base: {grad_clip: 100}` -- exactly what
+    # configs/positive_control.yaml (section 18.1) declares -- must no
+    # longer be rejected as an "unknown Trainer config key", and the value
+    # must actually reach the Trainer's OWN resolved config (R7: verify the
+    # call site, not the schema alone).
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "base": {"d_x": 2, "d_z": 4, "d_u": 1, "grad_clip": 100.0, "results_root": str(tmp_path / "results")},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    assert cells[0]["config"]["grad_clip"] == 100.0
+    trainer = Trainer(cells[0]["config"])
+    assert trainer.config["grad_clip"] == 100.0
+    print(f"[factorial 17.1] grad_clip reaches Trainer.config: {trainer.config['grad_clip']}")
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+def test_grad_clip_bad_value_refused_by_trainer(bad, tmp_path):
+    # NEGATIVE: expand() accepts the KEY at the schema level; Trainer itself
+    # refuses a non-finite or non-positive VALUE (trainer.py's own grad_clip
+    # guard, section 17.1) -- the two checks live at different layers on
+    # purpose, and this proves the second one is still reachable through
+    # the factorial now that the first one lets the key through.
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "base": {"d_x": 2, "d_z": 4, "d_u": 1, "grad_clip": bad, "results_root": str(tmp_path / "results")},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    with pytest.raises(ValueError, match="grad_clip"):
+        Trainer(cells[0]["config"])
+
+
+def test_grad_clip_absent_config_hash_pinned_and_defaults_mutation_reddens(tmp_path, monkeypatch):
+    """NEGATIVE + mutation guard for the exact property PROTOCOL.md section
+    17.1 paid for: a config that never declares grad_clip must hash EXACTLY
+    as every config has since before grad_clip existed. Pinned as a literal
+    (same convention as tests/experiments/test_probe.py's "42cf513a" and
+    tests/training/test_trainer.py's "49b3b551") -- not re-derived here, so
+    a change to _trainer_allowed_keys/_DEFAULTS that moves this hash is
+    caught even if no OTHER test happens to exercise this exact config.
+
+    Mutation campaign target named directly by the task brief: "adding
+    grad_clip to _DEFAULTS must redden the config_hash stability test". This
+    test performs that exact mutation (monkeypatch, scoped to this test
+    only) and asserts the hash MOVES -- i.e. this test (and every other
+    pinned-hash test in the suite) would fail for real if that mutation ever
+    landed outside a test.
+    """
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "base": {"d_x": 2, "d_z": 4, "d_u": 1, "results_root": str(tmp_path / "results")},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    trainer = Trainer(dict(cells[0]["config"]))
+    assert "grad_clip" not in trainer.config
+    print(f"[factorial 17.1] no-grad_clip config_hash = {trainer.config_hash}")
+    assert trainer.config_hash == "041714e0"
+
+    assert "grad_clip" not in trainer_mod._DEFAULTS  # the property being protected
+    monkeypatch.setitem(trainer_mod._DEFAULTS, "grad_clip", 100.0)
+    mutant_hash = Trainer(dict(cells[0]["config"])).config_hash
+    print(f"[factorial 17.1 mutant] grad_clip added to _DEFAULTS -> config_hash = {mutant_hash}")
+    assert mutant_hash != "041714e0"
+
+
+def test_grad_clip_is_optional_and_undefaulted_not_in_defaults():
+    # a direct, structural check alongside the behavioral ones above: the
+    # allow-list addition is NOT a _DEFAULTS addition (that distinction is
+    # the entire point -- see _OPTIONAL_UNDEFAULTED_TRAINER_KEYS's comment).
+    assert "grad_clip" in _OPTIONAL_UNDEFAULTED_TRAINER_KEYS
+    assert "grad_clip" not in trainer_mod._DEFAULTS
+    assert "grad_clip" in _trainer_allowed_keys({"mlp"})
+
+
+# -- Wave D3 / Travail 2 (PROTOCOL.md section 19.1): representation.kind ---
+
+
+def _identity_rep_cfg(**overrides) -> dict:
+    cfg = {"kind": "identity", "d_z": 4}
+    cfg.update(overrides)
+    return cfg
+
+
+def test_identity_representation_block_accepts_only_kind_and_d_z():
+    # POSITIVE: kind="identity" + d_z is a complete, valid block.
+    config = {
+        "exp_name": "x",
+        "datasets": {
+            "ou": _minimal_dataset_entry(
+                system={"name": "CoupledOscillators", "params": {}},
+                regime={"name": "OURegime", "params": {"theta_ou": 1.0}},
+            )
+        },
+        "base": {"d_x": 4, "d_z": 4, "d_u": 1},
+        "representation": _identity_rep_cfg(),
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells = expand(config, dry_run=False)
+    assert len(cells) == 1
+    print("[factorial D3] representation {kind: identity, d_z: 4} validates cleanly")
+
+
+@pytest.mark.parametrize(
+    "pretrained_key",
+    sorted(
+        {
+            "epochs", "lr", "seed", "w_align", "w_var", "w_cov",
+            "w_recon", "view_offset", "tau_ema", "encoder_hidden",
+        }
+    ),
+)
+def test_identity_representation_block_rejects_pretrained_only_keys(pretrained_key):
+    # NEGATIVE: every one of the 10 pretrained-only keys is refused BY NAME
+    # in identity mode -- none of them silently validates as "known but
+    # inert" (exactly the defect this repo's closed-schema discipline
+    # exists to catch).
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "representation": _identity_rep_cfg(**{pretrained_key: 1}),
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match=pretrained_key):
+        expand(config, dry_run=False)
+
+
+def test_identity_representation_block_missing_d_z_raises():
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "representation": {"kind": "identity"},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="d_z"):
+        expand(config, dry_run=False)
+
+
+def test_representation_unknown_kind_raises():
+    config = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "representation": {"kind": "bogus", "d_z": 4},
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    with pytest.raises(ValueError, match="kind"):
+        expand(config, dry_run=False)
+
+
+def test_representation_kind_explicit_pretrained_validates_like_kind_absent():
+    # an explicit kind="pretrained" must validate EXACTLY like today's
+    # kind-absent configs (byte-for-byte the same 11-key schema) -- the
+    # default is a spelling of the same thing, not a different path.
+    config_absent = {
+        "exp_name": "x",
+        "datasets": {"d1": _minimal_dataset_entry()},
+        "representation": _rep_cfg(),
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    config_explicit = {**config_absent, "representation": {**_rep_cfg(), "kind": "pretrained"}}
+    cells_absent = expand(config_absent, dry_run=False)
+    cells_explicit = expand(config_explicit, dry_run=False)
+    assert cells_absent[0]["config"] == cells_explicit[0]["config"]
+
+
+def test_identity_representation_builds_a_real_artifact_end_to_end(tmp_path):
+    # POSITIVE, end to end: the SAME private call sequence main() uses
+    # (_prepare_cells) with kind="identity" produces an ordinary,
+    # digest-validated FrozenRepresentationArtifact -- MEASURED e_recon
+    # (float32 noise floor, not exactly 0 and never hand-written -- see
+    # build_identity_representation's docstring), e_1_pers and gated
+    # computed by the same code the pretrained path uses.
+    results_root = tmp_path / "results"
+    config = {
+        "exp_name": "repr_identity",
+        "datasets": {
+            "ou": _minimal_dataset_entry(
+                system={"name": "CoupledOscillators", "params": {}},
+                regime={"name": "OURegime", "params": {"theta_ou": 1.0}},
+                n_episodes=10,
+                T=10,
+            )
+        },
+        "base": {
+            "d_x": 4,
+            "d_z": 4,
+            "d_u": 1,
+            "encoder_hidden": [],  # must match the identity encoder's own architecture
+            "epochs": 1,
+            "batch_episodes": 2,
+            "target_params": 500,
+            "results_root": str(results_root),
+        },
+        "representation": _identity_rep_cfg(),
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": [0],
+    }
+    cells, datasets, representations = _prepare_cells(config, results_root)
+    artifact = representations["ou"]
+    assert artifact.manifest["kind"] == "identity"
+    assert artifact.manifest["d_z"] == artifact.manifest["d_x"] == 4
+    assert artifact.e_recon == artifact.e_recon  # not NaN
+    assert artifact.e_recon < 1e-5  # far below D3's 1e-3 bound (float32 noise floor)
+    assert artifact.manifest["e_1_pers"] == artifact.manifest["e_1_pers"]  # not NaN
+    assert artifact.manifest["gated"] == (3.0 * artifact.e_recon < artifact.manifest["e_1_pers"])
+    print(
+        f"[factorial D3] identity artifact e_recon={artifact.e_recon:.3e} "
+        f"e_1_pers={artifact.manifest['e_1_pers']:.3e} gated={artifact.manifest['gated']}"
+    )
+
+    # the SAME Trainer construction main() would do, unmodified: the trainer
+    # neither knows nor cares this representation is identity (item 3's
+    # "n'ouvre pas un chemin parallèle" requirement) -- same class, same
+    # validate_shared_representation preflight, same representation_digest
+    # derivation into the run identity.
+    trainer = cells[0]["trainer"]
+    assert trainer.representation is artifact
+    assert trainer.config["representation_digest"] == artifact.manifest["digest"]
+
+
+def test_representation_kind_absent_dispatches_to_pretrain_representation_unchanged(tmp_path, monkeypatch):
+    """BACKWARD COMPATIBILITY (item 1, the property the task brief asked to
+    be proven rather than assumed): a `representation:` block with no
+    "kind" key -- every config written before this key existed -- must
+    still call pretrain_representation with EXACTLY the same 8 keyword
+    arguments as before this wave, so its build is byte-for-byte what it
+    always was and no existing config_hash/run_dir moves. Verified at the
+    REAL call site (R7, same discipline as
+    test_load_or_build_representation_save_path_is_atomic_replace's os.replace
+    spy just above this section), not re-derived from reading the source.
+    """
+    import sld.experiments.factorial as factorial_mod
+
+    calls = []
+    real_pretrain = factorial_mod.pretrain_representation
+
+    def _spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real_pretrain(*args, **kwargs)
+
+    monkeypatch.setattr(factorial_mod, "pretrain_representation", _spy)
+
+    ds_cfg = _minimal_dataset_entry(n_episodes=10, T=10)
+    data = _build_dataset_for(ds_cfg)
+    rep_cfg = _rep_cfg()  # NO "kind" key -- exactly what every pre-D3 config carries
+    assert "kind" not in rep_cfg
+    path = tmp_path / "reps" / "legacy.pt"
+
+    _load_or_build_representation(
+        path, system="DampedPendulum", regime="OURegime", data=data, rep_cfg=rep_cfg
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "system": "DampedPendulum",
+        "regime": "OURegime",
+        "d_z": rep_cfg["d_z"],
+        "encoder_hidden": tuple(rep_cfg["encoder_hidden"]),
+        "seed": rep_cfg["seed"],
+        "epochs": rep_cfg["epochs"],
+        "lr": rep_cfg["lr"],
+        "tau_ema": rep_cfg["tau_ema"],
+        "view_offset": rep_cfg["view_offset"],
+        "w_align": rep_cfg["w_align"],
+        "w_var": rep_cfg["w_var"],
+        "w_cov": rep_cfg["w_cov"],
+        "w_recon": rep_cfg["w_recon"],
+    }
+    print(
+        "[factorial D3 backward-compat] kind-absent dispatch calls "
+        "pretrain_representation with the pre-D3 kwargs, unchanged"
+    )
+
+
+def test_results_amended_pendulum_core_forty_run_dirs_still_self_consistent():
+    """Investigation note (task brief asked for a test reconstructing
+    results_amended/pendulum_core's 40 run-dir identities): those 40 dirs
+    were written by configs/pendulum_core.yaml, the FROZEN pre-B1
+    family/constraint config -- which
+    test_historical_mu_j_configs_are_no_longer_executable (above) already
+    asserts expand() REFUSES outright, and has refused since phase B1, well
+    before this wave's `representation:` schema (_validate_representation_block,
+    _load_or_build_representation) existed at all. No config path this wave
+    touches can reach these 40 identities, since pendulum_core.yaml declares
+    no `representation:` block for that code to ever see.
+
+    What IS checked here, read-only, straight off disk: every one of the 40
+    run dirs' own config.yaml still hashes (sha1, first 8 hex chars --
+    Trainer.__init__'s own recipe, trainer.py, UNTOUCHED by this wave) to
+    the config_hash half of its own directory name. Trainer.py's hashing was
+    not modified by this wave, so this property holds exactly as it did
+    before -- this test pins it as a literal, measured fact instead of an
+    assumption.
+    """
+    results_dir = (
+        Path(__file__).resolve().parents[2] / "results_amended" / "pendulum_core"
+    )
+    run_dirs = sorted(p for p in results_dir.iterdir() if p.is_dir())
+    assert len(run_dirs) == 40, f"expected 40 run dirs, found {len(run_dirs)}: {run_dirs}"
+    for run_dir in run_dirs:
+        config_hash, sep, data_hash = run_dir.name.partition("-")
+        assert sep and len(config_hash) == 8 and len(data_hash) == 8, run_dir.name
+        config_text = (run_dir / "config.yaml").read_text()
+        recomputed = hashlib.sha1(config_text.encode("utf-8")).hexdigest()[:8]
+        assert recomputed == config_hash, run_dir
+    print(
+        f"[backward-compat] {len(run_dirs)}/40 results_amended/pendulum_core "
+        "run dirs self-consistent (read-only, unreachable by this wave's "
+        "representation.kind schema -- see docstring)"
+    )
 
 
 def test_unknown_key_in_representation_block_raises_before_any_dataset_built():

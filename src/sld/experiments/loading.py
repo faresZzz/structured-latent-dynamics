@@ -20,6 +20,7 @@ from sld.data.generate import build_dataset
 from sld.data.regimes import ActionConditionedRegime, OURegime
 from sld.encoders.frame_mlp import FrameMLPEncoder
 from sld.predictors.registry import get_predictor
+from sld.systems.coupled_oscillators import CoupledOscillators
 from sld.systems.damped_pendulum import DampedPendulum
 
 # single source of truth for which config keys are forwarded to which
@@ -29,8 +30,13 @@ from sld.training.trainer import _FAMILY_CONFIG_KEYS
 
 # local minimal registry for build_dataset_from_expconfig: v0 pendulum scope
 # only (matches src/sld/experiments/configs/pendulum_core.yaml's two
-# datasets), grows alongside the configs that need it, not ahead of them
-_SYSTEM_REGISTRY: dict[str, type] = {"DampedPendulum": DampedPendulum}
+# datasets), grows alongside the configs that need it, not ahead of them.
+# CoupledOscillators (PROTOCOL.md section 19, D3) added Wave D3 so viz can
+# rebuild a D3 run's dataset the same way sld-factorial does.
+_SYSTEM_REGISTRY: dict[str, type] = {
+    "DampedPendulum": DampedPendulum,
+    "CoupledOscillators": CoupledOscillators,
+}
 _REGIME_REGISTRY: dict[str, type] = {
     "OURegime": OURegime,
     "ActionConditionedRegime": ActionConditionedRegime,

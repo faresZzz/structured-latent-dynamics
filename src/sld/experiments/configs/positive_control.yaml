@@ -1,0 +1,138 @@
+# PHASE D, JALON D4 -- the positive-control gate. Every value here is fixed by
+# a committed section of PROTOCOL.md BEFORE this file's first run (R4); the
+# section is named on each line rather than left to be reconstructed.
+#
+# 4 arms x 2 strata x 5 seeds = 40 runs (section 18.1, Amendment 9). The grid
+# narrowed from 6 arms to 4 on 2026-08-08: the `ssm` family (`min_ssm`,
+# `ssm_k`) has no trainable rate under this regime -- divergence at epoch 2 at
+# every declared rate, and still under the standard gradient guard proven a
+# no-op elsewhere -- and is carried as a documented negative result, never as
+# a silently absent cell. Section 18.0 holds the full evidence chain and
+# section 18.2 the duty to publish it wherever these results are published.
+#
+# The verdict is NOT written by this file's runner. `sld-factorial` trains;
+# `sld-gate` scores, in a separate pass, from the artifacts on disk (section
+# 19.4). A checkpoint is not a success, and the two must not be able to be
+# confused for one another.
+#
+# Root `results_gate_d/` is one of the four disjoint roots of section 14.6.
+# Nothing here may be reused by phase E: if the gate finds a cell that does
+# not learn and anything then changes, a merged grid would be invalidated in
+# its entirety with no way to say which cells preceded the change.
+exp_name: positive_control
+
+datasets:
+  # The two strata of the frozen record, re-declared at 14.2's episode count.
+  # 64 -> 256 episodes was decided on measurement, not taste: at 64 the
+  # pre-registered condition of 12.3 fails and `cond(Sigma)` degrades from
+  # 1.87 to 4.90.
+  ou:
+    system:
+      name: DampedPendulum
+      params: {}
+    regime:
+      name: OURegime
+      params:
+        theta_ou: 1.0
+    obs: null
+    n_episodes: 256
+    T: 100
+    dt: 0.02
+    seed: 0
+  action_conditioned:
+    system:
+      name: DampedPendulum
+      params: {}
+    regime:
+      name: ActionConditionedRegime
+      params:
+        K_gain:
+        - - 0.8
+          - 0.4
+        sigma: 0.3
+    obs: null
+    n_episodes: 256
+    T: 100
+    dt: 0.02
+    seed: 0
+
+base:
+  d_x: 2
+  d_z: 4
+  d_u: 1
+  target_params: 10000     # 14.2
+  epochs: 8000             # 16.1 -- the retained rung (-26.7% on e_25_val vs its 4000 twin)
+  h_fr: 25                 # 15.2 -- supersedes section 4's h_fr for phase-D trainings
+  grad_clip: 100           # 17.1 -- uniform on every arm, proven a no-op on the healthy ones (17.2)
+  step_subsample: 1.0
+  results_root: results_gate_d   # 14.6
+
+representation:
+  # The pretrained frozen representation of 14.10, at the setting 16.3
+  # retained. These are the probe's own values, reused UNCHANGED: D4 must be
+  # scored against the same representation the retained entry values were
+  # selected under, not a variant of it.
+  #
+  # w_align = 1 was retained on a measurement that REVERSED the quarter-budget
+  # evidence: at full budget w_align = 0 is worse on BOTH val bounds
+  # (e_25_val 0.2675 vs 0.1567, m_high_val 3.68 vs 3.06). The encoder-only
+  # metrics had said the opposite; the temporal term's expected benefit was
+  # never reconstruction, so it could not be settled at the encoder level.
+  d_z: 4
+  encoder_hidden: [64, 64]
+  seed: 0
+  epochs: 50
+  lr: 0.001
+  tau_ema: 0.99
+  view_offset: 1           # 14.11 -- offset 0 is refused: it is BYOL with identical views
+  w_align: 1.0             # 16.3
+  w_var: 1.0
+  w_cov: 1.0
+  w_recon: 1.0
+
+arms:
+  # backbone x structure, the full 2x2. `structure: on` is ARCHITECTURAL
+  # (lift psi, 2x2 rotation-scaling blocks, exact ZOH, projection pi, alpha
+  # FREE) since Amendment 4 -- never a numeric penalty. mu_j stays 0
+  # everywhere: the extrinsic-constraint axis was withdrawn in section 11.
+  #
+  # lr = 1e-3 for both backbones is 16.2's re-selection at the D regime,
+  # argmin of e_25_val on the OFF arms with the ON arms screened green. It is
+  # a property of the backbone, shared by its OFF and ON arms: choosing a rate
+  # per ON arm would confound the structure effect with a tuning effect.
+- backbone: mlp
+  structure: 'off'
+  overrides:
+    mu_j: 0.0
+    lr: 0.001
+- backbone: mlp
+  structure: 'on'
+  overrides:
+    mu_j: 0.0
+    lr: 0.001
+    # `delta` is the latent ZOH step, equal to the dataset's dt by identity.
+    # It lives HERE and not in `base:` on purpose: the allowed-key set is the
+    # union over the config's families, so `expand()` accepts a structured-only
+    # key in `base:` and the run then dies at construction on the unstructured
+    # arms (`MLPPredictor.__init__() got an unexpected keyword argument
+    # 'delta'`). Loud, but only at run time -- keep family-specific knobs in the
+    # arm that owns them.
+    delta: 0.02
+- backbone: transformer
+  structure: 'off'
+  overrides:
+    mu_j: 0.0
+    lr: 0.001
+- backbone: transformer
+  structure: 'on'
+  overrides:
+    mu_j: 0.0
+    lr: 0.001
+    delta: 0.02           # see the note on the mlp_k arm above
+
+seeds:      # 12.4 -- the five pass INDIVIDUALLY; no reducer, no averaging
+- 0
+- 1
+- 2
+- 3
+- 4

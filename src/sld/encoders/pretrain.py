@@ -235,6 +235,61 @@ def _tau1_condition_holds(e_recon: float, e_1_pers: float) -> bool:
     return 3.0 * e_recon < e_1_pers
 
 
+def _freeze_and_measure(
+    encoder: nn.Module, train: dict, val: dict, d_x: int, d_state: int
+) -> tuple["ReadoutFit", np.ndarray, float, float, bool]:
+    """Everything the manifest needs from an ALREADY-FROZEN ``encoder``: the
+    canonical OLS readout (fit on the FULL train split), ``e_recon`` and
+    ``e_1_pers`` (both on held-out val), and the section 12.3 gate verdict.
+
+    Factored out of ``pretrain_representation`` (Wave D3) so
+    ``build_identity_representation`` -- whose encoder is hand-set to the
+    identity rather than trained -- runs the EXACT SAME measurement code.
+    "e_recon = 0 for the identity encoder" must be a MEASURED outcome, never
+    a constant written by hand (R2, REGLES section 7.1); sharing this
+    function is what makes that true by construction rather than by
+    discipline. Callers own freezing (``eval()`` + ``requires_grad_(False)``)
+    and any seeding -- this function only measures.
+    """
+    # fit against the ORIGINAL float64 z_true (never a float32-rounded
+    # copy): the OLS solve is meant to see full RK4-oracle precision. The
+    # ENCODER's forward pass still runs at float32 (the input is cast
+    # below) -- the same CPU/float32 policy every encoder in this repo is
+    # evaluated under, trained or hand-built alike.
+    x_train_full = torch.as_tensor(train["x"], dtype=torch.float32).reshape(-1, d_x)
+    with torch.no_grad():
+        z_train_np = encoder(x_train_full).double().numpy()
+    x_true_train_np = np.asarray(train["z_true"], dtype=np.float64).reshape(-1, d_state)
+    readout = fit_readout(z_train_np, x_true_train_np)
+
+    sigma_train = fit_train_state_scale(train["z_true"])
+
+    # -- e_recon: the readout's own reconstruction error, on HELD-OUT (val)
+    # data -- PROTOCOL.md section 12.3, "readout(encoder(o_t)) against x_t",
+    # measured with the ONE existing normalized_state_error (H=1: every held-
+    # out frame is scored independently, there is no rollout here) --
+    x_val = torch.as_tensor(val["x"], dtype=torch.float32).reshape(-1, d_x)
+    x_true_val_np = np.asarray(val["z_true"], dtype=np.float64).reshape(-1, d_state)
+    with torch.no_grad():
+        z_val_np = encoder(x_val).double().numpy()
+    pred_val = apply_readout(z_val_np, readout.W)
+    e_recon = float(
+        normalized_state_error(pred_val[:, None, :], x_true_val_np[:, None, :], sigma_train)[0]
+    )
+
+    # -- e_1_pers: the persistence baseline's one-step error, on the SAME
+    # held-out split (section 12.3's baselines share "same coordinates, same
+    # episodes, same sigma^train") -- reuses persistence_rollout, no second
+    # implementation --
+    x0 = np.asarray(val["z_true"][:, 0, :], dtype=np.float64)
+    x1 = np.asarray(val["z_true"][:, 1, :], dtype=np.float64)
+    pers_pred = persistence_rollout(x0, horizon=1)
+    e_1_pers = float(normalized_state_error(pers_pred, x1[:, None, :], sigma_train)[0])
+
+    gated = _tau1_condition_holds(e_recon, e_1_pers)
+    return readout, sigma_train, e_recon, e_1_pers, gated
+
+
 @dataclass
 class FrozenRepresentationArtifact:
     """One frozen ``(encoder, readout)`` pair for one ``(system, regime)``
@@ -501,41 +556,14 @@ def pretrain_representation(
     # -- freeze: the CANONICAL readout is an independent OLS fit (recovered
     # code) on the frozen STUDENT encoder's TRAIN-split embeddings -- ALL
     # frames, not just the view0 half used for training (the readout fit is
-    # a separate, post-hoc step, not part of the two-view objective) -- fit
-    # against the ORIGINAL float64 z_true (never a float32-rounded copy):
-    # the OLS solve is meant to see full RK4-oracle precision.
-    x_train_full = torch.as_tensor(train["x"], dtype=torch.float32).reshape(-1, d_x)
+    # a separate, post-hoc step, not part of the two-view objective).
+    # e_recon/e_1_pers/the gate verdict share ONE measurement function with
+    # build_identity_representation's hand-set encoder (_freeze_and_measure,
+    # R2) -- so "measured, not postulated" holds for both callers alike.
     encoder.eval()
-    with torch.no_grad():
-        z_train_np = encoder(x_train_full).double().numpy()
-    x_true_train_np = np.asarray(train["z_true"], dtype=np.float64).reshape(-1, d_state)
-    readout = fit_readout(z_train_np, x_true_train_np)
-
-    sigma_train = fit_train_state_scale(train["z_true"])
-
-    # -- e_recon: the readout's own reconstruction error, on HELD-OUT (val)
-    # data -- PROTOCOL.md section 12.3, "readout(encoder(o_t)) against x_t",
-    # measured with the ONE existing normalized_state_error (H=1: every held-
-    # out frame is scored independently, there is no rollout here) --
-    x_val = torch.as_tensor(val["x"], dtype=torch.float32).reshape(-1, d_x)
-    x_true_val_np = np.asarray(val["z_true"], dtype=np.float64).reshape(-1, d_state)
-    with torch.no_grad():
-        z_val_np = encoder(x_val).double().numpy()
-    pred_val = apply_readout(z_val_np, readout.W)
-    e_recon = float(
-        normalized_state_error(pred_val[:, None, :], x_true_val_np[:, None, :], sigma_train)[0]
+    readout, sigma_train, e_recon, e_1_pers, gated = _freeze_and_measure(
+        encoder, train, val, d_x, d_state
     )
-
-    # -- e_1_pers: the persistence baseline's one-step error, on the SAME
-    # held-out split (section 12.3's baselines share "same coordinates, same
-    # episodes, same sigma^train") -- reuses persistence_rollout, no second
-    # implementation --
-    x0 = np.asarray(val["z_true"][:, 0, :], dtype=np.float64)
-    x1 = np.asarray(val["z_true"][:, 1, :], dtype=np.float64)
-    pers_pred = persistence_rollout(x0, horizon=1)
-    e_1_pers = float(normalized_state_error(pers_pred, x1[:, None, :], sigma_train)[0])
-
-    gated = _tau1_condition_holds(e_recon, e_1_pers)
 
     manifest = {
         "system": system,
@@ -555,6 +583,115 @@ def pretrain_representation(
         "objective": "14.10",  # two-view self-distillation; supersedes 14.9's loss
         "view_offset": view_offset,
         "tau_ema": float(tau_ema),
+    }
+
+    return FrozenRepresentationArtifact(
+        encoder_state_dict={k: v.detach().clone() for k, v in encoder.state_dict().items()},
+        readout=readout,
+        sigma_train=sigma_train,
+        e_recon=e_recon,
+        manifest=manifest,
+    )
+
+
+def build_identity_representation(
+    data: dict, *, system: str, regime: str, d_z: int
+) -> FrozenRepresentationArtifact:
+    """D3's control-stratum representation (PROTOCOL.md section 19.1): the
+    EXACT identity, not a trained encoder. D3 is a capability control on the
+    predictor/optimizer, not an arm comparison -- routing it through the
+    shared trained representation introduces the readout's own
+    reconstruction error as a THIRD error source (on top of learning and
+    float64 arithmetic), which measured 10x above D3's ``1e-3`` bound and
+    made the state bound unattainable by construction. Removing that
+    confound means ``d_z = d_x``, encoder = identity, readout ``W = I``, so
+    ``e_recon`` measures (at the float32 noise floor -- see below) rather
+    than confounds.
+
+    ``d_z`` MUST equal ``d_x`` (the observation dimension found in ``data``):
+    the identity has no free width to pad or truncate with, so a mismatch is
+    refused explicitly here rather than silently zero-padding or truncating.
+
+    The frozen encoder is a REAL, ordinary ``FrameMLPEncoder`` (``hidden=()``
+    -- a single ``nn.Linear``, no activation), never a new module class: its
+    weight is hand-set to the identity matrix and its bias to zero, then
+    frozen (``eval()``, every parameter ``requires_grad=False``) -- the SAME
+    class ``Trainer.fit`` always constructs and loads a representation's
+    ``state_dict`` into, so no downstream code path (trainer, gate, digests,
+    run identity) has to know this artifact is an identity rather than a
+    trained one.
+
+    ``e_recon``/``e_1_pers``/the readout are all MEASURED by
+    ``_freeze_and_measure`` -- the EXACT function ``pretrain_representation``
+    runs on its own trained encoder -- never postulated: the manifest's
+    "e_recon = 0" claim is a result of running the same code on a
+    hand-frozen encoder, not a constant written by hand. Because the
+    encoder's forward pass runs under this repo's declared CPU/float32
+    policy (the same policy ``Trainer.fit`` always applies before loading
+    ANY representation's weights, regardless of what dtype built them), the
+    measured ``z`` is bit-identical to the FLOAT32-ROUNDED observation, so
+    ``e_recon`` lands at the float32 relative-precision floor (~1e-7), not
+    at float64's (~1e-16) -- still about four orders of magnitude under
+    D3's ``1e-3`` bound, and, as everywhere else in this module, a measured
+    number rather than an assumed one.
+
+    Raises:
+        ValueError: ``data`` is missing a required split, or ``d_z != d_x``.
+    """
+    for split_name in ("train", "val"):
+        if split_name not in data:
+            raise ValueError(f"data must include a {split_name!r} split")
+    train, val = data["train"], data["val"]
+    d_x = train["x"].shape[-1]
+    if d_z != d_x:
+        raise ValueError(
+            f"identity representation requires d_z == d_x, got d_z={d_z}, d_x={d_x} -- "
+            "the identity encoder has no free width to pad or truncate with "
+            "(PROTOCOL.md section 19.1)"
+        )
+    d_state = train["z_true"].shape[-1]
+
+    # declared CPU/float32 policy, enforced at construction -- same
+    # discipline as pretrain_representation/Trainer.fit, even though no
+    # random init draw happens here (d_z == d_x makes the weight shape
+    # deterministic, but the module's PARAMETER dtype must still match what
+    # every downstream construction of FrameMLPEncoder uses)
+    ambient = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float32)
+    try:
+        encoder = FrameMLPEncoder(d_x, d_z, hidden=())  # single nn.Linear, no activation
+    finally:
+        torch.set_default_dtype(ambient)
+    with torch.no_grad():
+        weight = encoder.net[0].weight  # (d_z, d_x): out_features x in_features
+        weight.copy_(torch.eye(d_z, d_x, dtype=weight.dtype))
+        encoder.net[0].bias.zero_()
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+
+    readout, sigma_train, e_recon, e_1_pers, gated = _freeze_and_measure(
+        encoder, train, val, d_x, d_state
+    )
+
+    manifest = {
+        "system": system,
+        "regime": regime,
+        "fit_split": "train",
+        "eval_split": "val",
+        "encoder_class": "FrameMLPEncoder",
+        "d_x": int(d_x),
+        "d_z": int(d_z),
+        "encoder_hidden": [],
+        # inert: the identity encoder has no random init draw to seed
+        "pretraining_seed": 0,
+        "dtype": str(next(encoder.parameters()).dtype),
+        "device": str(next(encoder.parameters()).device),
+        "e_1_pers": e_1_pers,
+        "tau1_threshold_factor": 3.0,
+        "gated": gated,
+        "objective": "19.1",  # exact identity; D3's control stratum only
+        "kind": "identity",
     }
 
     return FrozenRepresentationArtifact(

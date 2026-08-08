@@ -2546,3 +2546,340 @@ withdrawal followed the evidence — dated, committed, in order — and not conv
   negative result — never silently absent.
 - **R4**: this amendment precedes every 2x2 execution it authorizes (the D3 config,
   the D4 grid).
+
+## 19. Amendment 10 — D3's measurement coordinates, the spectral and action bounds made well-posed, and the gate artifact (dated 2026-08-08)
+
+### 19.0 Scope, and why it is committed now
+
+Amendment 9 restated the D3 gate over two arms but did not say **in which coordinates**
+D3's four bounds are measured, nor **which** learned eigenvalues the spectral bound
+compares. Writing the D3 config surfaced two defects in the bounds as previously worded:
+one makes the state bound unattainable by construction, the other leaves the spectral
+bound undefined. Both are repaired here. R4 requires this section to be committed
+**before** the runs it authorizes: the D3 control and the D4 grid. It is committed now,
+before either executes.
+
+**What does NOT change**: `gamma = 5`, `H_gate = 25`, `tau = 0.5`, `gamma_1 = 2` and the
+`tau_1` rule of 15.1, the five-seeds-pass-individually rule of 12.4, the `e_h` metric of
+12.1, the 8000-update budget and the 1e-3 D3 thresholds themselves, and every value fixed
+by 16-18. **No threshold is loosened anywhere in this section.**
+
+### 19.1 The defect that makes D3's state bound unattainable, and the repair
+
+**Derived, not observed after a failure.** D3's `H=100` bound (`e_100 < 1e-3`) was written
+with its rationale attached: `1e-3` sits "far enough above the float64 exact-ZOH errors to
+measure learning and not arithmetic." That rationale contemplates exactly two error
+sources, learning and floating-point arithmetic. Routing D3 through the shared frozen
+representation introduces a third: the readout's own reconstruction error.
+
+The floor is the one 15.1 already established for `tau_1`, applied one step further. A
+predictor that is *perfect in the latent* — one that outputs exactly the encoder's
+embedding of the next true state — decodes to `W . enc(x_1)`, whose error against `x_1` is
+exactly `e_recon`. So `e_1 >= e_recon` for **any** predictor, and `e_h` cannot fall below
+it either. Measured on the only stratum where the frozen representation has been built,
+`e_recon = 0.0096466` (val, `results_probe_d/report.json`, `mlp_k__baseline`) — **about ten
+times the 1e-3 bound**. Through the frozen chain, D3's state bound is therefore
+unattainable no matter how well the predictor learns: it would score the representation,
+not the optimizer, and would classify a perfectly-trained predictor as a failure. This is
+the same defect 15.1 named — a bound referenced below its own measurement chain's floor —
+in a second place it had not yet been looked for.
+
+**The repair, and why it is not a relaxation.** D3 is a **capability control on the
+predictor and the optimizer**, not a comparison between arms: it asks whether the
+architecture that provably *contains* the system can be *found* by the declared optimizer
+under the declared budget. The shared frozen encoder exists to make the arms mutually
+comparable in D4; D3 compares no arms. Applying it there serves none of its purpose and
+defeats D3's own.
+
+**D3's control stratum therefore measures in state coordinates**: the representation is
+the **exact identity** (`d_z = d_x = 4`, encoder a single linear layer with weight
+`I` and bias `0`, readout `W = I`), so the reconstruction floor drops out of the chain
+and the four bounds measure the predictor and the optimizer alone. **Measured, not
+assumed**: `e_recon = 3.3e-8` — the float32 floor of the declared CPU policy of 14.1, not
+zero, and it is measured by the *same* code path that measures it for a pretrained
+artifact rather than written in as a constant. That is **four decades below** the 1e-3
+bound, against the pretrained representation's `9.6e-3`, which sits one decade *above* it. The thresholds are untouched; only the confound is removed. Nothing about D4
+changes — D4 keeps the pretrained frozen representation of 14.9/14.10 for every arm,
+because there the shared latent is exactly what makes the comparison fair.
+
+### 19.2 The spectral and action bounds, made well-posed
+
+**The defect.** The phase-C gold proves the structured arms reproduce the physical
+discrete operator *exactly* (`3.331e-16` one step, `3.886e-15` at `H=100`, `4.495e-16` on
+eigenvalues) under a construction that requires `2r = d`: a planted change of basis `S`
+block-diagonalises the physical generator, and the two spectra then coincide **as
+multisets by similarity**, not by luck. The complementary negative (`r = 1`, `2r = 2 < d`)
+is refuted by an Eckart-Young rank bound. But the general budget declaration of 14.2 fixes
+`r = d_z = 4` for this system (1532), i.e. `2r = 8` against `d = 4`: **eight learned
+eigenvalues against four physical ones, with no rule anywhere saying which four to
+compare, nor what is expected of the four surplus modes.** As worded, the bound has no
+truth value at `2r > d`.
+
+**The repair.** D3's control cell is declared at **`r = 2`, so `2r = d = 4`** — the exact
+configuration in which the phase-C gold's equality is a proven similarity, and the unique
+value at which the bound is both defined (`2r = d`) and attainable (`2r < d` is refuted).
+D3 is a control, not a grid cell: it is not bound by 13.7's budget-matching allocation,
+which exists to equalise capacity *between arms* in D4.
+
+**The two bounds are taken in STATE coordinates, on the model's one-step PREDICTIVE map**
+— `x_hat_{t+1} = pi(A_bar psi(x_t) + B_bar u_t)`, i.e. lift, step once, project — never on
+`A_bar`/`B_bar` read directly out of the block basis:
+
+**What this map is and is not, stated because the distinction is real.** The free-running
+rollout does **not** iterate this map: `project` is read-only by the predictor's own
+contract, so the rollout carries the lifted state forward
+(`h_{t+1} = A_bar h_t + B_bar u_t`) and projects only to *read* each output. The rollout
+therefore realises `pi . A_bar^t . psi`, which equals `(pi A_bar psi)^t` only when
+`psi . pi` acts as the identity on the reachable set — an **emergent** property of a
+well-trained model, never a structural one. Bounds 2 and 3 thus characterise the one-step
+operator the model applies to a *true* state, and bound 1 characterises the composed
+100-step rollout. They are complementary, not two readings of one quantity, and the gate
+requires **both**: a model can match the one-step operator and still drift over a hundred
+compositions, or track a trajectory while carrying an operator that is not the system's.
+
+- *Spectral*: the eigenvalues of `J_x = d x_hat_{t+1} / d x_t`, paired against
+  `exp(Delta * (alpha +- i omega))` by **optimal pairing over all permutations**
+  (`n = 4`; brute force, never sorting — this system's four eigenvalues share the same
+  real part exactly, so a sorted comparison is genuinely ill-defined here, not merely
+  fragile). Relative error `< 1e-3`.
+- *Action*: `J_u = d x_hat_{t+1} / d u_t`, against the independent ZOH integral
+  `Phi B = (int_0^Delta exp(tA) dt) B`. Relative error `< 1e-3`.
+- The reference for both is built by a Van Loan augmented-matrix exponential on the
+  hand-built physical `(A_x, B_x)` — independent of the closed form under test and of
+  phase A's RK4 polynomial, exactly as the phase-C gold's reference is.
+
+**Why state coordinates and not the block basis, measured rather than argued.** An earlier
+draft of this section compared `B_bar` from `local_operator` directly against `Phi B`.
+That is wrong, and building the evaluator proved it twice over:
+
+1. *The block-basis comparison is basis-dependent and the training objective is blind to
+   the basis.* For any invertible `T` respecting the block structure,
+   `(psi, A_bar, B_bar, pi)` and `(T psi, T A_bar T^-1, T B_bar, pi T^-1)` produce
+   **identical predictions**, so the loss is exactly flat along that family. `A_bar`'s
+   spectrum is invariant under it, but `B_bar -> T B_bar` is not: a model that has
+   genuinely learned the physics can fail a `B_bar`-against-`Phi B` bound by basis luck
+   alone. `J_u = pi B_bar` is invariant (`pi T^-1 . T B_bar = pi B_bar`), and is the
+   physically meaningful quantity — the state-space response to an input.
+2. *No spectral comparison, in any basis, can see a rotation-sign flip.* Measured:
+   flipping the rotation sign leaves the spectral error at `4.5e-16` in the block basis
+   **and at `3.365e-16` on `J_x`**. This is not a defect of either formulation — it is a
+   similarity invariant twice over: a conjugate pair's eigenvalue **set** is invariant
+   under `omega -> -omega`, and passing to state coordinates is itself a similarity, so
+   `J_x` inherits every invariant `A_bar` already had. The action bound is what catches
+   it (`0.0358`).
+
+   **The consequence is declared, not left to be discovered**: the spectral bound is
+   *structurally* insufficient on its own. A model can carry the exact right spectrum and
+   still be a different dynamical system — one rotating the other way. The four bounds
+   are therefore a conjunction of genuinely complementary checks, and the spectral one is
+   never to be reported as if it summarised the others. Both numbers are pinned as
+   assertions in the test, so a future change that alters this blindness is flagged
+   rather than silently absorbed.
+
+The state-coordinate form also removes the dimensional objection this section opened with
+**independently of `r`**: `J_x` is `d x d` whatever `2r` is. `r = 2` therefore stops being
+a precondition for the bound to be well-posed and becomes what it should be — the choice
+to keep the control in the phase-C gold's own proven configuration. Both reasons for the
+repair are recorded because a reader is entitled to know the first formulation was wrong
+and how that was found, rather than reconstructing it from a diff.
+
+**The repair is verified, not asserted.** On a planted exact model: applying an
+anisotropic basis change moves `A_bar` by `9.49e-2` and `B_bar` by `7.55e-3` while
+`J_x`/`J_u` stay invariant to `3.24e-16` / `7.05e-19` — the basis-dependence is removed,
+measured. The bounds evaluate identically at `r = 4` (`2r = 8 > d`, the shape at which the
+original wording had no truth value): spectral `4.48e-16`, action `6.55e-16`, the same as
+at `r = 2`. And the repealed block-basis design, re-run as a mutant on the identical exact
+model, scores `1.176` where the state-coordinate form scores `6.55e-16` — the repair
+changes the verdict on a model that is *correct*, which is exactly the failure mode it was
+written to remove. The Jacobians themselves are cross-checked against central finite
+differences (`1.00e-10` / `5.07e-11`), so autograd is not trusted against itself (R2).
+
+**Vocabulary (REGLES section 3, eliminatory)**: `psi` and `pi` are MLPs, and the head is
+contextual, so `J_x` is state-dependent: what the model carries is a **field of local
+Jacobians**, and its spectral content a **field of local spectra**, never "the spectrum".
+Both bounds are therefore evaluated over the held-out probe states and published as the
+worst-case error **together with the field's dispersion**. On an LTI system a correctly
+trained model should collapse that field to a point — that collapse is a **measured
+outcome**, never an assumption, and any screening of it is display only, never a stability
+certificate.
+
+### 19.3 The cost of the frozen representation, measured rather than assumed
+
+Because 19.1 removes the frozen representation from D3's gated path, the same four
+quantities are **also** computed on the same trained cells through the frozen-chain path
+and published as a **secondary, explicitly non-gating diagnostic**. This turns the
+limitation into a number: it says what the shared representation costs on a system whose
+exact answer is known, which is the quantity a reader of D4 — where every arm runs through
+that chain — needs in order to interpret D4's own magnitudes. It decides nothing.
+
+### 19.4 The gate artifact — `gate.json`
+
+The positive-control verdict is persisted per run, by a pass **separate from training**,
+so that a verdict is recomputable from disk artifacts alone and no checkpoint is ever
+mistaken for a success:
+
+- one `gate.json` per run dir, written **atomically** (temp file + `os.replace` in the same
+  directory) and **last**; closed schema `gate/1`, refused on read if any key is missing,
+  unknown, or non-finite where finiteness is required;
+- it carries the identity, the digests **re-read from the run's own artifacts on disk**
+  (never from caller memory), the split, and **every threshold actually used** — so that a
+  threshold changed after a run is *detectable*, not merely forbidden;
+- terminal states `learns` / `does_not_learn` / `divergence`. On divergence, the measures
+  are `null` and `first_step` is recorded: 11.7 forbids fabricating a number for a rollout
+  that left the finite domain, and a `0` or an `inf` written there would be exactly that;
+- the campaign expands the **same** grid as `sld-factorial`, keeps expansion and the
+  collision preflight **global** under `--shard`, and writes a campaign index covering the
+  **full** grid, a cell never evaluated appearing as `missing`. A run that is not complete
+  is a **named refusal**, never a silent skip;
+- the gate scores on **test** (2321); anything that selects reads val.
+
+### 19.5 D4's execution plan is measured, not assumed
+
+The circulating "about 7-8 h in 3 shards" estimate is an artifact of dividing a sequential
+total by the shard count with zero contention assumed. Measured from the probe's own
+`train.log` files, D4 at 8000 updates is **21-28 h sequential** (`mlp_k` measured directly
+at 8000: 1369 s; `transformer` and `transformer_k` extrapolated from measured 4000-update
+points at the retained rate, with the wider band covering an unmeasured clip overhead and
+the session-to-session contention the probe itself exhibits). The host is a 4P+4E
+asymmetric machine and **no concurrent shard has ever been exercised in this repo** — the
+partition is proven disjoint, its throughput never measured. The shard count and
+`OMP_NUM_THREADS` are therefore **measured by a short calibration before the campaign is
+committed to them**, and the measurement is published with the result. No number in this
+paragraph gates anything; it exists so that the campaign's duration is a measurement
+rather than a hope.
+
+**The calibration, run 2026-08-08 on the real `transformer_k` workload** (the arm that
+dominates the cost), as aggregate optimizer steps per second:
+
+```
+procs x threads:  1x8    1x4    2x4    3x2    4x1    5x1    6x1    7x1    8x1   10x1
+aggregate:       23.9   26.9   48.0   74.4  102.7  112.2  126.1  136.7  136.2  145.8
+```
+
+Two results, both against the prior reasoning. **Intra-op threading is a net loss here**:
+one process at 8 threads (23.9) is slower than the same process at 4 (26.9) — a
+~10 000-parameter model gives the thread pool nothing to amortise its per-call overhead
+against. And **single-threaded processes scale almost linearly to four** (102.7 = 4.3x,
+each running at a lone process's speed), with diminishing returns after.
+
+**D4 runs on five shards, one thread each**, and the deciding argument is not the clock.
+Folding the throughput above into the per-arm costs gives a real makespan of 5.82 h at
+k=4, **4.51 h at k=5**, 4.65 h at k=7 and 4.38 h at k=8 — k=5 and k=8 are within noise of
+each other. What separates them: `cells[i-1::k]` at k=5 lands **exactly** on the five
+seeds, so every shard receives precisely one seed of each (arm x stratum) and the balance
+is **structural**, not an artifact of the cost estimates. If the extrapolated
+`transformer_k` cost is wrong by a factor of two, k=5 stays perfectly balanced while every
+other k skews. A schedule whose balance does not depend on an extrapolation being right is
+worth more than twenty predicted minutes.
+
+### 19.6 Honesty declaration
+
+- **Decided, not derived**: that D3's control runs in state coordinates and at `r = 2`.
+  Both are judgments about what a positive control should isolate; the facts that motivate
+  them are measured, the choice to repair rather than to publish D3 as unattainable is
+  mine.
+- **Derived, not observed after a failure**: the `e_recon` floor argument and the `2r > d`
+  ill-posedness are both a priori, and neither was found by looking at a D3 result — **no
+  D3 run exists at the time this section is committed**. The impulse to look came from
+  writing the config, and this sentence exists so no reader has to reconstruct that from
+  the git history.
+- **No threshold moved**: the four D3 bounds and every constant of 12-18 stand exactly as
+  committed. What changed is *where the quantities are measured* and *which learned
+  eigenvalues the spectral bound names* — in one case removing a confound the bound was
+  never written to include, in the other supplying a definition that was missing.
+- **The narrowing, named**: D3 no longer exercises the frozen-representation path in its
+  gated result. That path is exercised by D2c's tests and by all forty D4 runs, and 19.3
+  measures its cost on D3's own cells rather than leaving it unquantified.
+- **R4**: this section precedes every execution it authorizes.
+
+### 19.7 The two configurations, declared in full
+
+Every value below is fixed here, before the runs. Where a value is inherited from an
+earlier section, that section is named; where it is chosen here, the measurement that
+chose it is given.
+
+**D3 — the learned-oscillator control** (`learned_oscillator_gold.yaml`, root
+`results_d3_oscillator/`, a fifth root disjoint from 14.6's four: a control is not a gate
+and its sentinels must not be adoptable by one):
+
+- *System*: `CoupledOscillators`, default parameters (`m1 = m2 = 1`, `k1 = 1`,
+  `k_c = 0.5`, `k2 = 1.5`, `c = 0.1`, `u_max = 2`), fully observed (`obs: null`,
+  `d_x = 4`). **Measured, because the phase-C gold's hypotheses are preconditions, not
+  assumptions**: the continuous spectrum is two conjugate pairs at
+  `-0.05 +- 1.518722i` and `-0.05 +- 1.090176i` — underdamped, and diagonalizable with
+  `cond(V) = 1.52`. Both hypotheses hold.
+  **A consequence worth naming**: all four eigenvalues share the *same* real part
+  (`-0.05`), the damping being identical on both masses. The ordering ambiguity that
+  19.2 requires optimal pairing for is therefore not a hypothetical of this system — it
+  is its exact configuration, and a sorted comparison is genuinely ill-defined here.
+- *Regime*: `OURegime` (`theta_ou = 1.0`). `NarrowPolicyRegime` is excluded for a stated
+  reason, not silently: it requires `system.energy()`, which `CoupledOscillators` does
+  not define, and inventing an energy for a damped coupled system is a physics decision
+  no config is entitled to make.
+- *`Delta = dt = 0.05`*, the phase-C gold's own step. **Measured**: the discrete
+  eigenvalues of the RK4 propagator that generates the data differ from the exact-ZOH
+  reference by `2.114e-08` relative — **4.7 decades below the 1e-3 bound**, so that bound
+  measures learning and not the integrator, which is the rationale it was written with.
+  The two rejected alternatives are recorded with their numbers: `dt = 0.02` puts the gap
+  at `2.16e-10` but lets `H = 100` cover only 0.35 of a period, a degenerate test;
+  `dt = 0.1` covers 1.7-2.4 periods but raises the gap to `6.78e-07`. At `0.05`, `H = 100`
+  covers 0.87-1.21 periods.
+- *`T = 120`*: `evaluate_free_rollout` requires `H + 2 = 102` states and `H + 1 = 101`
+  actions per episode at `H = 100`; 120 leaves margin without a silent truncation ever
+  being possible (a short split is a refusal, never a `min(H, T)`).
+- *`n_episodes = 256`* (14.2), *seeds `{0,1,2,3,4}` passing individually* (12.4),
+  *8000 updates* (16.1), *`lr = 1e-3`* (16.2), *`grad_clip = 100`* (17.1),
+  *`h_fr = 25`* (15.2).
+- *`d_z = 4`, `r = 2`, representation `identity`* (19.1, 19.2), and *`delta = dt = 0.05`*
+  — the latent operator's ZOH step is the dataset's step by identity, since the predictor
+  advances exactly one dataset step. It is a required key for structured arms (the trainer
+  refuses the family without it) and is stated here so it is a declaration rather than a
+  default nobody wrote down; D4 carries `delta = dt = 0.02` for the same reason, matching
+  the probe's own value on those strata.
+- **Declared now so it cannot be claimed later**: training uses `h_fr = 25` while bound 1
+  scores at `H = 100`. The control therefore asks for extrapolation four times past the
+  trained horizon. That is deliberate — a model that had merely memorised its training
+  horizon would fail it — and it is stated here rather than discovered in the result.
+
+**D4 — the positive-control gate** (`positive_control.yaml`, root `results_gate_d/`,
+14.6):
+
+- *Strata*: the two of the frozen record, re-declared at 14.2's episode count —
+  `DampedPendulum` + `OURegime(theta_ou = 1.0)`, and `DampedPendulum` +
+  `ActionConditionedRegime(K_gain = [[0.8, 0.4]], sigma = 0.3)`; `obs: null`, `d_x = 2`,
+  `T = 100`, `dt = 0.02`, `n_episodes = 256`.
+- *Arms*: the four of 18.1 — `mlp`, `mlp_k`, `transformer`, `transformer_k` — all at
+  `lr = 1e-3` (16.2), `mu_j = 0`.
+- *Budget*: 8000 updates (16.1), `grad_clip = 100` (17.1), `h_fr = 25` (15.2),
+  `target_params = 10000`, `d_z = 4`, seeds `{0,1,2,3,4}` (12.4). **40 runs** (18.1).
+- *Representation*: the pretrained artifact of 14.10 at the retained setting of 16.3 —
+  `w_align = 1.0`, `view_offset = 1`, `w_var = w_cov = w_recon = 1.0`, `tau_ema = 0.99`,
+  `d_z = 4`, `encoder_hidden = [64, 64]`, `epochs = 50`, `lr = 1e-3`, `seed = 0`. These
+  are the probe's own values, reused unchanged so that D4 is scored against the same
+  representation the retained entry values were selected under, not a variant of it.
+- *Attainability, checked per stratum before scoring* (15.1): `gamma_1 * e_recon <
+  e_1_pers`. A stratum that fails it is published **"ungated (upper bound
+  unattainable)"**, its numbers unadjusted. Only one stratum has been measured so far
+  (`e_1_pers / e_recon = 4.0554` against `gamma_1 = 2`); the second is measured when its
+  representation is built, and its value is published whichever way it falls.
+
+### 19.8 A wiring defect found while writing these configs, and its repair
+
+17.1 declares `grad_clip = 100` uniform across every phase-D arm, and deliberately keeps
+the key **out** of the trainer's `_DEFAULTS` so that existing runs' `config_hash` does not
+move — a property pinned by a test on run `42cf513a`. But the runner derives the set of
+keys a YAML may legally name **from** `_DEFAULTS`
+(`factorial._trainer_allowed_keys`): `_DEFAULTS | (_REQUIRED_KEYS - runner-owned) |
+family_keys`. Measured: `grad_clip` is absent from the 24 keys the four D4 arms accept.
+
+So no grid config could declare the guard that 17.1 makes mandatory. The probe never met
+this because it builds its trainer configs in Python and bypasses the schema entirely;
+the two paths had drifted, and the only reason it was not a *silent* fault is that
+`expand()` refuses an unknown key loudly rather than dropping it.
+
+The repair makes `grad_clip` **declarable without becoming defaulted**: an explicitly
+optional key, recognised by the validator, still absent from `_DEFAULTS`, so 17.1's
+`config_hash` guarantee survives untouched and is re-tested as such. Recorded here rather
+than fixed quietly, because a protocol value that no configuration could carry is exactly
+the class of defect this document exists to make visible — a declaration is worth what its
+wiring is worth (R7).

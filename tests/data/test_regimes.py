@@ -278,6 +278,34 @@ def test_narrow_policy_pumps_toward_target_energy():
     assert fraction >= 0.7
 
 
+def test_narrow_policy_on_coupled_oscillators_raises_no_energy():
+    # Documented trap (PROTOCOL.md section 19, Wave D3): CoupledOscillators
+    # is registered in sld.experiments.factorial/loading's system registries
+    # but does NOT define energy(x) -- a damped, wall-coupled two-mass system
+    # has no single natural "energy target" to shape toward, and inventing
+    # one is a physics judgment out of scope for the registration wiring.
+    # NarrowPolicyRegime.sample_episode requires system.energy(x) (module
+    # docstring above); D3's config must use OURegime instead. This test
+    # locks in that AttributeError so the trap cannot silently disappear (a
+    # future energy() added elsewhere) or silently worsen (a different,
+    # harder-to-diagnose failure) without this test being touched.
+    from sld.systems.coupled_oscillators import CoupledOscillators
+
+    system = CoupledOscillators()
+    assert not hasattr(system, "energy")
+    regime = NarrowPolicyRegime(E_target=1.0)
+    rng = np.random.default_rng(0)
+    try:
+        regime.sample_episode(system, T=5, dt=0.02, rng=rng)
+    except AttributeError as exc:
+        print(f"[narrow policy / coupled oscillators] raised as documented: {exc}")
+    else:
+        raise AssertionError(
+            "expected AttributeError: CoupledOscillators has no energy(x), "
+            "but NarrowPolicyRegime.sample_episode did not raise"
+        )
+
+
 def test_replay_contract_action_conditioned():
     system = DampedPendulum()
     regime = ActionConditionedRegime(K_gain=np.array([[0.8, 0.4]]), sigma=0.3)

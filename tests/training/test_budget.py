@@ -285,6 +285,85 @@ def test_out_of_reach_budget_raises():
         match_budget("mlp", D_Z, D_U, target_params=10)
 
 
+# -- Travail 3 (PROTOCOL.md section 19.2): r=2 is already a declarable knob --
+#
+# Established, not implemented: `r` is one of `_STRUCTURED_KEYS =
+# frozenset({"delta", "r"})` (sld.training.trainer._FAMILY_CONFIG_KEYS,
+# trainer.py) for the three structured families, so it already flows
+# `Trainer.fit`'s `passthrough = {k: cfg[k] for k in
+# _FAMILY_CONFIG_KEYS[cfg["family"]] if k in cfg}` -> `get_predictor(family,
+# d_z, d_u, target_params=..., **passthrough)` -> `match_budget(family, d_z,
+# d_u, target_params=..., **overrides)` -> here, `_kwargs_for`'s
+# `r=fixed.get("r", d_z)` line (structured.py's own module docstring already
+# names this exact call site). A D3 config declares `r: 2` directly in an
+# arm's `overrides:` (or `base:`, if every arm in that config is a
+# structured family) -- no new key, no new call site. This section proves
+# it bites, at the SAME call site (`get_predictor`) `Trainer.fit` uses.
+
+
+def test_r_equals_2_declared_via_get_predictor_gives_2r_equals_4_operator():
+    # POSITIVE: r=2 (PROTOCOL.md section 19.2's D3 control, 2r = d = 4 for
+    # d_z=4) reaches the constructed StructuredPredictor's own `r`/`d_h`,
+    # and the REAL operator local_operator() returns is (2r, 2r) = (4, 4) --
+    # not merely a constructor attribute, the thing the spectral/action
+    # bounds of 19.2 actually read.
+    from sld.predictors.registry import get_predictor
+    from sld.predictors.structured import MLPKPredictor
+
+    d_z, d_u = 4, 1
+    model = get_predictor("mlp_k", d_z, d_u, target_params=2_000, delta=0.05, r=2)
+    assert isinstance(model, MLPKPredictor)
+    assert model.r == 2
+    assert model.d_h == 4  # d_h = 2r
+
+    h = torch.zeros(1, model.d_h, dtype=torch.get_default_dtype())
+    u = torch.zeros(1, d_u, dtype=torch.get_default_dtype())
+    A_bar, B_bar = model.local_operator(h, u, PredictorState())
+    print(f"[budget 19.2] r=2 explicit: A_bar.shape={tuple(A_bar.shape)} (want (1, 4, 4))")
+    assert A_bar.shape == (1, 4, 4)
+    assert B_bar.shape == (1, 4, d_u)
+
+
+def test_r_default_is_d_z_giving_2r_equals_8_operator_the_contrast():
+    # NEGATIVE (contrast, same measurement): the default `r` every OTHER run
+    # in this repo gets through get_predictor is d_z (the 2x lifting ratio
+    # koopman_ssm gets from n_pairs=d_z, structured.py's own module
+    # docstring) -- at d_z=4 that is r=4, 2r=8, NOT 4. This is the exact
+    # ill-posedness PROTOCOL.md section 19.2 names ("eight learned
+    # eigenvalues against four physical ones") and the reason D3 must
+    # declare r=2 explicitly rather than relying on the default.
+    from sld.predictors.registry import get_predictor
+    from sld.predictors.structured import MLPKPredictor
+
+    d_z, d_u = 4, 1
+    model = get_predictor("mlp_k", d_z, d_u, target_params=2_000, delta=0.05)  # no r=...
+    assert isinstance(model, MLPKPredictor)
+    assert model.r == d_z == 4
+    assert model.d_h == 8  # 2r = 8 != d = 4
+
+    h = torch.zeros(1, model.d_h, dtype=torch.get_default_dtype())
+    u = torch.zeros(1, d_u, dtype=torch.get_default_dtype())
+    A_bar, _ = model.local_operator(h, u, PredictorState())
+    print(f"[budget 19.2] r=default(d_z)=4: A_bar.shape={tuple(A_bar.shape)} (contrast: (1, 8, 8), NOT 4)")
+    assert A_bar.shape == (1, 8, 8)
+
+
+def test_r_is_a_declared_trainer_config_key_for_every_structured_family():
+    # the config-key surface itself, pinned: `r` is legal (and, per
+    # trainer.py's canonicalization, defaults to d_z when omitted -- see
+    # test_structured_family_config_is_canonicalized_and_delta_is_required
+    # in test_trainer.py) for exactly the three structured families, so a
+    # config's `overrides: {r: 2}` on an `mlp_k`/`transformer_k`/`ssm_k` arm
+    # is a legal, hashed Trainer config key -- not a knob this wave has to
+    # invent.
+    from sld.training import trainer as trainer_mod
+
+    for family in STRUCTURED_FAMILIES:
+        assert "r" in trainer_mod._FAMILY_CONFIG_KEYS[family]
+    for family in ("mlp", "transformer", "min_ssm", "koopman_ssm"):
+        assert "r" not in trainer_mod._FAMILY_CONFIG_KEYS[family]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
 

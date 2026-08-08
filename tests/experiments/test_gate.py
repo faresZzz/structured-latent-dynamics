@@ -12,14 +12,19 @@ by calling anything under test.
 
 from __future__ import annotations
 
+import csv
+import json
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+import yaml
 from torch import nn
 
 from sld.audit.rollout import (
+    evaluate_positive_control,
     fit_train_state_scale,
     linear_extrapolation_rollout,
     normalized_state_error,
@@ -31,8 +36,20 @@ from sld.encoders.pretrain import (
     pretrain_representation,
     save_frozen_representation,
 )
-from sld.experiments.gate import RolloutDivergence, evaluate_free_rollout, evaluate_run_free_rollout
+from sld.experiments import protocol as protocol_mod
+from sld.experiments.factorial import _build_dataset_for, _stratum_representation_path
+from sld.experiments.factorial import main as factorial_main
+from sld.experiments.gate import (
+    FreeRolloutResult,
+    RolloutDivergence,
+    evaluate_free_rollout,
+    evaluate_gate_campaign,
+    evaluate_run_free_rollout,
+    read_gate_artifact,
+    write_gate_artifact,
+)
 from sld.predictors.base import PredictorModule, PredictorState
+from sld.training.trainer import data_fingerprint
 
 
 class _IdentityEncoder(nn.Module):
@@ -406,6 +423,477 @@ def _small_representation(tmp_path, data, *, seed: int, name: str):
     path = tmp_path / f"{name}.pt"
     save_frozen_representation(artifact, path)
     return load_frozen_representation(path)
+
+
+# ==============================================================================
+# gate.json persistence + campaign (Wave: gate persistence). Everything above
+# this point tests the pure evaluation core; everything below tests
+# write_gate_artifact/read_gate_artifact/evaluate_gate_campaign -- the
+# persistence half of gate.py.
+# ==============================================================================
+
+
+def _trained_run_dir(tmp_path: Path, *, exp_name: str, seed: int = 0) -> Path:
+    """A cheap, REAL completed run dir (valid run_complete.json + config.yaml
+    on disk) for write_gate_artifact/read_gate_artifact tests. Deliberately
+    tiny (T=10) -- these tests attach their OWN FreeRolloutResult/
+    RolloutDivergence objects rather than calling evaluate_run_free_rollout
+    on this run, so it never needs to satisfy H_GATE's horizon requirement."""
+    from sld.data.generate import build_dataset
+    from sld.data.regimes import OURegime
+    from sld.systems.damped_pendulum import DampedPendulum
+    from sld.training.trainer import Trainer
+
+    data = build_dataset(
+        system=DampedPendulum(), regime=OURegime(), obs=None, n_episodes=6, T=10, dt=0.02, seed=0
+    )
+    art = _small_representation(tmp_path, data, seed=1, name=exp_name)
+    trainer = Trainer(_run_config(tmp_path, exp_name=exp_name, seed=seed), representation=art)
+    result = trainer.fit(data)
+    return Path(result["paths"]["ckpt"]).parent
+
+
+def _positive_control_result(e_h, persistence_e_h, linear_e_h, *, h_gate, gamma, tau_1, tau=0.5):
+    """A REAL ``FreeRolloutResult``, built from hand-picked curves through the
+    REAL ``evaluate_positive_control``/``vpt`` (R2: the gate arithmetic is
+    never reimplemented here) -- lets a test pick exactly which bound passes
+    without needing a predictor whose rollout happens to land there."""
+    e_h = np.asarray(e_h, dtype=np.float64)
+    persistence_e_h = np.asarray(persistence_e_h, dtype=np.float64)
+    linear_e_h = np.asarray(linear_e_h, dtype=np.float64)
+    pc = evaluate_positive_control(e_h, persistence_e_h, linear_e_h, h_gate=h_gate, gamma=gamma, tau_1=tau_1)
+    per_episode_e_h = e_h[None, :]
+    vpt_result = _vpt_reducer(per_episode_e_h, tau)
+    return FreeRolloutResult(
+        e_h=e_h,
+        persistence_e_h=persistence_e_h,
+        linear_e_h=linear_e_h,
+        per_episode_e_h=per_episode_e_h,
+        model_pred_x=np.zeros((1, e_h.shape[0], 1)),
+        vpt_value=vpt_result.value,
+        vpt_status=vpt_result.status,
+        vpt_median=float(np.median(vpt_result.value)),
+        vpt_censored=int(np.sum(vpt_result.status == "censored")),
+        horizon=e_h.shape[0],
+        positive_control=pc,
+    )
+
+
+def _test_protocol(**overrides) -> dict:
+    base = dict(
+        h_gate=3, gamma=5.0, tau_1=0.01, tau_vpt=0.5, horizon=3,
+        gamma_1=2.0, e_1_pers=1.0, e_recon=0.1, attainable=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def _test_identity(run_dir, **overrides) -> dict:
+    base = dict(
+        cell_id=0,
+        arm={"backbone": "mlp", "structure": "off", "family": "mlp"},
+        seed=0,
+        stratum_system="pendulum",
+        stratum_regime="ou",
+        run_dir=str(run_dir),
+    )
+    base.update(overrides)
+    return base
+
+
+def _mini_gate_config(tmp_path: Path, *, exp_name: str, seeds: list[int], n_episodes: int = 8, T: int = 28):
+    """A real, minimal sld-factorial YAML (DampedPendulum/OURegime, one arm,
+    a `representation:` block) written to disk -- T large enough (>=26) to
+    satisfy H_GATE=25's own horizon requirement, so the campaign tests below
+    exercise the PRODUCTION path (protocol.py's real constants), not a
+    shrunk stand-in for it."""
+    results_root = tmp_path / "results"
+    config = {
+        "exp_name": exp_name,
+        "datasets": {
+            "ou": {
+                "system": {"name": "DampedPendulum", "params": {}},
+                "regime": {"name": "OURegime", "params": {"theta_ou": 1.0}},
+                "obs": None,
+                "n_episodes": n_episodes,
+                "T": T,
+                "dt": 0.02,
+                "seed": 0,
+            }
+        },
+        "base": {
+            "d_x": 2,
+            "d_z": 4,
+            "d_u": 1,
+            "epochs": 1,
+            "batch_episodes": 2,
+            "target_params": 500,
+            "encoder_hidden": [8],
+            "results_root": str(results_root),
+        },
+        "representation": {
+            "epochs": 2,
+            "lr": 1e-2,
+            "seed": 0,
+            "w_align": 1.0,
+            "w_var": 1.0,
+            "w_cov": 1.0,
+            "w_recon": 1.0,
+            "view_offset": 1,
+            "tau_ema": 0.99,
+            "d_z": 4,
+            "encoder_hidden": [8],
+        },
+        "arms": [{"backbone": "mlp", "structure": "off", "overrides": {"mu_j": 0.0}}],
+        "seeds": seeds,
+    }
+    path = tmp_path / f"{exp_name}.yaml"
+    with open(path, "w") as f:
+        yaml.safe_dump(config, f)
+    return path, results_root
+
+
+# -- write_gate_artifact / read_gate_artifact: round trip, atomicity -------
+
+
+def test_write_then_read_gate_artifact_round_trips_exactly(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_roundtrip")
+    split = _toy_lti_split(_A_TRUE, _B_TRUE, n_episodes=4, T=12, seed=40)
+    predictor = _LinearOracle(_A_TRUE, _B_TRUE)
+    kw = _kwargs(h_gate=5, gamma=5.0, tau_1=1.0, horizon=8, tau=0.5)
+    result = evaluate_free_rollout(
+        _IdentityEncoder(), predictor, split, W=_identity_readout(2), sigma_train=_SIGMA, **kw
+    )
+    protocol = _test_protocol(h_gate=kw["h_gate"], gamma=kw["gamma"], tau_1=kw["tau_1"], tau_vpt=kw["tau"], horizon=kw["horizon"])
+    write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+    payload = read_gate_artifact(run_dir)
+
+    print(f"[gate] round trip: status={payload['status']} verdict={result.positive_control.verdict}")
+    np.testing.assert_array_equal(np.asarray(payload["measures"]["e_h"]), result.e_h)
+    np.testing.assert_array_equal(np.asarray(payload["measures"]["persistence_e_h"]), result.persistence_e_h)
+    np.testing.assert_array_equal(np.asarray(payload["measures"]["linear_e_h"]), result.linear_e_h)
+    assert payload["status"] == result.positive_control.verdict
+    assert payload["measures"]["m_low"] == result.positive_control.m_low
+    assert payload["measures"]["m_high"] == result.positive_control.m_high
+    assert payload["measures"]["lower_bound"] == result.positive_control.lower_bound
+    assert payload["measures"]["upper_bound"] == result.positive_control.upper_bound
+    assert payload["schema"] == "gate/1"
+    assert payload["split"] == "test"
+
+
+def test_gate_json_written_atomically_via_os_replace(tmp_path, monkeypatch):
+    # spy at the REAL call site inside sld.experiments.gate -- REGLES 7.1:
+    # exercise the production path, never a parallel one that only looks
+    # like it (this project has already been bitten by exactly that).
+    import sld.experiments.gate as gate_mod
+
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_atomic")
+    result = _positive_control_result([0.05, 0.05, 0.05], [1, 1, 1], [1, 1, 1], h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+
+    calls = []
+    real_replace = os.replace
+
+    def _spy_replace(src, dst):
+        assert Path(src).exists() and Path(src).stat().st_size > 0  # never rename a partial write
+        calls.append((Path(src), Path(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(gate_mod.os, "replace", _spy_replace)
+
+    gate_path = write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+    print(f"[gate] os.replace calls={calls}")
+    assert len(calls) == 1
+    assert calls[0][1] == gate_path
+    assert gate_path.name == "gate.json"
+    assert gate_path.exists()
+    assert not gate_path.with_name("gate.json.tmp").exists()
+
+
+# -- negative 1/2: only one bound passing persists does_not_learn ----------
+
+
+def test_only_lower_bound_passing_persists_does_not_learn(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_lower_only")
+    # baseline e_H (persistence/linear) = 1.0 at h_gate=3, gamma=5 -> passing
+    # threshold is e_H < 0.2; e_1 = 0.5 >= tau_1 = 0.01 -> upper bound fails.
+    result = _positive_control_result(
+        e_h=[0.5, 0.5, 0.1], persistence_e_h=[1, 1, 1], linear_e_h=[1, 1, 1],
+        h_gate=3, gamma=5.0, tau_1=0.01,
+    )
+    assert result.positive_control.lower_bound and not result.positive_control.upper_bound
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=0.01, tau_vpt=0.5, horizon=3)
+    write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+    payload = read_gate_artifact(run_dir)
+    print(f"[gate] lower-only: status={payload['status']} measures={payload['measures']['lower_bound']}/{payload['measures']['upper_bound']}")
+    assert payload["status"] == "does_not_learn"
+    assert payload["measures"]["lower_bound"] is True
+    assert payload["measures"]["upper_bound"] is False
+
+
+def test_only_upper_bound_passing_persists_does_not_learn(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_upper_only")
+    result = _positive_control_result(
+        e_h=[0.05, 0.9, 0.9], persistence_e_h=[1, 1, 1], linear_e_h=[1, 1, 1],
+        h_gate=3, gamma=5.0, tau_1=1.0,
+    )
+    assert result.positive_control.upper_bound and not result.positive_control.lower_bound
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+    payload = read_gate_artifact(run_dir)
+    print(f"[gate] upper-only: status={payload['status']} measures={payload['measures']['lower_bound']}/{payload['measures']['upper_bound']}")
+    assert payload["status"] == "does_not_learn"
+    assert payload["measures"]["lower_bound"] is False
+    assert payload["measures"]["upper_bound"] is True
+
+
+# -- negative 3: non-finite value in the chain -> refused, never fabricated -
+
+
+def test_divergence_writes_null_measures_never_a_fabricated_number(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_divergence")
+    split = _toy_lti_split(_A_TRUE, _B_TRUE, n_episodes=3, T=20, seed=30)
+    predictor = _GrowingPredictor(10.0**40)
+    kw = _kwargs(horizon=12)
+    with pytest.raises(RolloutDivergence) as excinfo:
+        evaluate_free_rollout(
+            _IdentityEncoder(), predictor, split, W=_identity_readout(2), sigma_train=_SIGMA, **kw
+        )
+    divergence = excinfo.value
+
+    protocol = _test_protocol(
+        h_gate=kw["h_gate"], gamma=kw["gamma"], tau_1=kw["tau_1"], tau_vpt=kw["tau"], horizon=kw["horizon"]
+    )
+    write_gate_artifact(run_dir, divergence, identity=_test_identity(run_dir), protocol=protocol, split="test")
+    payload = read_gate_artifact(run_dir)
+    print(f"[gate] divergence: status={payload['status']} first_step={payload['first_step']}")
+    assert payload["status"] == "divergence"
+    assert payload["first_step"] == divergence.first_step
+    assert payload["measures"] is None  # never a fabricated 0 or inf
+
+
+def test_read_gate_artifact_refuses_non_finite_measure_never_fabricated(tmp_path):
+    # a mutant/corruption that smuggles a NaN into a persisted curve must be
+    # refused on READ -- write a valid artifact, hand-corrupt the bytes on
+    # disk (simulating exactly that), and check the validator bites.
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_nonfinite")
+    result = _positive_control_result([0.05, 0.05, 0.05], [1, 1, 1], [1, 1, 1], h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+
+    gate_path = run_dir / "gate.json"
+    payload = json.loads(gate_path.read_text())
+    payload["measures"]["e_h"][0] = float("nan")
+    gate_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="e_h"):
+        read_gate_artifact(run_dir)
+
+
+# -- write_gate_artifact: closed schema + sentinel refusal ------------------
+
+
+def test_write_gate_artifact_refuses_incomplete_identity(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_bad_identity")
+    result = _positive_control_result([0.05] * 3, [1] * 3, [1] * 3, h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    bad_identity = _test_identity(run_dir)
+    del bad_identity["seed"]
+    with pytest.raises(ValueError, match="identity"):
+        write_gate_artifact(run_dir, result, identity=bad_identity, protocol=protocol, split="test")
+
+
+def test_write_gate_artifact_refuses_incomplete_protocol(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_bad_protocol")
+    result = _positive_control_result([0.05] * 3, [1] * 3, [1] * 3, h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    del protocol["gamma_1"]
+    with pytest.raises(ValueError, match="protocol"):
+        write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+
+
+def test_write_gate_artifact_refuses_run_without_valid_sentinel(tmp_path):
+    incomplete_dir = tmp_path / "not_a_real_run"
+    incomplete_dir.mkdir()
+    result = _positive_control_result([0.05] * 3, [1] * 3, [1] * 3, h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    with pytest.raises(ValueError, match="completion sentinel"):
+        write_gate_artifact(
+            incomplete_dir, result, identity=_test_identity(incomplete_dir), protocol=protocol, split="test"
+        )
+
+
+# -- negative 7: a threshold changed after the run is written --------------
+
+
+def test_read_gate_artifact_refuses_when_threshold_changed_since_write(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_threshold_moved")
+    result = _positive_control_result([0.05] * 3, [1] * 3, [1] * 3, h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+
+    with pytest.raises(ValueError, match="h_gate"):
+        read_gate_artifact(run_dir, expected_protocol={**protocol, "h_gate": 999})
+    # an unmoved threshold must NOT be refused
+    read_gate_artifact(run_dir, expected_protocol=protocol)
+
+
+def test_read_gate_artifact_refuses_when_digest_changed_since_write(tmp_path):
+    run_dir = _trained_run_dir(tmp_path, exp_name="gate_digest_moved")
+    result = _positive_control_result([0.05] * 3, [1] * 3, [1] * 3, h_gate=3, gamma=5.0, tau_1=1.0)
+    protocol = _test_protocol(h_gate=3, gamma=5.0, tau_1=1.0, tau_vpt=0.5, horizon=3)
+    write_gate_artifact(run_dir, result, identity=_test_identity(run_dir), protocol=protocol, split="test")
+    payload = read_gate_artifact(run_dir)
+    real_config_hash = payload["digests"]["config_hash"]
+
+    with pytest.raises(ValueError, match="config_hash"):
+        read_gate_artifact(run_dir, expected_digests={"config_hash": real_config_hash + "dead"})
+    # the real digest must NOT be refused
+    read_gate_artifact(run_dir, expected_digests={"config_hash": real_config_hash})
+
+
+# -- evaluate_gate_campaign: full grid, end to end --------------------------
+
+
+def test_campaign_end_to_end_reloadable_gate_json_matches_recomputed_verdict(tmp_path):
+    cfg_path, results_root = _mini_gate_config(tmp_path, exp_name="gate_e2e", seeds=[0])
+    rc = factorial_main(["--config", str(cfg_path)])
+    assert rc == 0
+
+    results = evaluate_gate_campaign(cfg_path)
+    assert len(results) == 1
+    assert results[0]["status"] in ("learns", "does_not_learn")
+    run_dir = Path(results[0]["run_dir"])
+    payload = read_gate_artifact(run_dir)
+    assert payload["status"] == results[0]["status"]
+    assert payload["protocol"]["h_gate"] == protocol_mod.H_GATE
+    assert payload["protocol"]["gamma"] == protocol_mod.GAMMA
+    assert payload["protocol"]["tau_vpt"] == protocol_mod.TAU_VPT
+    assert payload["protocol"]["horizon"] == protocol_mod.H_GATE
+
+    with open(cfg_path) as f:
+        config = yaml.safe_load(f)
+    data = _build_dataset_for(config["datasets"]["ou"])
+    data_hash = data_fingerprint(data)
+    rep_path = _stratum_representation_path(results_root, "gate_e2e", "DampedPendulum", "OURegime", data_hash)
+    artifact = load_frozen_representation(rep_path)
+
+    # independent re-derivation: reload the frozen representation + the SAME
+    # test split from disk, call evaluate_run_free_rollout again, and check
+    # the persisted curves match EXACTLY (atol=rtol=0) -- the numbers in
+    # gate.json ARE the computed ones, not a rounded or re-summarized copy.
+    recomputed = evaluate_run_free_rollout(
+        run_dir, artifact, data["test"],
+        horizon=protocol_mod.H_GATE, tau=protocol_mod.TAU_VPT,
+        h_gate=protocol_mod.H_GATE, gamma=protocol_mod.GAMMA, tau_1=payload["protocol"]["tau_1"],
+    )
+    print(f"[gate] campaign e2e: persisted verdict={payload['status']} recomputed verdict={recomputed.positive_control.verdict}")
+    np.testing.assert_array_equal(np.asarray(payload["measures"]["e_h"]), recomputed.e_h)
+    np.testing.assert_array_equal(np.asarray(payload["measures"]["persistence_e_h"]), recomputed.persistence_e_h)
+    np.testing.assert_array_equal(np.asarray(payload["measures"]["linear_e_h"]), recomputed.linear_e_h)
+    assert payload["status"] == recomputed.positive_control.verdict
+
+    # gate_index.csv covers the (single-cell) grid too
+    index_rows = list(csv.DictReader((results_root / "gate_e2e" / "gate_index.csv").open()))
+    assert len(index_rows) == 1
+    assert index_rows[0]["status"] == payload["status"]
+
+
+def test_missing_seed_is_refused_named_and_shows_missing_in_index(tmp_path):
+    # negative 4: the campaign declares 2 seeds; only seed 0 is ever trained
+    # (--shard 1/2 trains exactly cell index 0) -- seed 1's run_dir never
+    # exists at all. evaluate_gate_campaign must still return an entry for
+    # BOTH cells (never silently drop the untrained one), status "missing"
+    # for the untrained cell, and gate_index.csv must show it explicitly.
+    cfg_path, results_root = _mini_gate_config(tmp_path, exp_name="gate_missing_seed", seeds=[0, 1])
+    rc = factorial_main(["--config", str(cfg_path), "--shard", "1/2"])
+    assert rc == 0
+
+    results = evaluate_gate_campaign(cfg_path)
+    print(f"[gate] missing-seed campaign results: {results}")
+    assert len(results) == 2
+    by_index = {r["index"]: r for r in results}
+    assert by_index[0]["status"] in ("learns", "does_not_learn")
+    assert by_index[1]["status"] == "missing"
+
+    rows = list(csv.DictReader((results_root / "gate_missing_seed" / "gate_index.csv").open()))
+    assert len(rows) == 2
+    missing_rows = [r for r in rows if r["seed"] == "1"]
+    assert len(missing_rows) == 1
+    assert missing_rows[0]["status"] == "missing"
+
+
+def test_gate_index_covers_full_grid_even_under_shard(tmp_path):
+    # negative 4's mirror: BOTH seeds are trained, but the GATE campaign
+    # itself only evaluates a shard -- gate_index.csv must still cover both
+    # cells (never just the shard's slice), reporting "missing" for the cell
+    # this invocation never gated (never confusing "trained but not gated"
+    # with a genuinely evaluated verdict).
+    cfg_path, results_root = _mini_gate_config(tmp_path, exp_name="gate_shard_index", seeds=[0, 1])
+    rc = factorial_main(["--config", str(cfg_path)])
+    assert rc == 0
+
+    results = evaluate_gate_campaign(cfg_path, shard=(1, 2))
+    assert len(results) == 1
+    assert results[0]["index"] == 0
+
+    rows = list(csv.DictReader((results_root / "gate_shard_index" / "gate_index.csv").open()))
+    assert len(rows) == 2
+    by_seed = {int(r["seed"]): r["status"] for r in rows}
+    assert by_seed[0] in ("learns", "does_not_learn")
+    assert by_seed[1] == "missing"
+
+
+def test_campaign_refuses_when_split_is_shorter_than_h_gate(tmp_path):
+    # negative 5: H_GATE is fixed at 25 (protocol.py) and never overridable
+    # from the campaign config -- a dataset too short for it must be a named
+    # refusal, never a silent min(H, T).
+    cfg_path, results_root = _mini_gate_config(tmp_path, exp_name="gate_too_short", seeds=[0], T=10)
+    rc = factorial_main(["--config", str(cfg_path)])
+    assert rc == 0
+    with pytest.raises(ValueError, match="fewer than"):
+        evaluate_gate_campaign(cfg_path)
+
+
+def test_campaign_propagates_non_divergence_valueerrors_uncaught(tmp_path, monkeypatch):
+    """Negative 6 (representation digest mismatch), wired at the CAMPAIGN
+    level.
+
+    A naive version of this test would overwrite the stratum's cached
+    representation file on disk with a DIFFERENT artifact (same stratum,
+    different pretraining seed) after training, then call
+    evaluate_gate_campaign expecting evaluate_run_free_rollout's own digest
+    check to fire. It does not: representation_digest is baked into
+    config_hash (Trainer.__init__), which is baked into run_dir's own name
+    -- so a changed on-disk representation makes the campaign's preflight
+    resolve a DIFFERENT (never-trained) run_dir, and the cell is reported
+    "missing", not "digest mismatch". The digest check inside
+    evaluate_run_free_rollout is therefore UNREACHABLE through the
+    campaign's own normal resolution flow; it guards a different calling
+    pattern (a caller handing it a mismatched artifact directly, as
+    test_factorial.py's own test_representation_digest_mismatch_is_refused
+    already exercises).
+
+    What IS this module's own job to prove: that evaluate_gate_campaign
+    propagates a ValueError from evaluate_run_free_rollout UNCAUGHT --
+    only RolloutDivergence is caught per cell; any other refusal (a digest
+    mismatch, a schema error) is a campaign-wide identity/data problem, not
+    a per-seed fluke, so it must abort the whole campaign rather than being
+    silently recorded as "missing".
+    """
+    import sld.experiments.gate as gate_mod
+
+    cfg_path, results_root = _mini_gate_config(tmp_path, exp_name="gate_digest_wiring", seeds=[0])
+    rc = factorial_main(["--config", str(cfg_path)])
+    assert rc == 0
+
+    def _fake_evaluate(*args, **kwargs):
+        raise ValueError("representation digest mismatch: fake, for this test")
+
+    monkeypatch.setattr(gate_mod, "evaluate_run_free_rollout", _fake_evaluate)
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        evaluate_gate_campaign(cfg_path)
 
 
 def test_representation_digest_mismatch_is_refused(tmp_path):

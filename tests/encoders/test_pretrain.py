@@ -23,6 +23,7 @@ from sld.encoders.frame_mlp import FrameMLPEncoder
 from sld.encoders.pretrain import (
     FrozenRepresentationArtifact,
     apply_readout,
+    build_identity_representation,
     fit_readout,
     load_frozen_representation,
     pretrain_representation,
@@ -33,6 +34,7 @@ from sld.encoders.pretrain import (
 from sld.encoders.pretrain import _build_two_views, _tau1_condition_holds, _train_step, _VIEW_OFFSET
 from sld.audit.rollout import fit_train_state_scale, normalized_state_error, persistence_rollout
 from sld.objectives.jepa import EMATarget, JEPALoss
+from sld.systems.coupled_oscillators import CoupledOscillators
 from sld.systems.damped_pendulum import DampedPendulum
 from sld.training.seeding import set_seed
 
@@ -124,6 +126,16 @@ def _train_small_fixture(
 
 def _small_dataset(n_episodes: int = 8, T: int = 20, seed: int = 0) -> dict:
     system = DampedPendulum()
+    return build_dataset(
+        system=system, regime=OURegime(), obs=None, n_episodes=n_episodes, T=T, dt=0.02, seed=seed
+    )
+
+
+def _small_coupled_oscillators_dataset(n_episodes: int = 8, T: int = 20, seed: int = 0) -> dict:
+    # D3's control system (PROTOCOL.md section 19): state_dim=4, so
+    # build_identity_representation is exercised at its real d_z=d_x=4,
+    # not DampedPendulum's 2.
+    system = CoupledOscillators()
     return build_dataset(
         system=system, regime=OURegime(), obs=None, n_episodes=n_episodes, T=T, dt=0.02, seed=seed
     )
@@ -258,6 +270,155 @@ def test_e_1_pers_matches_independent_persistence_computation():
     pers_pred = persistence_rollout(x0, horizon=1)
     e_1_pers_independent = float(normalized_state_error(pers_pred, x1[:, None, :], sigma_train)[0])
     assert e_1_pers_independent == pytest.approx(artifact.manifest["e_1_pers"], abs=1e-10)
+
+
+# -- build_identity_representation: D3's control-stratum representation -----
+# (PROTOCOL.md section 19.1, Wave D3). REGLES section 7.1's positive/negative
+# pair, independent reference: the positive compares the encoder's ACTUAL
+# output against the raw float32-cast input (never against the artifact's
+# OWN claim about itself), and the negative constructs a mismatched d_z by
+# hand rather than trusting the function's own error message alone.
+
+
+def test_identity_encoder_is_bit_identical_to_its_float32_input():
+    """Positive, independent reference: z = encoder(x) compared against the
+    SAME float32-cast x fed in -- atol=rtol=0 (torch.equal), not
+    approximate. A mutant that makes the encoder even slightly affine
+    (weight != I, or a nonzero bias) must fail this exactly, not "mostly
+    pass"."""
+    data = _small_coupled_oscillators_dataset(seed=0)
+    artifact = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+
+    encoder = FrameMLPEncoder(4, 4, ())
+    encoder.load_state_dict(artifact.encoder_state_dict)
+    encoder.eval()
+
+    x = torch.as_tensor(data["val"]["x"], dtype=torch.float32).reshape(-1, 4)
+    with torch.no_grad():
+        z = encoder(x)
+    max_abs_diff = (z - x).abs().max().item()
+    print(f"[identity D3] max|z - x| (float32 cast) = {max_abs_diff:.3e} (must be exactly 0)")
+    assert torch.equal(z, x)  # bit-identical, atol=rtol=0
+
+
+def test_identity_encoder_weight_is_exactly_eye_and_bias_exactly_zero():
+    """Positive, direct: the SAVED weights are exactly ``I``/``0`` -- not
+    merely 'close enough to act like identity on this dataset'. This is
+    what makes the bit-exact forward-pass test above a consequence of the
+    construction rather than a coincidence of the specific input values."""
+    data = _small_coupled_oscillators_dataset(seed=0)
+    artifact = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+    weight = artifact.encoder_state_dict["net.0.weight"]
+    bias = artifact.encoder_state_dict["net.0.bias"]
+    assert weight.shape == (4, 4)
+    assert bias.shape == (4,)
+    torch.testing.assert_close(weight, torch.eye(4, dtype=weight.dtype), rtol=0.0, atol=0.0)
+    torch.testing.assert_close(bias, torch.zeros(4, dtype=bias.dtype), rtol=0.0, atol=0.0)
+    assert artifact.manifest["encoder_class"] == "FrameMLPEncoder"
+    assert artifact.manifest["encoder_hidden"] == []
+
+
+def test_identity_e_recon_is_measured_tiny_not_exactly_zero_and_not_hardcoded():
+    """Positive: e_recon is a REAL measurement (float32 noise floor, ~1e-7
+    scale), not a hand-written constant -- distinguishing the two is exactly
+    '> 0.0 and < 1e-5', since a hardcoded 'the identity has zero error'
+    mutant would write literal 0.0, and a real float32 round-trip through a
+    generic dataset essentially never lands on exactly 0.0. Still ~4 orders
+    of magnitude under D3's 1e-3 bound (PROTOCOL.md section 19.1)."""
+    data = _small_coupled_oscillators_dataset(seed=1)
+    artifact = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+    print(f"[identity D3] e_recon={artifact.e_recon:.6e} e_1_pers={artifact.manifest['e_1_pers']:.6e}")
+    assert artifact.e_recon > 0.0
+    assert artifact.e_recon < 1e-5
+    assert math.isfinite(artifact.manifest["e_1_pers"])
+    assert artifact.manifest["gated"] == _tau1_condition_holds(artifact.e_recon, artifact.manifest["e_1_pers"])
+
+
+def test_identity_e_recon_matches_independent_recomputation_from_the_stored_encoder():
+    """R2 (independent reference), same pattern as
+    test_e_recon_matches_independent_val_computation above: rebuild the
+    encoder from the SAVED state_dict, recompute e_recon on val from
+    scratch with the public apply_readout/normalized_state_error, and check
+    it against the artifact's own stored e_recon -- never trusting the
+    artifact's self-report alone."""
+    data = _small_coupled_oscillators_dataset(seed=0)
+    artifact = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+
+    encoder = FrameMLPEncoder(
+        artifact.manifest["d_x"], artifact.manifest["d_z"], tuple(artifact.manifest["encoder_hidden"])
+    )
+    encoder.load_state_dict(artifact.encoder_state_dict)
+    encoder.eval()
+
+    x_val = torch.as_tensor(data["val"]["x"], dtype=torch.float32).reshape(-1, 4)
+    x_true_val = np.asarray(data["val"]["z_true"], dtype=np.float64).reshape(-1, 4)
+    with torch.no_grad():
+        z_val_np = encoder(x_val).double().numpy()
+    pred_val = apply_readout(z_val_np, artifact.readout.W)
+    e_recon_independent = float(
+        normalized_state_error(pred_val[:, None, :], x_true_val[:, None, :], artifact.sigma_train)[0]
+    )
+    assert e_recon_independent == pytest.approx(artifact.e_recon, abs=1e-12)
+
+
+def test_identity_representation_requires_d_z_equal_d_x():
+    # NEGATIVE: the identity has no free width to pad or truncate with --
+    # d_z != d_x is refused explicitly, by name, never silently padded.
+    data = _small_coupled_oscillators_dataset(seed=0)  # d_x = 4
+    with pytest.raises(ValueError, match="d_z == d_x"):
+        build_identity_representation(data, system="coupled", regime="ou", d_z=8)
+    with pytest.raises(ValueError, match="d_z == d_x"):
+        build_identity_representation(data, system="coupled", regime="ou", d_z=2)
+
+
+def test_identity_representation_requires_train_and_val_splits():
+    data = _small_coupled_oscillators_dataset(seed=0)
+    incomplete = {"train": data["train"]}  # no "val"
+    with pytest.raises(ValueError, match="val"):
+        build_identity_representation(incomplete, system="coupled", regime="ou", d_z=4)
+
+
+def test_identity_representation_round_trips_and_validates(tmp_path):
+    """Positive: an identity artifact is an ORDINARY FrozenRepresentationArtifact
+    -- same save/load/digest/validate machinery as a trained one, no parallel
+    path. Same pattern as test_validate_accepts_matching_stratum above."""
+    data = _small_coupled_oscillators_dataset(seed=0)
+    artifact = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+    path = tmp_path / "identity.pt"
+    save_frozen_representation(artifact, path)
+    loaded = load_frozen_representation(path)
+    validate_shared_representation(loaded, system="coupled", regime="ou")  # must not raise
+    assert loaded.manifest["kind"] == "identity"
+    assert loaded.e_recon == pytest.approx(artifact.e_recon, abs=0.0)
+
+
+def test_identity_representation_loaded_for_another_stratum_is_refused(tmp_path):
+    # NEGATIVE: an identity artifact built for one (system, regime) stratum
+    # is refused, by stratum name, if presented for a different one -- the
+    # SAME preflight every representation goes through (validate_shared_representation),
+    # never a parallel/looser check for identity artifacts.
+    data = _small_coupled_oscillators_dataset(seed=0)
+    artifact = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+    path = tmp_path / "identity.pt"
+    save_frozen_representation(artifact, path)
+    loaded = load_frozen_representation(path)
+    with pytest.raises(ValueError, match="stratum mismatch"):
+        validate_shared_representation(loaded, system="coupled", regime="action_conditioned")
+    with pytest.raises(ValueError, match="stratum mismatch"):
+        validate_shared_representation(loaded, system="other_system", regime="ou")
+
+
+def test_identity_representation_digest_is_a_pure_function_of_content():
+    # same doctrine as test_digest_identical_for_identical_content: two
+    # independent builds from the SAME data are bit-identical content (the
+    # identity encoder has no random init draw at all), so their digests
+    # match without any seed to align.
+    data = _small_coupled_oscillators_dataset(seed=0)
+    a1 = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+    a2 = build_identity_representation(data, system="coupled", regime="ou", d_z=4)
+    d1, d2 = representation_digest(a1), representation_digest(a2)
+    print(f"[identity D3] digest1={d1} digest2={d2}")
+    assert d1 == d2
 
 
 # -- fit_readout / apply_readout: the recovered readout ----------------------

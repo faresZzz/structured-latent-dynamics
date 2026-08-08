@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 sld-factorial = "sld.experiments.factorial:main"
+sld-gate = "sld.experiments.gate:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
