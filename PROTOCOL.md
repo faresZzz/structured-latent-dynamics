@@ -2463,3 +2463,86 @@ Execution order is part of the declaration:
   mechanism was measured before any remedy was declared; this amendment precedes every
   run it authorizes (R4), and the unclipped records it responds to stay published
   exactly as measured.
+
+## 18. Amendment 9 — the grid narrows to two backbones; the ssm family becomes a documented negative result (dated 2026-08-08)
+
+### 18.0 Scope, and the decision it records
+
+**Author's decision, this date**: the phase-D comparison proceeds on the `mlp` and
+`transformer` backbones only — four arms (`mlp`, `mlp_k`, `transformer`,
+`transformer_k`), the full backbone x structure 2x2. The ssm family (`min_ssm`,
+`ssm_k`) is withdrawn from the competitive grid and carried as a **documented negative
+result**, under the author's stated condition that the record shows what was tried,
+what each attempt proved, and why the family ultimately does not train here.
+
+The grounds, all measured and all committed BEFORE this amendment (the chain a reader
+can audit):
+
+1. **16.2's re-selection at the D regime**: the declared three-rate sweep found no
+   trainable rate for `min_ssm` — training divergence at epoch 2, `inf train_loss`, at
+   every listed rate (round 3, `results_probe_d/report.json`). `ssm_k` had already
+   diverged at its own declared rate in round 2 (epochs 30 and 36).
+2. **17's standard gradient guard did not rescue it**: with `grad_clip = 100` — proven
+   a no-op on the healthy arms by 17.2's pre-declared equality gate (trajectories and
+   `e_25_val` identical to the last digit) — every ssm rate still diverges at epoch 2
+   (round 3c, published under distinct `__r3c_` cell ids).
+3. **The mechanism is measured, twice over**: the first optimizer step's global
+   gradient norm is 2.4e18 (vs 28.2 for `mlp`, same harness), and the epoch-1 loss is
+   invariant to clipping (6.4413e24 clipped vs 6.4415e24 unclipped) while scaling
+   quadratically with the learning rate. Adam's first step is magnitude-normalized
+   (~lr x sign(g) per coordinate), so bounding the gradient could not and did not
+   change the outcome: the 25-step closed-loop rollout is **hypersensitive to the
+   parameters at initialization** — any first step of size lr explodes the forward
+   pass. The state transition itself is stable by construction; the failure is a
+   property of the closed loop.
+4. **The literature context is on record** (17.0): no published SSM world model trains
+   its dynamics loss on a long self-consumed rollout from initialization; the theory
+   for selective state-dependent gating losing LTI stability guarantees exists
+   (arXiv:2505.11602), and the recurrent-backbone divergence precedent is published
+   (TD-MPC, arXiv:2310.16828).
+
+**What this amendment does NOT claim**: that SSMs cannot learn latent dynamics. The
+claim is regime-scoped — under THIS declared regime (`h_fr = 25` closed-loop from
+initialization, one uniform optimizer for all arms), the family has no trainable rate
+among the declared list, with the standard guard in place. The remedies that might
+change that verdict (a teacher-forced dynamics loss, horizon curricula, structurally
+bounded latents) were declared not-adopted with reasons in 17.3; adopting any of them
+would change the regime for every arm and is a different pre-registered experiment,
+not a repair of this one.
+
+### 18.1 What changes, mechanically
+
+- **The D4 grid**: 4 cells per stratum (`mlp`, `mlp_k`, `transformer`,
+  `transformer_k`) x 2 strata x 5 seeds = **40 runs** (was 60). Everything else fixed
+  by sections 14-17 is unchanged: budget 8000, the section-16 rates (1e-3 for both
+  backbones), `grad_clip = 100`, `w_align = 1`, and **nothing in 12.3/12.4 moves**.
+- **The D3 gate**: "the structured arms, each green under the committed thresholds"
+  now quantifies over TWO arms (`mlp_k`, `transformer_k`) — 2/2, not 3/3. Nothing
+  else about D3 changes.
+- **M4 is restated over the narrowed grid**: every backbone-effect statement names the
+  two-backbone scope; the structure effect (`X-K` vs `X` at fixed backbone) is
+  untouched in form and gains nothing from the withdrawal.
+- **The registry keeps `min_ssm`/`ssm_k` loadable** for the published artifacts and
+  refuses them as grid cells — the same treatment section 13 gave `koopman_ssm`.
+- **Every ssm record stays published exactly as measured** (rounds 2, 3, 3c): those
+  runs are the negative result's evidence, not discarded work.
+
+### 18.2 The publication duty this amendment creates
+
+Wherever the 2x2 grid's results are published, the ssm withdrawal is published with
+them: the declared re-selection that was tried, the standard guard that was added and
+proven harmless elsewhere, the measured mechanism that explains the failure, and the
+regime-scoped wording of the conclusion. A reader must be able to verify that the
+withdrawal followed the evidence — dated, committed, in order — and not convenience.
+
+### 18.3 Honesty declaration
+
+- **Decided, not derived**: the withdrawal itself, and the choice to keep the current
+  training regime for the four remaining arms rather than reopen it for all six.
+- **Measured before deciding**: every number in 18.0's chain predates this amendment
+  in committed history (amendments 6-8 and the probe reports they authorized).
+- **The asymmetry, named**: the grid's backbone conclusions now cover two of the three
+  families phase C built. The third is present as a bounded, mechanistically explained
+  negative result — never silently absent.
+- **R4**: this amendment precedes every 2x2 execution it authorizes (the D3 config,
+  the D4 grid).
