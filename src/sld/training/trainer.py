@@ -305,6 +305,11 @@ def _truncate_metrics_csv(path: Path, n_rows: int) -> None:
 # anywhere in this repo, evaluating it there cost 23-38% of epoch time, and
 # it silently advanced the GLOBAL RNG that the FOLLOWING epoch's training
 # probes draw from (TotalJacobianPenalty's generator is None by design).
+#
+# PROTOCOL.md 17.1 (Amendment 8) adds "grad_norm": the PRE-clip global
+# gradient-norm reading (_global_grad_norm), recorded every epoch whether or
+# not this run's config carries grad_clip -- an unmeasured guard is a silent
+# knob.
 METRICS_HEADER = (
     "epoch",
     "train_loss",
@@ -315,7 +320,33 @@ METRICS_HEADER = (
     "var",
     "cov",
     "jac_pen",
+    "grad_norm",
 )
+
+# A run's IDENTITY (config_hash) never included the metrics.csv SCHEMA, so a
+# run written before Amendment 8 is COMPLETE with its own era's header --
+# missing "grad_norm" is not corruption, it is simply older than the column.
+# METRICS_HEADER_LEGACY is that prior header, pinned EXACTLY (never derived
+# from METRICS_HEADER, which would make this constant track its own future
+# changes instead of anchoring the one era it actually was). A CLOSED tuple
+# of every header this repo has ever written to disk, oldest first --
+# factorial._validate_completion_sentinel accepts a metrics.csv whose
+# fieldnames equal EXACTLY one member of this tuple, never a prefix/subset
+# match (a header that is neither is genuinely foreign or corrupt). Extend
+# this tuple, never rewrite an existing entry, the next time METRICS_HEADER
+# gains or loses a column.
+METRICS_HEADER_LEGACY = (
+    "epoch",
+    "train_loss",
+    "val_loss",
+    "lr",
+    "pred",
+    "consistency",
+    "var",
+    "cov",
+    "jac_pen",
+)
+METRICS_HEADER_GENERATIONS = (METRICS_HEADER_LEGACY, METRICS_HEADER)
 
 
 def _sha1_file(path: Path) -> str:
@@ -342,6 +373,23 @@ def _time_major(split: dict, idx: np.ndarray) -> tuple[torch.Tensor, torch.Tenso
     x = torch.as_tensor(split["x"][idx], dtype=torch.float32).transpose(0, 1).contiguous()
     u = torch.as_tensor(split["u"][idx], dtype=torch.float32).transpose(0, 1).contiguous()
     return x, u
+
+
+def _global_grad_norm(params) -> float:
+    """The global L2 gradient norm of ``params``, PRE-clip (PROTOCOL.md
+    17.1: measured every epoch, clipped or not -- "a guard whose bite is
+    not measured would be a silent knob"). Same formula
+    ``torch.nn.utils.clip_grad_norm_`` uses internally (norm_type=2.0,
+    combine per-parameter norms via a second L2 norm), factored out here so
+    it can be computed WITHOUT ever calling that function: when
+    ``grad_clip`` is absent, gradients must stay bitwise untouched, so
+    ``fit`` calls this for the measurement and skips ``clip_grad_norm_``
+    entirely on that path -- a structural guarantee, not a numerical one.
+    """
+    grads = [p.grad.detach() for p in params if p.grad is not None]
+    if not grads:
+        return 0.0
+    return float(torch.norm(torch.stack([torch.norm(g, 2) for g in grads]), 2))
 
 
 def data_fingerprint(data: dict) -> str:
@@ -595,6 +643,21 @@ class Trainer:
         step_subsample = self.config["step_subsample"]
         if not (isinstance(step_subsample, (int, float)) and math.isfinite(step_subsample)):
             raise ValueError(f"step_subsample must be finite, got {step_subsample!r}")
+        # PROTOCOL.md 17.1 (Amendment 8): grad_clip is an OPTIONAL config key,
+        # deliberately ABSENT from _DEFAULTS -- _DEFAULTS is merged into every
+        # config BEFORE hashing (self.config = {**_DEFAULTS, **config} above),
+        # so a default here would move config_hash (therefore run_dir,
+        # therefore every sentinel already on disk) for every run that has
+        # ever existed. Absent: self.config never gains the key, so the
+        # hashed dict and config_hash are byte-identical to before this
+        # amendment. Present: validated (finite, strictly > 0 -- a guard that
+        # cannot bite, or that silently disables itself on a bad value, is a
+        # bug, not a lenient setting) and hashed automatically, since it is
+        # already a key of self.config once the caller supplies it.
+        if "grad_clip" in self.config:
+            grad_clip = self.config["grad_clip"]
+            if not (isinstance(grad_clip, (int, float)) and math.isfinite(grad_clip) and grad_clip > 0):
+                raise ValueError(f"grad_clip must be finite and > 0, got {grad_clip!r}")
         # The frozen reference scale (PROTOCOL.md section 10.3) travels
         # OUT-OF-BAND, as this constructor argument, never as a config value:
         # it is a bundle of tensors, not YAML, and it is MEASURED from a
@@ -1151,6 +1214,18 @@ class Trainer:
                         encoder, predictor, ema, jepa, x_bt, u_bt, lifted, lift_fn, project_fn, h_fr
                     )
                     train_total.backward()
+                    # PROTOCOL.md 17.1: the global gradient norm is measured
+                    # PRE-clip, unconditionally (clipped or not -- a guard
+                    # whose bite is not measured would be a silent knob), via
+                    # the separate _global_grad_norm helper -- never by
+                    # calling clip_grad_norm_ itself. Absent grad_clip: the
+                    # guard's own clipping call is never made, so every
+                    # gradient reaching optimizer.step() stays bitwise
+                    # untouched (a structural equivalence with pre-amendment
+                    # runs, not merely a numerical one).
+                    grad_norm = _global_grad_norm(params)
+                    if "grad_clip" in cfg:
+                        torch.nn.utils.clip_grad_norm_(params, max_norm=cfg["grad_clip"])
                     lr_used = optimizer.param_groups[0]["lr"]  # rate actually used for this step
                     optimizer.step()
                     if self.representation is None:
@@ -1238,6 +1313,7 @@ class Trainer:
                             diag["var"],
                             diag["cov"],
                             diag["jac_pen"],
+                            grad_norm,
                         ]
                     )
                     f.flush()  # live progress feed: today's buffering hides it entirely

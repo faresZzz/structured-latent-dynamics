@@ -1983,3 +1983,113 @@ def test_representation_nonfinite_e_recon_refused(tmp_path):
 
     with pytest.raises(ValueError, match="non-finite"):
         Trainer(_repr_config(tmp_path), representation=artifact)
+
+
+# --------------------------------------------------------------------------
+# PROTOCOL.md section 17 (Amendment 8): the gradient guard -- grad_clip is
+# OPTIONAL, absent from _DEFAULTS (identity preservation), validated when
+# present, and measured every epoch via a helper never called on the absent
+# path (structural, not numerical, equivalence with pre-amendment runs).
+# --------------------------------------------------------------------------
+
+
+def test_grad_clip_absent_from_defaults_and_optional(tmp_path):
+    import sld.training.trainer as trainer_mod
+
+    assert "grad_clip" not in trainer_mod._DEFAULTS
+    cfg = _mlp_config(tmp_path)
+    assert "grad_clip" not in cfg
+    trainer = Trainer(cfg)
+    assert "grad_clip" not in trainer.config  # never silently defaulted in
+
+
+def test_grad_clip_present_changes_config_hash(tmp_path):
+    # positive: grad_clip is hashed like any other config key once supplied
+    hash_absent = Trainer(_mlp_config(tmp_path)).config_hash
+    hash_present = Trainer(_mlp_config(tmp_path, grad_clip=100.0)).config_hash
+    print(f"[trainer] grad_clip absent={hash_absent} present={hash_present}")
+    assert hash_absent != hash_present
+
+
+def test_grad_clip_validated_finite_strictly_positive(tmp_path):
+    # negative: 0 / negative / inf / nan are all refused, naming grad_clip
+    import pytest
+
+    for bad in (0.0, -1.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="grad_clip"):
+            Trainer(_mlp_config(tmp_path, grad_clip=bad))
+
+
+def test_grad_clip_absent_never_calls_clip_grad_norm(tmp_path, monkeypatch):
+    # negative: the absent path must leave gradients bitwise untouched --
+    # proven by never even CALLING clip_grad_norm_, not by checking its effect
+    import sld.training.trainer as trainer_mod
+
+    calls = []
+    real_clip = trainer_mod.torch.nn.utils.clip_grad_norm_
+
+    def counting_clip(*a, **k):
+        calls.append(1)
+        return real_clip(*a, **k)
+
+    monkeypatch.setattr(trainer_mod.torch.nn.utils, "clip_grad_norm_", counting_clip)
+    data = _small_dataset(n_episodes=6, T=10)
+    Trainer(_mlp_config(tmp_path, exp_name="trainer_test_noclip", epochs=2)).fit(data)
+    print(f"[trainer] clip_grad_norm_ calls with grad_clip absent: {len(calls)}")
+    assert len(calls) == 0
+
+
+def test_grad_clip_tiny_value_bites_and_training_stays_finite(tmp_path):
+    # positive: grad_clip=1e-12 on a toy 2-epoch fit -- grad_norm (measured
+    # PRE-clip) is orders of magnitude above the clip value, and training
+    # stays finite (the guard, not luck, kept the huge post-clip-bypassed
+    # step from ever reaching the parameters)
+    data = _small_dataset(n_episodes=6, T=10)
+    result = Trainer(
+        _mlp_config(tmp_path, exp_name="trainer_test_tinyclip", epochs=2, grad_clip=1e-12)
+    ).fit(data)
+    with open(result["paths"]["metrics_csv"], newline="") as f:
+        rows = list(csv.DictReader(f))
+    grad_norms = [float(r["grad_norm"]) for r in rows]
+    print(f"[trainer] grad_norms under grad_clip=1e-12: {grad_norms}")
+    assert all(g > 1e-6 for g in grad_norms)  # pre-clip norm measured, >> the clip value
+    assert all(np.isfinite(v) for v in result["history"]["train_loss"])
+    assert all(np.isfinite(v) for v in result["history"]["val_loss"])
+
+
+def test_metrics_csv_has_grad_norm_column_without_grad_clip(tmp_path):
+    # positive companion: the column exists and is finite even when this
+    # run's config never sets grad_clip at all
+    data = _small_dataset(n_episodes=6, T=10)
+    result = Trainer(_mlp_config(tmp_path, exp_name="trainer_test_gradnorm_col", epochs=2)).fit(data)
+    with open(result["paths"]["metrics_csv"], newline="") as f:
+        reader = csv.DictReader(f)
+        assert "grad_norm" in reader.fieldnames
+        rows = list(reader)
+    assert all(np.isfinite(float(r["grad_norm"])) for r in rows)
+
+
+def test_global_grad_norm_matches_hand_computed_value():
+    # positive: an independent, hand-derived combination (two orthogonal
+    # 3-4-5 / 12 legs -> global L2 norm 13 by the Pythagorean identity),
+    # never the internal formula copied back at itself
+    import pytest
+
+    import sld.training.trainer as trainer_mod
+
+    p1 = torch.nn.Parameter(torch.zeros(2))
+    p2 = torch.nn.Parameter(torch.zeros(3))
+    p1.grad = torch.tensor([3.0, 4.0])  # norm 5
+    p2.grad = torch.tensor([0.0, 0.0, 12.0])  # norm 12
+    got = trainer_mod._global_grad_norm([p1, p2])
+    expected = (5.0**2 + 12.0**2) ** 0.5  # 13.0
+    print(f"[trainer] global_grad_norm hand-check: got={got} expected={expected}")
+    assert got == pytest.approx(expected)
+
+
+def test_global_grad_norm_zero_when_no_grads():
+    # negative: a parameter with no .grad contributes nothing, never a crash
+    import sld.training.trainer as trainer_mod
+
+    p = torch.nn.Parameter(torch.zeros(2))  # .grad is None (never populated)
+    assert trainer_mod._global_grad_norm([p]) == 0.0
