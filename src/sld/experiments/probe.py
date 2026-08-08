@@ -62,10 +62,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import hashlib
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,7 +88,7 @@ from sld.experiments.protocol import H_GATE as _H_GATE
 from sld.experiments.protocol import TAU_VPT as _TAU_VPT
 from sld.predictors.base import PredictorState
 from sld.systems.damped_pendulum import DampedPendulum
-from sld.training.trainer import FAILURE_FILENAME, Trainer, data_fingerprint
+from sld.training.trainer import _FAMILY_CONFIG_KEYS, FAILURE_FILENAME, Trainer, data_fingerprint
 
 # --------------------------------------------------------------------------
 # Namespace root (PROTOCOL.md 14.3/14.6): a module-level Path, read
@@ -221,6 +223,79 @@ _ROUND2_CELLS: list[dict] = [
         "value": "hfr25", "knobs": dict(_BASELINE, h_fr=25, lr=3e-4),
     },
 ]
+
+# PROTOCOL.md section 16 (Amendment 7) -- probe round 3: the learning rate is
+# re-selected at the D regime, uniformly per backbone, by 16.2's declared
+# procedure. Ascending order is itself part of the contract: "the next lower
+# listed rate" (16.2(3)) means the PREVIOUS element of this list.
+_ROUND3_LR_LIST: list[float] = [1e-4, 3e-4, 1e-3]
+
+# Label used only to spell a runtime lr float into a cell_id/value string --
+# never fed back into arithmetic, so this never has to agree with
+# _fmt_value's "%g" formatting (which would render 1e-4 as "0.0001", not
+# PROTOCOL.md's own "1e-4" spelling).
+_LR_LABEL: dict[float, str] = {1e-4: "1e-4", 3e-4: "3e-4", 1e-3: "1e-3"}
+
+# PROTOCOL.md 16.2(1)/16.4 stage 1 -- nine runs, a CLOSED list, reproduced
+# VERBATIM (same precedent as _ROUND2_CELLS above: literal cell_ids/values,
+# never a generator). ``arm`` is the OFF arm's FAMILY name (registry names,
+# matching factorial._FAMILY_BY_PAIR's ("mlp","off")/("transformer","off")/
+# ("ssm","off") -> "mlp"/"transformer"/"min_ssm") -- _trainer_config passes
+# it straight through as the Trainer's ``family``.
+_ROUND3_SWEEP: list[dict] = [
+    {
+        "cell_id": "mlp__r3_lr_1e-4", "arm": "mlp", "axis": "round3",
+        "value": "r3_lr_1e-4", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-4),
+    },
+    {
+        "cell_id": "mlp__r3_lr_3e-4", "arm": "mlp", "axis": "round3",
+        "value": "r3_lr_3e-4", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=3e-4),
+    },
+    {
+        "cell_id": "mlp__r3_lr_1e-3", "arm": "mlp", "axis": "round3",
+        "value": "r3_lr_1e-3", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-3),
+    },
+    {
+        "cell_id": "transformer__r3_lr_1e-4", "arm": "transformer", "axis": "round3",
+        "value": "r3_lr_1e-4", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-4),
+    },
+    {
+        "cell_id": "transformer__r3_lr_3e-4", "arm": "transformer", "axis": "round3",
+        "value": "r3_lr_3e-4", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=3e-4),
+    },
+    {
+        "cell_id": "transformer__r3_lr_1e-3", "arm": "transformer", "axis": "round3",
+        "value": "r3_lr_1e-3", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-3),
+    },
+    {
+        "cell_id": "min_ssm__r3_lr_1e-4", "arm": "min_ssm", "axis": "round3",
+        "value": "r3_lr_1e-4", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-4),
+    },
+    {
+        "cell_id": "min_ssm__r3_lr_3e-4", "arm": "min_ssm", "axis": "round3",
+        "value": "r3_lr_3e-4", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=3e-4),
+    },
+    {
+        "cell_id": "min_ssm__r3_lr_1e-3", "arm": "min_ssm", "axis": "round3",
+        "value": "r3_lr_1e-3", "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-3),
+    },
+]
+
+# PROTOCOL.md 16.2(5): screen cells whose exact (ON arm, lr) config already
+# ran to completion as a round-2 cell reuse that cell_id VERBATIM -- the
+# mechanical map from (arm, lr) to the EXISTING round-2 cell_id; _screen_cell
+# falls back to a fresh "{arm}__r3_screen_lr_{...}" id otherwise.
+# transformer_k/ssm_k never had a round-2 cell at 4000 updates, so they have
+# no entries here (16.2(5)'s own wording).
+_ROUND2_SCREEN_TWINS: dict[tuple[str, float], str] = {
+    ("mlp_k", 3e-4): "mlp_k__hfr25_updates_4000_lr_3e-4",
+    ("mlp_k", 1e-4): "mlp_k__hfr25_updates_4000",
+}
+
+# OFF-arm family name (the sweep's own "arm", 16.2(1)) -> its ON-arm twin --
+# 16.2's shared-rate rule: the SAME backbone, OFF and ON, never a per-arm
+# tuning.
+_ROUND3_ON_ARM: dict[str, str] = {"mlp": "mlp_k", "transformer": "transformer_k", "min_ssm": "ssm_k"}
 
 
 def _fmt_value(v) -> str:
@@ -446,7 +521,7 @@ def _operator_screening(
 
 def _trainer_config(cell: dict) -> dict:
     knobs = cell["knobs"]
-    return {
+    config = {
         "exp_name": cell["cell_id"],
         "seed": _MODEL_SEED,
         "family": cell["arm"],
@@ -458,11 +533,29 @@ def _trainer_config(cell: dict) -> dict:
         "batch_episodes": _BATCH_EPISODES,
         "lr": knobs["lr"],
         "h_fr": knobs["h_fr"],
-        "delta": _DELTA,
         "results_root": str(PROBE_ROOT / "runs"),
         "stratum_system": _STRATUM_SYSTEM,
         "stratum_regime": _STRATUM_REGIME,
     }
+    # PROTOCOL.md section 16 round-3 OFF arms (mlp/transformer/min_ssm):
+    # `delta` is a structured-arm-only knob -- trainer._FAMILY_CONFIG_KEYS is
+    # the single source of truth for which family accepts it (never a second,
+    # drifting list here); an OFF family carrying it is refused loudly by
+    # Trainer.__init__ ("applied or rejected, never silently ignored").
+    # Every family this module ran BEFORE round 3 (mlp_k/transformer_k/
+    # ssm_k) accepts it unconditionally, so this branch is a no-op for them
+    # -- the dict is byte-for-byte what it was before this fix, preserving
+    # config_hash (sort_keys=True downstream, so key order here is
+    # irrelevant) and therefore resume for the 24 existing cells.
+    if "delta" in _FAMILY_CONFIG_KEYS[cell["arm"]]:
+        config["delta"] = _DELTA
+    # PROTOCOL.md 17.1/17.2 (Amendment 8): grad_clip is an OPTIONAL knob on
+    # BOTH Trainer and this cell's own knobs dict -- only round-3c cells
+    # carry it, so no existing cell (whose knobs never have this key) moves
+    # its config or its config_hash.
+    if "grad_clip" in knobs:
+        config["grad_clip"] = knobs["grad_clip"]
+    return config
 
 
 def _write_eval_failure(
@@ -667,6 +760,340 @@ def _run_cell(ctx: ProbeContext, cell: dict) -> dict:
     }
 
 
+def _val_reading(run_dir: Path, artifact, data: dict) -> dict:
+    """PROTOCOL.md 16.4's reading rule: every round-3 selection/retention
+    reading is taken on the val split, never test -- the SAME
+    ``evaluate_run_free_rollout`` call ``_run_cell`` makes for its test-split
+    gate reading above, split swapped, same ``tau_1`` (the representation
+    artifact's own 15.1 value, recomputed here the same way ``_run_cell``
+    does -- never a second definition of ``tau_1``).
+
+    On ``RolloutDivergence``: the four val fields go ``None``, and the
+    divergence is reported in the two extra keys below. UNLIKE 15.3's
+    ``eval_failure.json`` (which belongs to the test-split gate reading
+    ``_run_cell`` owns), no durable artifact is written here -- a val-split
+    divergence is published in the round-3 report only (supervisor decision:
+    15.3's artifact governs the GATE reading on test, a decision this
+    amendment does not touch).
+    """
+    tau_1 = protocol.tau_1(float(artifact.manifest["e_1_pers"]))
+    try:
+        result = evaluate_run_free_rollout(
+            run_dir, artifact, data["val"], horizon=_H_GATE, tau=_TAU_VPT, h_gate=_H_GATE,
+            gamma=_GAMMA, tau_1=tau_1,
+        )
+    except RolloutDivergence as exc:
+        return {
+            "e_1_val": None, "e_25_val": None, "m_low_val": None, "m_high_val": None,
+            "val_divergence": str(exc), "first_nonfinite_step_val": exc.first_step,
+        }
+    pc = result.positive_control
+    return {
+        "e_1_val": float(result.e_h[0]),
+        "e_25_val": float(result.e_h[_H_GATE - 1]),
+        "m_low_val": float(pc.m_low),
+        "m_high_val": float(pc.m_high),
+    }
+
+
+def _run_cell_with_val(ctx: ProbeContext, cell: dict) -> dict:
+    """Round-3 scope only (PROTOCOL.md 16.4): ``_run_cell``'s existing
+    test-split gate reading, PLUS a val-split reading (``_val_reading``).
+    Round 1/2 cells never go through this -- only the sweep/screen/stage-3
+    cells 16.4 lists -- so val fields exist ONLY where a round-3 decision
+    actually reads them.
+
+    A training-time divergence (status ``"divergence_training"``) leaves no
+    checkpoint to roll out (11.7): the val fields are filled with ``None``
+    directly, ``_val_reading`` is never called. Every other status --
+    including ``"divergence_rollout"`` (the TEST-split rollout diverged, not
+    necessarily the val one) -- has a genuine checkpoint, so the val split
+    gets its own, independent reading.
+    """
+    record = _run_cell(ctx, cell)
+    if record["status"] == "divergence_training":
+        return {**record, "e_1_val": None, "e_25_val": None, "m_low_val": None, "m_high_val": None}
+    knobs = cell["knobs"]
+    artifact, data, _cond_sigma = _get_representation(
+        ctx, knobs["n_episodes"], knobs["w_align"], knobs["view_offset"]
+    )
+    val = _val_reading(Path(record["run_dir"]), artifact, data)
+    return {**record, **val}
+
+
+# --------------------------------------------------------------------------
+# Round 3 (PROTOCOL.md section 16, Amendment 7): LR re-selection, the ON-arm
+# finitude screen, and the two stage-3 cells. Every "which comes next"
+# decision below is a PURE function of already-computed records -- no
+# training, no I/O -- so it is unit-testable without running anything; only
+# main() wires the pure decisions to the live run_cell_fn.
+# --------------------------------------------------------------------------
+
+_ROUND3_BACKBONES: tuple[str, ...] = ("mlp", "transformer", "min_ssm")
+
+
+def _select_lr(sweep_records: list[dict], backbones: tuple[str, ...] = _ROUND3_BACKBONES) -> dict:
+    """PROTOCOL.md 16.2(2): per backbone, the listed rate minimizing the OFF
+    arm's ``e_25_val`` among the sweep cells that (a) did not fail to train
+    or to evaluate (status not ``divergence_training``/``divergence_rollout``)
+    and (b) evaluated finitely on val (no ``"val_divergence"`` key). A
+    diverged cell is excluded from the argmin even if its ``e_25_val`` would
+    be minimal -- "a diverged run cannot win" (16.2(2)). Exhaustion (no
+    eligible cell for a backbone): ``selected_lr`` is ``None``, published,
+    never inferred.
+
+    Tiebreak (mechanical, NOT specified by 16.2 -- declared here, published
+    in the report): on an exact ``e_25_val`` tie, the LOWEST listed rate
+    wins.
+
+    ``backbones`` defaults to round 3's three (regression-safe for existing
+    callers); PROTOCOL.md 17.2 restricts round 3c's ssm-only re-selection to
+    a single backbone by passing ``("min_ssm",)`` here -- same mechanics, no
+    duplicated argmin logic.
+    """
+    selection: dict[str, dict] = {}
+    for backbone in backbones:
+        backbone_records = [r for r in sweep_records if r["arm"] == backbone]
+        basis = {r["knobs"]["lr"]: r["e_25_val"] for r in backbone_records}
+        eligible = [
+            r for r in backbone_records
+            if r["status"] not in ("divergence_training", "divergence_rollout")
+            and "val_divergence" not in r
+            and r["e_25_val"] is not None
+        ]
+        if not eligible:
+            selection[backbone] = {"selected_lr": None, "basis": basis}
+            continue
+        best = min(eligible, key=lambda r: (r["e_25_val"], r["knobs"]["lr"]))
+        selection[backbone] = {"selected_lr": best["knobs"]["lr"], "basis": basis}
+    return selection
+
+
+def _next_lower_lr(lr: float) -> float | None:
+    """The previous element of ``_ROUND3_LR_LIST``, or ``None`` at the
+    lowest rate (16.2(4)'s exhaustion boundary)."""
+    idx = _ROUND3_LR_LIST.index(lr)
+    return _ROUND3_LR_LIST[idx - 1] if idx > 0 else None
+
+
+def _screen_cell(arm: str, lr: float) -> dict:
+    """PROTOCOL.md 16.2(3)/16.4 stage 2: the ON-arm finitude screen cell for
+    ``arm`` (e.g. ``mlp_k``) at ``lr``. Dedup (16.2(5)): if this exact (arm,
+    lr) already ran to completion as a round-2 cell, its cell_id is reused
+    VERBATIM -- ``Trainer.resolve_run_dir`` then resolves to the SAME
+    run_dir, and the existing sentinel/resume discipline (``_run_cell``)
+    does the skip (status ``"skipped_resume"``), never a special case here.
+    """
+    cell_id = _ROUND2_SCREEN_TWINS.get((arm, lr), f"{arm}__r3_screen_lr_{_LR_LABEL[lr]}")
+    knobs = dict(_BASELINE, epochs=4000, h_fr=25, lr=lr)
+    return {"cell_id": cell_id, "arm": arm, "axis": "round3_screen", "value": _LR_LABEL[lr], "knobs": knobs}
+
+
+def _run_screen(
+    arm: str,
+    start_lr: float,
+    run_cell_fn: Callable[[dict], dict],
+    cell_builder: Callable[[str, float], dict] = _screen_cell,
+) -> dict:
+    """PROTOCOL.md 16.2(3)/(4): the ON-arm finitude screen loop, decision
+    separated from execution. Only training COMPLETION gates the loop --
+    11.7's ``failure.json`` absence -- an evaluation-time (rollout)
+    divergence is NOT a screen failure ("No metric of the screen run is
+    consulted for selection; only completion is", 16.2(3)): any status other
+    than ``"divergence_training"`` ends the loop successfully at that rate.
+
+    ``run_cell_fn`` is the injected execution step (cell -> record) -- a fake
+    in tests, ``_run_cell_with_val`` bound to a live ctx in production -- so
+    this decision loop is unit-testable with canned records, never a real
+    ``Trainer.fit``. ``cell_builder`` defaults to ``_screen_cell`` (round
+    2/3's dedup-aware builder, regression-safe for existing callers);
+    PROTOCOL.md 17.2's round-3c screen (row 5) injects ``_r3c_screen_cell``
+    instead -- same descent/exhaustion mechanics, a different cell shape.
+
+    Returns ``{"screened_lr": float | None, "trail": [record, ...]}``:
+    ``trail`` holds every attempted screen record in attempt order;
+    ``screened_lr`` is ``None`` on exhaustion (fails even at the lowest
+    listed rate, 16.2(4)).
+    """
+    lr = start_lr
+    trail: list[dict] = []
+    while True:
+        record = run_cell_fn(cell_builder(arm, lr))
+        trail.append(record)
+        if record["status"] != "divergence_training":
+            return {"screened_lr": lr, "trail": trail}
+        next_lr = _next_lower_lr(lr)
+        if next_lr is None:
+            return {"screened_lr": None, "trail": trail}
+        lr = next_lr
+
+
+def _decide_budget(rung_rec: dict, twin_rec: dict) -> int:
+    """PROTOCOL.md 16.1's rung criterion, pure: 8000 is retained iff the rung
+    (mlp_k, 8000 updates, h_fr=25, the screened rate) completed training and
+    evaluated finitely on val AND its ``e_25_val`` is at least 10% better
+    (relative) than the twin's -- exact equality at 0.9 counts as retained
+    (16.1: "exactly 10% ... retained"). Any divergence anywhere in the
+    comparison -- the rung's or the twin's -- keeps 4000, never inferred.
+    """
+    if rung_rec["status"] in ("divergence_training", "divergence_rollout"):
+        return 4000
+    if rung_rec.get("e_25_val") is None or "val_divergence" in rung_rec:
+        return 4000
+    if twin_rec.get("e_25_val") is None or "val_divergence" in twin_rec:
+        return 4000
+    if rung_rec["e_25_val"] <= 0.9 * twin_rec["e_25_val"]:
+        return 8000
+    return 4000
+
+
+def _decide_walign(cell_rec: dict, twin_rec: dict) -> bool:
+    """PROTOCOL.md 16.3's two-sided retention rule, pure: w_align=0 is
+    retained iff the cell (mlp_k, 4000 updates, h_fr=25, the screened rate,
+    the w_align=0 encoder) completed (training AND evaluation both finite)
+    AND strictly improves ``e_25_val`` over the twin AND does not worsen
+    ``m_high_val``. Mixed evidence -- any divergence, a partial improvement
+    -- keeps the shipped default (w_align=1), never inferred.
+    """
+    if cell_rec["status"] in ("divergence_training", "divergence_rollout"):
+        return False
+    if cell_rec.get("e_25_val") is None or "val_divergence" in cell_rec:
+        return False
+    if twin_rec.get("e_25_val") is None or "val_divergence" in twin_rec:
+        return False
+    return cell_rec["e_25_val"] < twin_rec["e_25_val"] and cell_rec["m_high_val"] <= twin_rec["m_high_val"]
+
+
+def _upsert_record(records: list[dict], record: dict) -> None:
+    """Insert ``record`` by ``cell_id`` identity: replaces an existing entry
+    for the SAME cell_id in place (position preserved) instead of appending
+    a duplicate; appends when the cell_id is new. _REPORT_SCHEMA's own
+    contract: "cell_id: arm__axis[_value], UNIQUE per cell".
+
+    PROTOCOL.md 16.2(5)'s dedup means a round-3 screen cell can carry a
+    cell_id that ALREADY has a record in ``records`` (the round-2 twin,
+    appended by the round1/2 loop above, with no val fields) -- that
+    artifact is cited, not re-executed, and this call site's own
+    ``_run_cell_with_val`` result is the SAME cell with the val-split
+    reading added, so it REPLACES the round-2 entry rather than sitting next
+    to it as a second row for the same cell.
+    """
+    for i, existing in enumerate(records):
+        if existing["cell_id"] == record["cell_id"]:
+            records[i] = record
+            return
+    records.append(record)
+
+
+_ROUND3_SCHEMA = {
+    "lr_list": "PROTOCOL.md 16.2(1)'s ordered rate list, ascending -- 'the next lower listed rate' "
+    "(16.2(3)) means the previous element of this list",
+    "tie_rule": "the mechanical tiebreak this module applies on an exact e_25_val tie in the "
+    "stage-1 sweep argmin (NOT specified by 16.2 itself): the lowest listed rate wins",
+    "selected_lr": "per backbone (mlp/transformer/min_ssm): {selected_lr (16.2(2)'s argmin over "
+    "the sweep, null on exhaustion), basis (e_25_val per swept lr, including diverged/null "
+    "entries), screen_trail (16.2(3)'s attempted screen cells in order, each "
+    "{lr, cell_id, status}), screened_lr (16.2(3)/(4)'s outcome -- the lr the ON arm's screen "
+    "actually completed training at, null on exhaustion at the lowest listed rate)}",
+    "budget": "16.1's rung decision: {entry_value (4000 or 8000), criterion, e_25_val_rung, "
+    "e_25_val_twin} -- null when mlp has no screened lr (stage 3 does not run, 16.4 stage 3)",
+    "w_align": "16.3's retention decision: {retained (bool), criterion, e_25_val, e_25_val_twin, "
+    "m_high_val, m_high_val_twin} -- null when mlp has no screened lr",
+}
+
+
+# --------------------------------------------------------------------------
+# Round 3c (PROTOCOL.md section 17, Amendment 8): the gradient guard's no-op
+# verification cell, the clipped ssm sweep, and the ssm ON screen -- same
+# pure-decision-vs-injected-execution discipline as round 3 above.
+# --------------------------------------------------------------------------
+
+_R3C_GRAD_CLIP: float = 100.0  # PROTOCOL.md 17.1's uniform clip norm
+
+# PROTOCOL.md 17.2 table, row 1: the no-op gate cell -- mlp__r3_lr_1e-3's
+# EXACT knobs plus grad_clip, so a clip that never binds reproduces that
+# twin exactly (multiplying gradients by 1.0 changes nothing).
+_ROUND3C_NOOP_CELL: dict = {
+    "cell_id": "mlp__r3c_lr_1e-3", "arm": "mlp", "axis": "round3c",
+    "value": "r3c_lr_1e-3",
+    "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-3, grad_clip=_R3C_GRAD_CLIP),
+}
+
+# PROTOCOL.md 17.2 table, rows 2-4: the clipped ssm sweep -- a CLOSED list,
+# reproduced VERBATIM (same precedent as _ROUND2_CELLS/_ROUND3_SWEEP).
+_ROUND3C_SWEEP: list[dict] = [
+    {
+        "cell_id": "min_ssm__r3c_lr_1e-4", "arm": "min_ssm", "axis": "round3c",
+        "value": "r3c_lr_1e-4",
+        "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-4, grad_clip=_R3C_GRAD_CLIP),
+    },
+    {
+        "cell_id": "min_ssm__r3c_lr_3e-4", "arm": "min_ssm", "axis": "round3c",
+        "value": "r3c_lr_3e-4",
+        "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=3e-4, grad_clip=_R3C_GRAD_CLIP),
+    },
+    {
+        "cell_id": "min_ssm__r3c_lr_1e-3", "arm": "min_ssm", "axis": "round3c",
+        "value": "r3c_lr_1e-3",
+        "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=1e-3, grad_clip=_R3C_GRAD_CLIP),
+    },
+]
+
+
+def _r3c_screen_cell(arm: str, lr: float) -> dict:
+    """PROTOCOL.md 17.2 table, row 5: the ssm ON screen cell for ``arm`` at
+    ``lr``, clipped. NO round-2 dedup (unlike ``_screen_cell``) -- a clipped
+    config never existed before this amendment, so every round-3c screen
+    cell is genuinely executed, never cited as an existing artifact.
+    """
+    knobs = dict(_BASELINE, epochs=4000, h_fr=25, lr=lr, grad_clip=_R3C_GRAD_CLIP)
+    cell_id = f"{arm}__r3c_screen_lr_{_LR_LABEL[lr]}"
+    return {"cell_id": cell_id, "arm": arm, "axis": "round3c_screen", "value": _LR_LABEL[lr], "knobs": knobs}
+
+
+def _read_metrics_columns(run_dir, columns: tuple[str, ...]) -> dict[str, list[float]]:
+    """``columns`` of ``run_dir``/metrics.csv, as float lists, in row order.
+    Minimal and scoped: ``_noop_gate_check`` below is the only caller."""
+    with open(Path(run_dir) / "metrics.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    return {col: [float(row[col]) for row in rows] for col in columns}
+
+
+def _noop_gate_check(r3c_record: dict, r3_record: dict) -> dict:
+    """PROTOCOL.md 17.2's pre-declared no-op gate (table row 1): a clip that
+    never binds multiplies gradients by exactly 1.0, so the r3c cell must
+    reproduce its r3 twin EXACTLY -- the SAME ``train_loss``/``val_loss``
+    series in metrics.csv (the r3c run's own extra ``grad_norm`` column is
+    never compared -- "colonnes communes seulement") AND the same
+    ``e_25_val``. Equal -> every section-16 retained value stands
+    unconditionally. Not equal -> STOP (main(), 17.2): cells 2-5 do not run.
+    No third path.
+    """
+    r3c_losses = _read_metrics_columns(r3c_record["run_dir"], ("train_loss", "val_loss"))
+    r3_losses = _read_metrics_columns(r3_record["run_dir"], ("train_loss", "val_loss"))
+    losses_equal = r3c_losses == r3_losses
+    e25_equal = r3c_record["e_25_val"] == r3_record["e_25_val"]
+    equal = losses_equal and e25_equal
+    return {
+        "equal": equal,
+        "losses_equal": losses_equal,
+        "e_25_val_equal": e25_equal,
+        "e_25_val_r3c": r3c_record["e_25_val"],
+        "e_25_val_r3": r3_record["e_25_val"],
+    }
+
+
+_ROUND3C_SCHEMA = {
+    "grad_clip": "PROTOCOL.md 17.1's uniform clip norm (100.0) applied to every round-3c cell",
+    "noop": "17.2's pre-declared no-op gate on cell 1 (mlp__r3c_lr_1e-3 vs its mlp__r3_lr_1e-3 "
+    "twin): {equal, losses_equal (train_loss/val_loss series, metrics.csv), e_25_val_equal, "
+    "e_25_val_r3c, e_25_val_r3} -- equal=False STOPS cells 2-5 (17.2, no third path)",
+    "selected_lr_ssm": "null while the noop gate has not passed; otherwise {basis (min_ssm's "
+    "e_25_val per swept lr, 17.2 rows 2-4), screen_trail (the ssm_k ON screen's attempted "
+    "cells, each {lr, cell_id, status}), screened_lr (the screen's outcome, null on exhaustion)}",
+}
+
+
 # --------------------------------------------------------------------------
 # Report + CLI
 # --------------------------------------------------------------------------
@@ -716,6 +1143,18 @@ _REPORT_SCHEMA = {
     "phi_norm_at_h": "15.4(b) SCREENING ONLY, never a stability certificate (REGLES 3/5): 2-norm "
     "of the composed local-operator propagator at the last finite step, worst case over episodes; "
     "null for a family with no structured operator",
+    "e_1_val": "round-3 scope only (PROTOCOL.md 16.4): gate.py's e_h at h=1 on the VAL split -- "
+    "every round-3 selection/retention reading is taken on val, never test (16.4)",
+    "e_25_val": "round-3 scope only: e_h at h=H_gate=25 on the VAL split -- the value 16.2's "
+    "argmin, 16.1's rung criterion, and 16.3's retention rule all read",
+    "m_low_val": "round-3 scope only: 12.4's margin ratio, lower bound, on the VAL split",
+    "m_high_val": "round-3 scope only: 12.4's margin ratio, upper bound, on the VAL split -- the "
+    "value 16.3's retention rule reads",
+    "val_divergence": "round-3 scope only: present (str(RolloutDivergence)) iff the VAL-split "
+    "rollout diverged -- unlike 15.3's eval_failure.json (test split), no durable artifact is "
+    "written for this; published in the report only",
+    "first_nonfinite_step_val": "round-3 scope only: RolloutDivergence.first_step for the VAL-split "
+    "rollout when val_divergence is present, else absent",
 }
 
 
@@ -754,11 +1193,18 @@ def _print_table(records: list[dict]) -> None:
         print("  ".join(str(v).ljust(w) for v, w in zip(row, widths)))
 
 
-def _write_report(records: list[dict]) -> Path:
+def _write_report(
+    records: list[dict], *, round3: dict | None = None, round3c: dict | None = None
+) -> Path:
     report_path = _require_under_root(PROBE_ROOT / "report.json")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = report_path.with_name(report_path.name + ".tmp")
-    tmp_path.write_text(json.dumps({"schema": _REPORT_SCHEMA, "cells": records}, indent=2, sort_keys=True))
+    payload = {"schema": _REPORT_SCHEMA, "cells": records}
+    if round3 is not None:
+        payload["round3"] = round3
+    if round3c is not None:
+        payload["round3c"] = round3c
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     os.replace(tmp_path, report_path)
     return report_path
 
@@ -770,9 +1216,25 @@ def main(argv: list[str] | None = None) -> int:
         "--round2", action="store_true",
         help="also run PROTOCOL.md section 15.4(b)'s nine declared round-2 cells",
     )
+    parser.add_argument(
+        "--round3", action="store_true",
+        help="also run PROTOCOL.md section 16 (Amendment 7)'s probe round 3 -- the LR "
+        "re-selection sweep, the ON-arm finitude screen, and the budget/w_align stage-3 cells. "
+        "Implies round 1+2's scope (report.json stays the single report of the whole campaign) "
+        "even though the amendment authorizing it is committed in this tree -- defense in depth "
+        "against launching it by accident, same doctrine as --round2",
+    )
+    parser.add_argument(
+        "--round3c", action="store_true",
+        help="also run PROTOCOL.md section 17 (Amendment 8)'s probe round 3c -- the gradient-"
+        "clip no-op gate, the clipped ssm sweep, and the ssm ON screen. Implies round 1+2+3's "
+        "scope (report.json stays the single report of the whole campaign) even though the "
+        "amendment authorizing it is committed in this tree -- defense in depth against "
+        "launching it by accident, same doctrine as --round2/--round3",
+    )
     args = parser.parse_args(argv)
 
-    cells = expand_axes(include_round2=args.round2)
+    cells = expand_axes(include_round2=args.round2 or args.round3 or args.round3c)
 
     if args.dry_run:
         for c in cells:
@@ -794,7 +1256,174 @@ def main(argv: list[str] | None = None) -> int:
         )
         records.append(record)
 
-    report_path = _write_report(records)
+    round3_block = None
+    sweep_records: list[dict] = []
+    if args.round3 or args.round3c:
+        print("\n-- probe round 3 (PROTOCOL.md section 16) -- stage 1: LR sweep --\n")
+        sweep_records = []
+        for c in _ROUND3_SWEEP:
+            record = _run_cell_with_val(ctx, c)
+            e25v = record["e_25_val"]
+            e25v_str = "DIVERGED" if e25v is None else f"{e25v:.4f}"
+            print(f"[round3 sweep] {c['cell_id']} -> status={record['status']} e_25_val={e25v_str}")
+            sweep_records.append(record)
+            _upsert_record(records, record)  # 16.2(5)/_REPORT_SCHEMA: cell_id unique per cell
+
+        selection = _select_lr(sweep_records)
+
+        print("\n-- probe round 3 -- stage 2: ON-arm finitude screen --\n")
+        screen_results: dict[str, dict] = {}
+        for backbone in _ROUND3_BACKBONES:
+            on_arm = _ROUND3_ON_ARM[backbone]
+            lr = selection[backbone]["selected_lr"]
+            if lr is None:
+                print(f"[round3 screen] {on_arm} -> no eligible lr from the sweep, screen not attempted")
+                screen_results[on_arm] = {"screened_lr": None, "trail": []}
+                continue
+            result = _run_screen(on_arm, lr, lambda cell: _run_cell_with_val(ctx, cell))
+            for rec in result["trail"]:
+                # 16.2(5): a dedup'd screen cell reuses a round-2 cell_id
+                # VERBATIM -- that record already exists in `records` (the
+                # round1/2 loop above, no val fields). The artifact is
+                # cited, not re-executed: this call's own val-enriched
+                # record REPLACES it, never a second row for the same
+                # cell_id (_REPORT_SCHEMA: "unique per cell").
+                _upsert_record(records, rec)
+            print(
+                f"[round3 screen] {on_arm} -> screened_lr={result['screened_lr']} "
+                f"({len(result['trail'])} attempt(s))"
+            )
+            screen_results[on_arm] = result
+
+        budget_block = None
+        walign_block = None
+        mlp_screened_lr = screen_results["mlp_k"]["screened_lr"]
+        if mlp_screened_lr is not None:
+            print("\n-- probe round 3 -- stage 3: budget rung + w_align --\n")
+            twin_rec = screen_results["mlp_k"]["trail"][-1]
+
+            rung_cell = {
+                "cell_id": "mlp_k__r3_updates_8000", "arm": "mlp_k", "axis": "round3_stage3",
+                "value": "r3_updates_8000",
+                "knobs": dict(_BASELINE, epochs=8000, h_fr=25, lr=mlp_screened_lr),
+            }
+            rung_rec = _run_cell_with_val(ctx, rung_cell)
+            _upsert_record(records, rung_rec)  # 16.2(5)/_REPORT_SCHEMA: cell_id unique per cell
+            entry_value = _decide_budget(rung_rec, twin_rec)
+            print(
+                f"[round3 stage3] {rung_cell['cell_id']} -> status={rung_rec['status']} "
+                f"entry_value={entry_value}"
+            )
+
+            walign_cell = {
+                "cell_id": "mlp_k__r3_walign0", "arm": "mlp_k", "axis": "round3_stage3",
+                "value": "r3_walign0",
+                "knobs": dict(_BASELINE, epochs=4000, h_fr=25, lr=mlp_screened_lr, w_align=0.0),
+            }
+            walign_rec = _run_cell_with_val(ctx, walign_cell)
+            _upsert_record(records, walign_rec)  # 16.2(5)/_REPORT_SCHEMA: cell_id unique per cell
+            walign_retained = _decide_walign(walign_rec, twin_rec)
+            print(
+                f"[round3 stage3] {walign_cell['cell_id']} -> status={walign_rec['status']} "
+                f"retained={walign_retained}"
+            )
+
+            budget_block = {
+                "entry_value": entry_value,
+                "criterion": "e_25_val(8000) <= 0.9 * e_25_val(4000 twin)",
+                "e_25_val_rung": rung_rec["e_25_val"],
+                "e_25_val_twin": twin_rec["e_25_val"],
+            }
+            walign_block = {
+                "retained": walign_retained,
+                "criterion": "e_25_val(w_align=0) < e_25_val(twin) AND m_high_val(w_align=0) <= m_high_val(twin)",
+                "e_25_val": walign_rec["e_25_val"],
+                "e_25_val_twin": twin_rec["e_25_val"],
+                "m_high_val": walign_rec["m_high_val"],
+                "m_high_val_twin": twin_rec["m_high_val"],
+            }
+        else:
+            print("\n-- probe round 3 -- stage 3 skipped: mlp has no screened lr --\n")
+
+        round3_block = {
+            "lr_list": list(_ROUND3_LR_LIST),
+            "tie_rule": "lowest lr wins an exact e_25_val tie",
+            "selected_lr": {
+                backbone: {
+                    "selected_lr": selection[backbone]["selected_lr"],
+                    "basis": selection[backbone]["basis"],
+                    "screen_trail": [
+                        {"lr": r["knobs"]["lr"], "cell_id": r["cell_id"], "status": r["status"]}
+                        for r in screen_results[_ROUND3_ON_ARM[backbone]]["trail"]
+                    ],
+                    "screened_lr": screen_results[_ROUND3_ON_ARM[backbone]]["screened_lr"],
+                }
+                for backbone in _ROUND3_BACKBONES
+            },
+            "budget": budget_block,
+            "w_align": walign_block,
+        }
+
+    round3c_block = None
+    if args.round3c:
+        print("\n-- probe round 3c (PROTOCOL.md section 17) -- no-op gate --\n")
+        noop_rec = _run_cell_with_val(ctx, _ROUND3C_NOOP_CELL)
+        _upsert_record(records, noop_rec)  # new cell_id -> appends (_REPORT_SCHEMA: unique per cell)
+        r3_twin = next(r for r in sweep_records if r["cell_id"] == "mlp__r3_lr_1e-3")
+        noop_result = _noop_gate_check(noop_rec, r3_twin)
+        print(f"[round3c noop] equal={noop_result['equal']}")
+
+        round3c_block = {
+            "grad_clip": _R3C_GRAD_CLIP,
+            "noop": noop_result,
+            "selected_lr_ssm": None,
+        }
+
+        if not noop_result["equal"]:
+            # PROTOCOL.md 17.2: STOP, not an error -- exit 0, the report
+            # carries the discrepancy, cells 2-5 never run (no third path).
+            print(
+                "\n-- probe round 3c STOPPED: no-op gate did not reproduce its round-3 twin "
+                "-- cells 2-5 (clipped ssm sweep, ssm screen) do NOT run --\n"
+            )
+        else:
+            print("\n-- probe round 3c -- clipped ssm sweep --\n")
+            r3c_sweep_records = []
+            for c in _ROUND3C_SWEEP:
+                rec = _run_cell_with_val(ctx, c)
+                _upsert_record(records, rec)
+                r3c_sweep_records.append(rec)
+                print(f"[round3c sweep] {c['cell_id']} -> status={rec['status']}")
+
+            ssm_selection = _select_lr(r3c_sweep_records, backbones=("min_ssm",))
+            ssm_lr = ssm_selection["min_ssm"]["selected_lr"]
+
+            screen_trail: list[dict] = []
+            screened_lr = None
+            if ssm_lr is not None:
+                print("\n-- probe round 3c -- ssm ON screen --\n")
+                screen_result = _run_screen(
+                    "ssm_k", ssm_lr, lambda cell: _run_cell_with_val(ctx, cell),
+                    cell_builder=_r3c_screen_cell,
+                )
+                for rec in screen_result["trail"]:
+                    _upsert_record(records, rec)
+                screen_trail = [
+                    {"lr": r["knobs"]["lr"], "cell_id": r["cell_id"], "status": r["status"]}
+                    for r in screen_result["trail"]
+                ]
+                screened_lr = screen_result["screened_lr"]
+                print(f"[round3c screen] ssm_k -> screened_lr={screened_lr}")
+            else:
+                print("\n-- probe round 3c -- ssm sweep exhausted, screen not attempted --\n")
+
+            round3c_block["selected_lr_ssm"] = {
+                "basis": ssm_selection["min_ssm"]["basis"],
+                "screen_trail": screen_trail,
+                "screened_lr": screened_lr,
+            }
+
+    report_path = _write_report(records, round3=round3_block, round3c=round3c_block)
     print(f"\nreport written to {report_path}\n")
     _print_table(records)
     return 0
