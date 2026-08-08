@@ -990,6 +990,154 @@ def test_finite_but_mismatched_last_row_loss_invalidates_sentinel(tmp_path):
     assert status != "complete"
 
 
+# -- PROTOCOL.md 17.1 (Amendment 8): closed metrics.csv header generations --
+# grad_norm is a NEW column; a run's identity never included the metrics.csv
+# SCHEMA, so a run genuinely written before this amendment is complete with
+# its own era's header -- trainer_mod.METRICS_HEADER_GENERATIONS is the
+# closed tuple of headers this repo has ever written, and the validator
+# accepts an EXACT match against any one of them, never a prefix/subset.
+
+
+def _drop_metrics_column(metrics_path: Path, column: str) -> None:
+    """Rewrite ``metrics_path`` with ``column`` removed from the header AND
+    every row -- simulates a run genuinely written under an EARLIER
+    METRICS_HEADER generation (identical values, one fewer column), never a
+    corruption of the columns that remain."""
+    with open(metrics_path, newline="") as f:
+        reader = csv.DictReader(f)
+        header = [c for c in reader.fieldnames if c != column]
+        rows = list(reader)
+    with open(metrics_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow([row[c] for c in header])
+
+
+def test_legacy_header_generation_validates_as_complete(tmp_path):
+    # positive (hérité): a run genuinely written before Amendment 8 (no
+    # grad_norm column) validates as complete -- simulated by stripping
+    # grad_norm from an otherwise-genuine complete run's metrics.csv, since
+    # Trainer itself always writes the CURRENT generation.
+    import sld.training.trainer as trainer_mod
+
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "mini_legacy_header.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    assert main(["--config", str(config_path)]) == 0
+    run_dir = Path(list(csv.DictReader((results_root / "mini" / "index.csv").open()))[0]["run_dir"])
+    assert _validate_completion_sentinel(run_dir) is not None  # sanity: current-gen validates
+
+    metrics_path = run_dir / "metrics.csv"
+    with open(metrics_path, newline="") as f:
+        header_before = csv.DictReader(f).fieldnames
+    assert "grad_norm" in header_before  # sanity: this run really is current-gen
+
+    _drop_metrics_column(metrics_path, "grad_norm")
+    with open(metrics_path, newline="") as f:
+        header_after = csv.DictReader(f).fieldnames
+    assert header_after == list(trainer_mod.METRICS_HEADER_LEGACY)
+
+    result = _validate_completion_sentinel(run_dir)
+    print(f"[factorial] legacy header (no grad_norm) validates: {result is not None}")
+    assert result is not None
+
+
+def test_current_header_generation_validates_as_complete(tmp_path):
+    # positive (courant): the header Trainer actually writes today, with
+    # grad_norm, validates.
+    import sld.training.trainer as trainer_mod
+
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "mini_current_header.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    assert main(["--config", str(config_path)]) == 0
+    run_dir = Path(list(csv.DictReader((results_root / "mini" / "index.csv").open()))[0]["run_dir"])
+
+    with open(run_dir / "metrics.csv", newline="") as f:
+        header = csv.DictReader(f).fieldnames
+    assert header == list(trainer_mod.METRICS_HEADER)
+    assert "grad_norm" in header
+
+    result = _validate_completion_sentinel(run_dir)
+    print(f"[factorial] current header (grad_norm) validates: {result is not None}")
+    assert result is not None
+
+
+def test_foreign_header_neither_generation_invalidates_sentinel(tmp_path):
+    # negative: a header that is NEITHER generation -- legacy minus its own
+    # "cov" column -- is rejected. No prefix/subset match: dropping a SECOND
+    # column off the legacy generation does not degrade gracefully into "an
+    # even older legacy", it is simply foreign/corrupt.
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "mini_foreign_header.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    assert main(["--config", str(config_path)]) == 0
+    run_dir = Path(list(csv.DictReader((results_root / "mini" / "index.csv").open()))[0]["run_dir"])
+    metrics_path = run_dir / "metrics.csv"
+
+    _drop_metrics_column(metrics_path, "grad_norm")  # -> legacy generation, validates
+    assert _validate_completion_sentinel(run_dir) is not None  # sanity
+
+    _drop_metrics_column(metrics_path, "cov")  # legacy minus ANOTHER column: neither generation
+    result = _validate_completion_sentinel(run_dir)
+    print(f"[factorial] foreign header (legacy minus cov) invalidates: {result is None}")
+    assert result is None
+
+
+def test_nonfinite_grad_norm_invalidates_sentinel(tmp_path):
+    # negative: the finite-metrics law applies to the NEW column too -- a
+    # non-finite grad_norm in a current-generation run invalidates, exactly
+    # like a non-finite value in any other column (M3 round 4's own rule,
+    # now extended by construction since the per-row check reads the header
+    # actually found on disk).
+    results_root = tmp_path / "results"
+    config = _mini_run_config(results_root)
+    config_path = tmp_path / "mini_nonfinite_gradnorm.yaml"
+    config_path.write_text(yaml.safe_dump(config))
+    assert main(["--config", str(config_path)]) == 0
+    run_dir = Path(list(csv.DictReader((results_root / "mini" / "index.csv").open()))[0]["run_dir"])
+    metrics_path = run_dir / "metrics.csv"
+    n_rows_before = len(list(csv.DictReader(metrics_path.open())))
+
+    _rewrite_last_metrics_row(metrics_path, grad_norm="nan")
+    n_rows_after = len(list(csv.DictReader(metrics_path.open())))
+    assert n_rows_after == n_rows_before  # row count/epoch sequence preserved
+
+    result = _validate_completion_sentinel(run_dir)
+    print(f"[factorial] nonfinite grad_norm invalidates: {result is None}")
+    assert result is None
+
+
+# real, previously-published campaign artifact -- the regression this whole
+# fix exists for (coordinator-demonstrated: this run validated before
+# METRICS_HEADER gained grad_norm and stopped validating after, until this
+# fix). Resolved relative to the repo root, not CWD, so it works regardless
+# of where pytest is invoked from.
+_REAL_MLP_K_UPDATES_4000_RUN_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "results_probe_d" / "runs" / "mlp_k__hfr25_updates_4000" / "42cf513a-a2aaac76"
+)
+
+
+@pytest.mark.skipif(
+    not _REAL_MLP_K_UPDATES_4000_RUN_DIR.exists(),
+    reason="results_probe_d/ campaign artifacts not present on this machine",
+)
+def test_real_published_mlp_k_run_still_validates_after_header_generations_fix():
+    # REAL regression, read-only: PROTOCOL.md 17.1 added grad_norm to
+    # METRICS_HEADER, and this REAL, previously-complete round-2 run (written
+    # before that amendment) went from validating to
+    # _validate_completion_sentinel returning None -- meaning --round3c
+    # would have retrained all 37 cells. No write happens in this test.
+    result = _validate_completion_sentinel(_REAL_MLP_K_UPDATES_4000_RUN_DIR)
+    print(f"[factorial] real mlp_k__hfr25_updates_4000 run validates: {result is not None}")
+    assert result is not None
+
+
 # -- M4: decode errors invalidate the sentinel, never crash the caller -------
 
 

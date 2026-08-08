@@ -709,10 +709,19 @@ def _validate_completion_sentinel(run_dir: Path) -> dict | None:
       finiteness, and metrics.csv was checked for row count/last epoch only,
       so corruption confined to metrics.csv alone -- e.g. NaN written into
       the last row, or a finite but different value -- validated clean):
-      the header is EXACTLY ``trainer_mod.METRICS_HEADER``; ``metrics_rows``
-      and ``epochs_completed`` both equal the row count actually read back;
-      the epoch column is the exact sequence ``0..N-1``; every numeric value
-      in every row is finite; and the LAST row's ``train_loss``/``val_loss``
+      the header is EXACTLY one of the CLOSED header generations
+      (``trainer_mod.METRICS_HEADER_GENERATIONS`` -- PROTOCOL.md 17.1 added
+      the ``grad_norm`` column; a run's identity never included the
+      metrics.csv schema, so a run written in an EARLIER generation is
+      complete with ITS era's header, never treated as corrupt for lacking a
+      column that did not exist yet. No prefix/subset match: a header that
+      is neither generation, exactly, is genuinely foreign or corrupt); every
+      per-row check below (finiteness, the epoch sequence, the last row)
+      reads the columns of the header ACTUALLY FOUND on disk, never the
+      current ``METRICS_HEADER`` unconditionally; ``metrics_rows`` and
+      ``epochs_completed`` both equal the row count actually read back; the
+      epoch column is the exact sequence ``0..N-1``; every numeric value in
+      every row is finite; and the LAST row's ``train_loss``/``val_loss``
       are EXACTLY the sentinel's ``final_train_loss``/``final_val_loss``.
 
     Every file read here (sentinel, config.yaml, metrics.csv) can fail with
@@ -793,19 +802,28 @@ def _validate_completion_sentinel(run_dir: Path) -> dict | None:
     # corruption confined entirely to metrics.csv (sentinel JSON untouched,
     # row count and final epoch preserved) validated clean. Now checked, all
     # read back from disk rather than trusted:
-    #   - schema: the header is EXACTLY trainer_mod.METRICS_HEADER;
+    #   - schema: the header is EXACTLY one of the closed
+    #     trainer_mod.METRICS_HEADER_GENERATIONS (PROTOCOL.md 17.1: a run's
+    #     identity never included the metrics.csv schema, so an earlier
+    #     generation's header is complete, never corrupt, for its own era --
+    #     but a header that is NEITHER generation is rejected, no
+    #     prefix/subset match);
     #   - every numeric value in every row is finite (the finite-metrics law
     #     applies to what actually landed on disk, not just the sentinel's
-    #     own claimed final values);
+    #     own claimed final values) -- checked over the columns of the
+    #     header ACTUALLY READ, so a legacy row is never probed for a column
+    #     ("grad_norm") that generation never wrote;
     #   - the epoch column is the exact sequence 0..N-1, not merely "the
     #     last one matches";
     #   - the LAST row's train_loss/val_loss are EXACTLY the sentinel's
     #     final_train_loss/final_val_loss -- the sentinel is a claim ABOUT
     #     this file, not an independent source of truth.
+    known_headers = [list(generation) for generation in trainer_mod.METRICS_HEADER_GENERATIONS]
     try:
         with open(run_dir / "metrics.csv", newline="") as f:
             reader = csv.DictReader(f)
-            if reader.fieldnames != list(trainer_mod.METRICS_HEADER):
+            header = reader.fieldnames
+            if header not in known_headers:
                 return None
             metrics_rows = list(reader)
     except (csv.Error, OSError, UnicodeError):
@@ -825,10 +843,7 @@ def _validate_completion_sentinel(run_dir: Path) -> dict | None:
     try:
         epochs = [int(row["epoch"]) for row in metrics_rows]
         numeric_values = [
-            float(row[col])
-            for row in metrics_rows
-            for col in trainer_mod.METRICS_HEADER
-            if col != "epoch"
+            float(row[col]) for row in metrics_rows for col in header if col != "epoch"
         ]
         last_train_loss = float(metrics_rows[-1]["train_loss"])
         last_val_loss = float(metrics_rows[-1]["val_loss"])
