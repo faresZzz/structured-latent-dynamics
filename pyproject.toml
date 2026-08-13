@@ -7,6 +7,9 @@ dependencies = [
   "torch",
   "numpy",
   "matplotlib",
+  # sld.viz.ingest returns tidy frames: a runtime dependency of the package,
+  # not a dev extra -- `make figA` imports it.
+  "pandas",
   "pyyaml",
   "tqdm",
 ]

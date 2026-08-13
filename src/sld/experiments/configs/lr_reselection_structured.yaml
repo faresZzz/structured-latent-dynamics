@@ -1,0 +1,89 @@
+# PHASE D, AMENDEMENT 12 (PROTOCOL.md section 21.3) -- the rate re-selection for
+# the two structured arms. Committed BEFORE the sweep it declares (R4).
+#
+# WHY. 16.2 selected each backbone's rate by the argmin of its OFF arm's
+# e_25_val and applied it to the ON arm, which received only a finitude
+# screen. As executed, that leaves each OFF arm at a rate chosen FOR IT and
+# each ON arm at a rate chosen for a DIFFERENT architecture. Section 21.2
+# records the inversion: applying 16.2's identical procedure to the
+# structured arms does not create an asymmetry, it removes one.
+#
+# THE BINDING CLAUSE (21.3(5)): ONE selection, ONE re-run, published whatever
+# it returns. Not a retry until green. No off-list rate, no second sweep, no
+# change to budget/loss/any other declared value.
+#
+# Everything below is identical to 16.2's sweep except the arm:
+# 4000 updates, h_fr=25, grad_clip=100, the OU stratum's frozen shipped
+# representation, n_episodes=256, target_params=10000, batch_episodes=8,
+# r = d_z = 4, ONE seed (0). The three rates are 16.2's list, unchanged.
+#
+# The two structured arms appear three times each, once per rate. They are
+# distinct cells: `lr` enters the trainer config hash, so each carries its own
+# run identity and its own run dir -- the collision preflight is what proves
+# it, not this comment.
+exp_name: lr_reselection_structured
+
+datasets:
+  ou:
+    system:
+      name: DampedPendulum
+      params: {}
+    regime:
+      name: OURegime
+      params:
+        theta_ou: 1.0
+    obs: null
+    n_episodes: 256
+    T: 100
+    dt: 0.02
+    seed: 0
+
+base:
+  d_x: 2
+  d_z: 4
+  d_u: 1
+  target_params: 10000
+  epochs: 4000            # 16.2's sweep budget, not D4's 8000 -- selection only
+  h_fr: 25                # 15.2
+  grad_clip: 100          # 17.1
+  step_subsample: 1.0
+  results_root: results_gate_d2
+
+representation:
+  # The OU stratum's frozen shipped representation -- the SAME artifact D4 ran
+  # against. Identical hyperparameters means the identical digest, so this
+  # sweep loads it rather than rebuilding a variant of it.
+  d_z: 4
+  encoder_hidden: [64, 64]
+  seed: 0
+  epochs: 50
+  lr: 0.001
+  tau_ema: 0.99
+  view_offset: 1
+  w_align: 1.0
+  w_var: 1.0
+  w_cov: 1.0
+  w_recon: 1.0
+
+arms:
+- backbone: mlp
+  structure: 'on'
+  overrides: {mu_j: 0.0, delta: 0.02, lr: 0.0001}
+- backbone: mlp
+  structure: 'on'
+  overrides: {mu_j: 0.0, delta: 0.02, lr: 0.0003}
+- backbone: mlp
+  structure: 'on'
+  overrides: {mu_j: 0.0, delta: 0.02, lr: 0.001}
+- backbone: transformer
+  structure: 'on'
+  overrides: {mu_j: 0.0, delta: 0.02, lr: 0.0001}
+- backbone: transformer
+  structure: 'on'
+  overrides: {mu_j: 0.0, delta: 0.02, lr: 0.0003}
+- backbone: transformer
+  structure: 'on'
+  overrides: {mu_j: 0.0, delta: 0.02, lr: 0.001}
+
+seeds:      # ONE seed -- 16.2's sweep used one, and selection is not a gate
+- 0

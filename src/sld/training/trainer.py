@@ -80,7 +80,16 @@ _REQUIRED_KEYS = ("exp_name", "seed", "family", "d_x", "d_z", "d_u")
 # plus their backbone's own extras -- the same shape as their shared
 # constructor signature, so canonicalization below is one branch for the
 # three, not three.
-_STRUCTURED_KEYS = frozenset({"delta", "r"})
+# ``radius`` is the third level of the structure factor (PROTOCOL section 23),
+# "free" or "bounded". It is a PARAMETRISATION, not a capacity knob, so it is
+# config-settable and hashed into the run identity like ``delta``.
+# ``lift`` is the third level's knob (PROTOCOL 25.3), and like ``radius`` it is
+# NOT canonicalized into the identity below: the family branch there injects
+# its defaults BEFORE hashing, so resolving `lift` there would add the key to
+# every existing structured run's config and move all 134 config_hashes. Absent
+# means "mlp", decided at construction in budget._kwargs_for, exactly as
+# ``radius`` already works.
+_STRUCTURED_KEYS = frozenset({"delta", "r", "radius", "lift"})
 _FAMILY_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "mlp": frozenset(),
     "transformer": frozenset({"n_heads", "max_len"}),
@@ -281,6 +290,60 @@ def _truncate_metrics_csv(path: Path, n_rows: int) -> None:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def _metrics_csv_defect(path: Path, n_rows: int) -> str | None:
+    """Why ``metrics.csv`` cannot back a resume of ``n_rows`` epochs, or ``None``.
+
+    NOT a completeness check -- ``factorial._validate_completion_sentinel`` is
+    the ONE validator for "is this run finished"; this answers a narrower
+    question, asked only once ``fit`` has already decided to resume: can
+    these bytes be parsed at all, and are the ``n_rows`` epochs the resume
+    checkpoint claims actually on disk. Never grow this into a second
+    completeness validator.
+
+    Incident (2026-08-11): five run_dirs kept a metrics.csv full of NUL bytes
+    (blocks allocated by the filesystem, contents never flushed) after a
+    kill; resume's history rebuild crashed with ``ValueError: invalid
+    literal for int() with base 10: '\\x00\\x00...'``, taking down a whole
+    shard instead of retraining the one cell. Discarding here is safe no
+    matter what: no ``run_complete.json`` means the run is incomplete by
+    definition, so its metrics.csv certifies nothing -- there is nothing to
+    lose by restarting the cell from epoch 0.
+
+    The row-count check below leans on the same invariant as the
+    truncate-then-rebuild above (section 14.7): ``fit`` flushes each epoch's
+    metrics row strictly BEFORE saving the resume checkpoint that claims it,
+    so a genuine resume checkpoint for epoch ``e`` always finds at least
+    ``e + 1`` rows already on disk -- fewer means the tail never reached it.
+
+    Rows at index >= ``n_rows`` are deliberately NOT value-checked:
+    ``_truncate_metrics_csv`` discards exactly that tail by design (its own
+    docstring: "possibly with a torn last row"), so a killed writer's torn or
+    garbage tail beyond what the checkpoint claims is the EXPECTED shape of
+    an ordinary crash, not a reason to throw away completed epochs the
+    checkpoint already covers. Only ``rows[:n_rows]`` -- what the real resume
+    path in ``fit`` actually value-parses after truncating -- is checked
+    row-by-row; the full file is still read once (below) so a csv-level
+    structural failure (e.g. an unterminated quoted field anywhere in the
+    file) is caught exactly where ``_truncate_metrics_csv``'s own
+    ``list(reader)`` would hit it, before any truncation happens.
+    """
+    try:
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                return "metrics.csv has no header (file is empty)"
+            rows = list(reader)
+            for row in rows[:n_rows]:
+                int(row["epoch"])
+                float(row["train_loss"])
+                float(row["val_loss"])
+    except (OSError, csv.Error, ValueError, TypeError, KeyError) as exc:
+        return f"{type(exc).__name__}: {exc}"[:200]
+    if len(rows) < n_rows:
+        return f"metrics.csv has {len(rows)} row(s), resume checkpoint claims {n_rows} epoch(s)"
+    return None
 
 
 # metrics.csv's exact header, written by fit() below and re-checked (schema,
@@ -1089,13 +1152,29 @@ class Trainer:
         # both -- resuming a run that has already certified itself complete
         # would silently re-extend a finished result.
         resuming = resume_path.exists() and not complete_path.exists()
+        metrics_defect = None
 
+        resume_state = None
         if resuming:
             # PROTOCOL.md section 14.7: identity MATCH -> continue; identity
             # MISMATCH or an unreadable/truncated file -> refuse loudly
             # (RuntimeError from _load_resume_checkpoint), never adopted and
             # never silently deleted.
             resume_state = _load_resume_checkpoint(resume_path, self.config_hash)
+            # Incident 2026-08-11 -- see _metrics_csv_defect: a resume
+            # checkpoint can be perfectly valid while metrics.csv, the OTHER
+            # half of resume state, is not. Treated the same as a fresh
+            # start below: the checkpoint alone cannot rebuild `history`, and
+            # a run with no run_complete.json certifies nothing about its
+            # metrics.csv either.
+            metrics_defect = _metrics_csv_defect(
+                self.run_dir / "metrics.csv", resume_state["epoch"] + 1
+            )
+            if metrics_defect is not None:
+                resuming = False  # falls through to the fresh-start wipe below
+                resume_state = None
+
+        if resume_state is not None:
             encoder.load_state_dict(resume_state["encoder"])
             predictor.load_state_dict(resume_state["predictor"])
             ema.load_state_dict(resume_state["ema_target"])
@@ -1167,6 +1246,25 @@ class Trainer:
                 RESUME_CHECKPOINT_INTERVAL,
             )
             logger.info("config:\n%s", self._canonical_yaml.rstrip())
+
+            if metrics_defect is not None:
+                # ALSO on stdout, not only in train.log: `logger.propagate` is
+                # False just above and this logger carries a FileHandler only,
+                # so a campaign operator watching a shard would never see it.
+                # A restart from zero changes WHAT THE CELL MEASURED -- 8000
+                # fresh updates instead of a resume -- and the final artifacts
+                # are indistinguishable, so it must not be discoverable only by
+                # opening 60 train.log files after the fact.
+                print(
+                    f"    RESTART from epoch 0: metrics.csv unusable ({metrics_defect})",
+                    flush=True,
+                )
+                logger.warning(
+                    "metrics.csv unusable (%s) and this run has no %s -- it certifies nothing: "
+                    "restarting this run from epoch 0 (previous artifacts wiped)",
+                    metrics_defect,
+                    RUN_COMPLETE_FILENAME,
+                )
 
             if resuming:
                 # metrics.csv may hold rows the checkpoint does not cover

@@ -1,0 +1,79 @@
+# ROOT 1 of PROTOCOL.md section 25 (Amendment 16) -- THE REGIME ROOT.
+#
+# The question: does the SIGN of the structure effect depend on the training
+# free-running horizon?
+#
+# Every negative result this repository holds shares one variable that is not
+# structure: `h_fr` pinned at 25 from the first optimizer step, with no ramp.
+# Teacher forcing is NOT the missing piece -- `w_tf = 1.0` and `w_fr = 1.0`
+# here as everywhere, so the loss already carries a teacher-forced term over
+# the true prefix. What is fixed is the free-running horizon.
+#
+# ZERO new code, and that is why this root is cheap and goes first: `h_fr` is
+# already a scalar config key, already hashed into the run identity. BOTH
+# values are already this protocol's own -- section 4 fixed `h_fr = 5` as the
+# v0 choice, section 15.2 raised it to 25. The contrast is internal; no
+# curriculum from the literature is cited, needed, or implied.
+#
+# Two fixed levels rather than a ramp: a ramp would vary the horizon AND the
+# trajectory it takes. Two levels isolate the variable (25.1).
+#
+# CONFOUND, declared in 25.1 and repeated here: 23.3's sweep selected
+# `lr = 1e-3` at `h_fr = 25`, and 23.5(2) forbids a third sweep whatever the
+# outcome. The `h_fr = 5` cells therefore run at a rate selected under the
+# other level of the factor being varied. WITHIN each level the two arms share
+# the rate, so the structure contrast is fair at each level; ACROSS levels the
+# effect SIZE is confounded with the rate's suitability. The reading rule of
+# 25.2 is about the SIGN, which is the reading least exposed to this.
+#
+# Self-sufficient (14.6): the `h_fr = 25` cells are re-run here, never read
+# out of `results_osc_n/`.
+exp_name: osc_hfr_regime
+
+datasets:
+  c010_n32:
+    system: {name: CoupledOscillators, params: {}}   # c = 0.1, prior EXACT
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+
+  # `delta` and `r` live in the STRUCTURED arms' overrides, never in `base`:
+  # trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families only,
+  # and a base-level key is merged into EVERY arm -- including the `off` arms,
+  # whose family (mlp) rejects them at construction. expand() cannot catch
+  # this: it validates `base` against the UNION of the grid's families.
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []        # REQUIRED in identity mode
+  target_params: 10000      # 14.2, identical to campaign A
+  epochs: 8000              # 16.1, identical to campaign A
+  grad_clip: 100            # 17.1
+  step_subsample: 1.0
+  results_root: results_osc_hfr
+  # h_fr is NOT set here: it is the declared axis, and it is set per arm.
+
+representation:
+  kind: identity
+  d_z: 4
+
+arms:
+  # lr = 0.001 is 23.3's argmin, applied unchanged. No re-selection (23.5(2)).
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001, h_fr: 5}
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001, h_fr: 25}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, h_fr: 5, delta: 0.05, radius: bounded, r: 2}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, h_fr: 25, delta: 0.05, radius: bounded, r: 2}
+
+seeds: [0, 1, 2, 3, 4]

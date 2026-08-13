@@ -2356,6 +2356,51 @@ exist. Round 3 adds it rather than deciding on quarter-budget evidence (decision
   readings pass `data["val"]` to the same unchanged `gate.py` functions. No new
   measurement is defined.
 
+### 16.4(bis) Dated precision to 16.4 — the val reading exists for factorial roots too (dated 2026-08-11)
+
+A precision on an existing section, not an amendment (precedent: 20.4). 16.4 already declares
+this change mechanical, in its own words: *"`probe.py` currently passes `data["test"]` to the
+evaluation path; round 3's selection readings pass `data["val"]` to the same unchanged
+`gate.py` functions. **No new measurement is defined.**"*
+
+What that clause did not say is that the val reading existed **only inside `probe.py`**, whose
+cell list is hard-coded to round 3 and whose output is `results_probe_d/report.json`. For a run
+produced by `sld-factorial`, `e_25` on val was written **nowhere**: `sld-factorial` never calls
+the gate, and `sld-gate` scored `datasets[...]["test"]` at a hard-coded index. 23.3's per-arm
+rate selection needs exactly that quantity, on new roots. The gap was structural, not a typo,
+and it was found before the sweep ran.
+
+**What was added** — the same mechanical change, at the campaign level:
+
+- `sld-gate` takes `--split {test,val}`, **default `test`**. Every existing gate reading is
+  byte-identical; 15.5's rule (*"the gate scores on test; anything that selects reads val"*) is
+  unchanged and is now expressible rather than only stated.
+- The val path calls the **same** `evaluate_run_free_rollout`, with the **same** `tau_1`
+  (`protocol.tau_1(e_1_pers)` off the same frozen representation artifact) and the same
+  horizon. No second definition of anything.
+- The artifact is **`gate_val.json`, never `gate.json`**. `sld.viz.ingest.load_gate` globs
+  `gate.json` only, so a selection reading cannot be ingested as a verdict. One filename, one
+  split, decided in one function (`gate.gate_filename`).
+- The four column names a selection may request — `e_1_val`, `e_25_val`, `m_low_val`,
+  `m_high_val` — are `probe.py::_val_reading`'s keys **verbatim**, so 23.3 minimises the same
+  OBJECT round 3 minimised rather than a look-alike computed down a second path.
+
+**The check that a swapped split is really a swapped split.** A `--split` argument that was
+accepted and then ignored would be invisible in every green test. On the same run, the two
+artifacts carry **different numbers**: `gate.json` (test) `e_h_gate = 0.8241093476571955`,
+`gate_val.json` (val) `e_h_gate = 0.7841935405111540`. The readers additionally refuse, by name,
+an artifact whose recorded `split` is not the one requested, and one scored at a horizon the
+requested column does not name.
+
+**No criterion changed.** 23.3's argmin is still *the listed rate minimising that arm's own
+`e_25` on the val split*, and the exclusions (a run that did not finish, or whose criterion is
+not finite, cannot win) are unchanged. What changed is that the quantity now exists for the
+roots 23.3 applies to.
+
+- **R4**: this precision is committed before the sweep's argmin is written into any campaign
+  config.
+
+
 ## 17. Amendment 8 — the gradient guard, and the clipped re-run of round 3's ssm cells (dated 2026-08-07)
 
 ### 17.0 Scope, and why it is committed now
@@ -2995,3 +3040,854 @@ someone who built the analytic reference first.
   is what makes leaving `1e-3` in place an argument rather than a stubbornness.
 - **R4**: this section precedes the D4 execution that its "does not block" clause
   authorizes.
+
+## 21. Amendment 12 — D4's reading: an upper bound that is not arm-neutral, a rate asymmetry, and one declared re-selection (dated 2026-08-09)
+
+### 21.0 What D4 returned
+
+The 40 runs of 19.7 executed: **40/40 complete, zero divergence, zero execution failure**,
+scored by `sld-gate` into one `gate.json` per run. Per cell, medians over the five seeds,
+with 12.4's rule (all five pass individually):
+
+| stratum | arm | `e_1` | `m_low` | `m_high` | lower | upper | **learns** |
+|---|---|---|---|---|---|---|---|
+| OU | `mlp` | 0.0106 | 0.505 | 0.540 | 5/5 | 5/5 | **5/5** |
+| OU | `transformer` | 0.0229 | 0.723 | 1.172 | 5/5 | 1/5 | 1/5 |
+| OU | `mlp_k` | 0.0520 | 1.148 | 2.656 | 1/5 | 0/5 | 0/5 |
+| OU | `transformer_k` | 0.0492 | 1.112 | 2.516 | 1/5 | 0/5 | 0/5 |
+| AC | `mlp` | 0.0119 | 0.966 | 0.777 | 3/5 | 5/5 | 3/5 |
+| AC | `transformer` | 0.0297 | 0.854 | 1.934 | 5/5 | 0/5 | 0/5 |
+| AC | `mlp_k` | 0.0438 | 1.690 | 2.857 | 0/5 | 0/5 | 0/5 |
+| AC | `transformer_k` | 0.0436 | 1.502 | 2.841 | 0/5 | 0/5 | 0/5 |
+
+**One cell of eight passes.** `m_low < 1` and `m_high < 1` are the passing conditions.
+
+### 21.1 The upper bound is not arm-neutral, and the measurement that shows it
+
+`tau_1 = e_1_pers / gamma_1` (15.1) is calibrated on stratum-level quantities, and 15.1's
+attainability condition guards it against one floor only: `e_recon`, the **shared
+readout's** reconstruction error. That implicitly assumes every arm's sole reconstruction
+cost is the shared one. **The structured arms carry a second, architecture-intrinsic
+cost**: their state passes through `psi` (lift `d_z=4 -> 2r=8`) and back through `pi`, two
+independently-learned MLPs that are not inverses of one another. Even with a *perfect*
+transition operator, the prediction comes back deformed.
+
+Measured on the 20 structured runs, in true-state coordinates normalised by the frozen
+`sigma_train` — the same metric `e_1` uses — with the "perfect-operator floor" defined as
+the one-step error the arm would obtain if its transition operator were exact:
+
+| stratum | arm | perfect-operator floor | `tau_1` | **floor / `tau_1`** |
+|---|---|---|---|---|
+| OU | `mlp_k` | 0.0728 | 0.019561 | **3.72x** |
+| OU | `transformer_k` | 0.0617 | 0.019561 | **3.16x** |
+| AC | `mlp_k` | 0.0666 | 0.015342 | **4.34x** |
+| AC | `transformer_k` | 0.0525 | 0.015342 | **3.42x** |
+
+The **minimum over the five seeds** stays 2.31x-3.49x above `tau_1`. The measurement chain
+was validated first: `e_recon` recomputed independently reproduces the artifact's stored
+value **bit-exactly on both strata**, and `e_1` recomputed through the production path
+matches the persisted `gate.json` **bit-exactly on all 40 runs**.
+
+**Conclusion, and it is not about learning**: no transition operator, however perfect,
+could have passed the upper bound for the structured arms. The gate disqualified them for
+a property of the architecture, on the very axis the grid exists to measure.
+
+**The repair applies 15.1's own rule at the granularity it should always have had.** 15.1
+already prescribes the treatment for a bound that sits below its own floor: the subject is
+published **"ungated (upper bound unattainable)"**, with its numbers unadjusted, never
+counted as a failure. That rule was written per stratum; it is hereby checked **per (arm,
+stratum)** against the arm's own floor. **No threshold moves**, and this makes nobody pass:
+the structured arms still fail the lower bound, which is arm-neutral by construction.
+
+### 21.2 The rate asymmetry, named
+
+16.2 selected the rate by the argmin of the **OFF** arm's `e_25_val` and applied it to the
+backbone's ON arm, which received only a finitude screen — "no metric of the screen run is
+consulted for selection; only completion is". 14.2's reason was that tuning per ON arm
+would confound the structure effect with a tuning effect.
+
+**The measured situation inverts that reasoning.** As executed, the treatment is
+asymmetric: each OFF arm runs at a rate selected *for it*, each ON arm at a rate selected
+for a *different architecture*. The confound 14.2 sought to avoid is the one now present,
+pointing against the ON arms. Applying 16.2's **identical** procedure to the structured
+arms does not create an asymmetry; it removes one.
+
+14.2's and 16.2's text stands unedited, as section 10's did when 16.2 superseded it. What
+changes is stated here and nowhere else: **the shared-rate rule is withdrawn for the
+structured arms**, replaced by the same selection every other arm already received.
+
+### 21.3 The re-selection, pre-registered in full
+
+Fixed here, before any run it authorizes:
+
+1. **Sweep** — six runs: `mlp_k` and `transformer_k` x `lr` in **{1e-4, 3e-4, 1e-3}**
+   (16.2's list, unchanged), **4000 updates**, `h_fr = 25`, `grad_clip = 100`, the OU
+   stratum's frozen shipped representation, `n_episodes = 256`, `target_params = 10 000`,
+   `batch_episodes = 8`, `r = d_z = 4`, **one seed (0)**. Identical in every respect to
+   16.2's sweep except the arm.
+2. **Criterion** — per arm, the listed rate minimising that arm's own `e_25` on the **val**
+   split (16.4's reading rules; never test). A run that fails to train or to evaluate
+   finitely is excluded from the argmin; a diverged run cannot win.
+3. **Exhaustion branch** — if no listed rate trains, that arm has no trainable rate at the
+   D regime and D4 publishes the fact, exactly as 16.2(4) prescribes. No off-list rate is
+   tried.
+4. **Re-run** — the 20 structured cells (2 arms x 2 strata x 5 seeds) at the selected
+   rates, everything else identical to 19.7, into a **new root `results_gate_d2/`**. The
+   original `results_gate_d/` is **frozen** and stays published: it is the measurement of
+   what the inherited rate produces, which is itself a result about the rate's effect on
+   the structure axis.
+5. **ONE selection, ONE re-run, published whatever it returns.** This is not a retry until
+   green. If the re-run still fails either bound, that outcome is the phase's result and is
+   published as measured. No third rate list, no further re-selection, no change of budget,
+   loss, or any other declared value. This clause is the binding part of this section.
+
+**The composed grid, and its provenance.** The final 2x2 grid takes the OFF cells from
+`results_gate_d/` (already at their own 16.2-selected rate, regime unchanged by this
+section) and the ON cells from `results_gate_d2/`. Every cell is therefore at a rate chosen
+by **one identical procedure applied to itself**, which is the homogeneity that matters;
+the two roots are named per cell wherever the grid is published, so provenance is auditable
+rather than implied.
+
+### 21.4 M4's status
+
+**M4 is not crossed.** Phase D's gate is the positive control cell by cell, and seven cells
+of eight do not pass it as measured. No GPU rental and no phase-E comparative claim is
+authorized by this section. What phase D has established stands: the pipeline, the metric,
+the frozen representation, the verdict artifacts, D3's control, and the two negative
+results now on record.
+
+### 21.5 Honesty declaration
+
+- **Decided, not derived**: that the rate asymmetry is repaired rather than published as-is,
+  and that the structured arms are re-run once. The measurements in 21.1 are facts; what to
+  do about them is the author's call, taken on 2026-08-09 with the numbers in hand.
+- **The repair makes nobody pass.** 21.1's per-arm attainability rule reclassifies *why* the
+  structured arms fail the upper bound; they still fail the arm-neutral lower bound
+  (`m_low` 1.11-1.69 against `< 1`, i.e. 4.4x better than the trivial baselines where 5x was
+  required). Nothing here converts a failure into a success.
+- **No threshold moved.** `gamma = 5`, `gamma_1 = 2`, `tau_1`'s formula, the budget, the
+  loss: untouched. `gamma = 5` in particular is what the structured arms miss by 11-15% on
+  OU, and it is left exactly where 12.3 pre-registered it — moving it now, with the result
+  visible, is the one thing this document exists to forbid.
+- **The failure mode this section is most exposed to** is re-running until green. 21.3(5)
+  binds against it in advance and in writing.
+- **R4**: this section precedes the sweep and the re-run it authorizes.
+
+## 22. Amendment 13 — withdrawal of 21.1's conclusion (dated 2026-08-11)
+
+### 22.0 What is withdrawn
+
+Section 21.1 concludes that *"no transition operator, however perfect, could have passed the
+upper bound for the structured arms"*. **That conclusion is withdrawn.**
+
+It is not supported by its own table. The "perfect-operator floor" 21.1 reports is **above** the
+`e_1` those same arms actually measured in 21.0, in **four cells out of four**:
+
+| stratum | arm | 21.1 floor | 21.0 measured `e_1` |
+|---|---|---|---|
+| OU | `mlp_k` | 0.0728 | **0.0520** |
+| OU | `transformer_k` | 0.0617 | **0.0492** |
+| AC | `mlp_k` | 0.0666 | **0.0438** |
+| AC | `transformer_k` | 0.0525 | **0.0436** |
+
+A floor that every run already clears is not a floor. Section 12.3 had already warned that
+`e_recon` is *"an empirical floor, not a proven lower bound"*; the same caution applies to a
+floor built on top of it.
+
+### 22.1 Why no replacement claim is made
+
+The counterfactual 21.1 evaluates — an exact transition operator inserted into a **trained**
+`psi`/`pi` pair — is out of distribution. `psi` and `pi` were fitted jointly with the learned
+operator, so whether they partially compensate its errors is a hypothesis that must be
+**measured**, not asserted. Asserting it here would repeat the mu_J fault one level up: an
+inference drawn from a chain that has just been declared suspect. **No causal statement replaces
+the withdrawn one.**
+
+The hypothesis is nameable and testable, and it is recorded here as an open question rather than
+as a finding: `psi` and `pi` are two independently parametrized MLPs with no invertibility
+constraint and no reconstruction term, so `pi . psi` is not the identity and the loss is
+invariant along a continuous family of `(psi, A_bar, pi)` triples. Whether that degeneracy
+affects what gradient descent reaches is exactly the kind of claim this repository does not make
+without a measurement.
+
+### 22.2 What is unaffected
+
+Section 21.3 **stands and is executed as written**. It repairs the rate asymmetry named in 21.2,
+which is an independent defect, measured and not disputed here. The 20 structured cells re-run
+into `results_gate_d2/` under 21.3(5)'s binding clause — one selection, one re-run, published
+whatever it returns.
+
+### 22.3 Honesty declaration
+
+- **Withdrawn, not falsified.** The measurement in 21.0 and the floor computation in 21.1 both
+  stay on record, unedited. What is removed is the inference drawn from comparing them.
+- **Decided, not derived**: that the withdrawal is published rather than repaired by a new
+  counterfactual. The arithmetic in 22.0 is a fact; what to do about it is the author's call.
+- **No threshold moves**, and nothing here converts a failure into a success: the structured arms
+  still fail the arm-neutral lower bound.
+- **R4**: this section precedes any run it would authorize. It authorizes none.
+
+## 23. Amendment 14 — the oscillator campaigns: a three-level structure factor, a sample-size axis, and a closed-form misspecification axis (dated 2026-08-11)
+
+### 23.0 Scope, and why it is committed now
+
+Phase D measured the structure axis ON against OFF on `DampedPendulum` only (21.0), and
+measured the structured arms alone, with no OFF cell, on `CoupledOscillators` (19.1: *"D3 is a
+capability control on the predictor and the optimizer, not a comparison between arms"*, and
+*"D3 compares no arms"*). **The contrast this repository exists to measure therefore has no
+measurement on the one system where the rotation-scaling prior is exactly correct.** This
+section declares the campaigns that take it, in full, before any of them runs.
+
+Three roots, all NEW and all **self-sufficient** — each re-runs its own reference cells, so no
+result is read across roots and 14.6 is not violated. This is stated rather than assumed
+because a cross-root reading would be illegal under 14.6 even when it is arithmetically
+harmless.
+
+| root | campaign | cells |
+|---|---|---|
+| `results_ssm_delta/` | C — the ssm family's trainable-rate question, re-opened | 20 |
+| `results_osc_n/` | A — gain against sample size, prior exact | 45 (+15 conditional) |
+| `results_osc_delta/` | B — gain against prior misspecification | 45 |
+
+### 23.1 The structure factor has three levels
+
+`off` · `on-free` · `on-stable`.
+
+`on-free` is `structure: on` exactly as 13.2 defines it: `alpha` FREE, discrete radius
+`exp(Delta*alpha)` unbounded. `on-stable` reparametrises the SAME cell as
+`alpha = log(sigmoid(rho)) / Delta`, so the radius is `sigmoid(rho)`, strictly inside `(0, 1)`
+for every real `rho`, **with no side condition**. `omega`, the exact ZOH integral `Phi`,
+`B_bar`, the LTI gold and every contract test are untouched, and the head emits the same two
+numbers per block — so 13.7's fairness argument holds unamended, and the two levels are
+initialised into the same radius band (13.6's `alpha_0 ~ U(-1.5, -0.5)` and its sigmoid
+pre-image).
+
+**`on-stable` imposes stability rather than measuring it.** That is exactly what 13.2 declined
+to do, and it is why this is a THIRD LEVEL measured beside `on-free`, never a repair applied to
+it. Its justification comes from outside the world-model literature: an unbounded-radius
+forward-Euler discretisation of the same 2x2 generator is the documented cause of divergence
+under long closed rollouts in the spiking-neuron literature (SE-adLIF, Nature Communications
+2025; Balanced Resonate-and-Fire, ICML 2024; LinOSS, ICLR 2025), which fixes it by
+construction. The symplectic-Euler form those papers use was considered and **rejected here**:
+its `sqrt(alpha*beta) < 1` bound holds only while the eigenvalues stay complex, and outside
+that regime the radius is unbounded (measured: up to 368 over 2e5 draws). A guarantee that
+needs a watched side condition is not the right object for an axis this factorial has to
+trust.
+
+### 23.1(bis) Dated precision to 23.1 — what the bound guarantees, and at which precision (dated 2026-08-11)
+
+A precision on an existing section, not an amendment: the precedent is 20.4, *"Two dated
+precisions to section 19"*. **Nothing else in 23.1 moves** — the three levels, their
+justification, the rejection of the symplectic-Euler form, and 13.7's fairness argument all
+stand as written.
+
+23.1 states that `on-stable`'s radius is `sigmoid(rho)`, *"strictly inside `(0, 1)` for every
+real `rho`, **with no side condition**"*. Two of those claims are exact and one is a wording
+error, and the distinction is worth the paragraph because the arm's whole purpose rests on it.
+
+- **The guarantee is `r <= 1`**, hence `r**H` bounded for every horizon `H`. That is what this
+  level is recruited to provide, against the documented divergence of an unbounded-radius
+  forward-Euler discretisation. It is **measured**: 400 001 values of `rho` swept over
+  `[-50, 50]`, at **both** precisions, **zero radii above 1**.
+
+| precision | radius > 1 | radius == 1 | first saturating `rho` | max radius |
+|---|---|---|---|---|
+| float32 (the Trainer's working precision, CPU) | **0** | 261 372 | **17.329** | 1 |
+| float64 | **0** | 100 562 | 37.430 | 1 |
+| `on-free`, float32, same input | 4000 / 4000 | — | — | **12.18** |
+
+- **"Strictly inside `(0, 1)`" holds in exact arithmetic and not at the working precision.**
+  `sigmoid(rho)` rounds to exactly `1.0` once `1 - sigmoid(rho)` falls below half an ulp at 1
+  — above `rho ~ 17.33` in float32, `rho ~ 37.43` in float64. This is a property of
+  representing `1 - epsilon`, not of the map.
+- **The saturation is benign, and it is tested rather than asserted.** `r = 1` gives
+  `r**H = 1`: bounded at `H = 25` and `H = 100`. It is the *opposite* of the failure mode
+  this level exists to exclude, and it makes the contrast with the rejected symplectic-Euler
+  form (radius measured up to 368 outside the oscillatory regime) **sharper**, not softer.
+- **"With no side condition" stands**, unqualified. That was the whole reason the
+  symplectic-Euler form was rejected, and nothing here weakens it.
+
+**How this was found, and what was NOT done about it.** `tests/test_structured_radius.py`
+asserted the strict form and went red on 4 tests the first time it was ever executed (it was
+written by an agent without torch). The test was corrected — to `r <= 1` **and** finite **and**
+non-negative everywhere, plus three new tests: one that LOCALISES the saturation point at the
+two measured values, one that shows `r**H` bounded at `H = 25` and `H = 100`, and one that
+keeps the `r = sigmoid(rho)` identity on the domain the precision can carry. The corrected file
+is **stronger in substance** than the one it replaces, and the mutant test that goes red when
+the division by `Delta` is dropped is unchanged. Verified by mutation: removing the bound turns
+16 of its 25 tests red.
+
+**This is a bug fix, not a threshold move**, and the distinction is the one this document
+exists to police. A threshold here is a decision criterion on an experimental result — `gamma`,
+`gamma_1`, `tau_1`, the `1e-3` bound. A unit assertion on the image of a reparametrisation is
+not one: no result depends on its wording, and the arm's measured behaviour is unchanged by
+correcting it. **No campaign number, no reading rule, and no threshold moves.** The `on-stable`
+level ships in the campaigns as declared.
+
+- **R4**: this precision is committed before campaigns A and B execute a single `on-stable`
+  cell.
+
+
+### 23.2 Backbone frozen, budget NOT matched
+
+`d_context`, `psi_hidden` and `pi_hidden` are identical across all arms of these roots, and the
+realised parameter count is **published per arm**. 13.7's budget matching is suspended here, on
+the precedent 19.2 already set (*"D3 is a control, not a grid cell: it is not bound by 13.7's
+budget-matching allocation"*). The reason is mechanical: `match_budget` owns the width knob, so
+any change to the head's output would make it shrink the backbone — and the campaign would then
+be measuring width while calling it structure. That is the mu_J fault, and it is the one this
+section must not reproduce. Since `radius` does not change the head's output size at all, the
+three levels are in fact parameter-identical; the frozen backbone makes that true by
+construction rather than by coincidence.
+
+### 23.3 Rate selection, per arm, for itself
+
+16.2's procedure, unchanged, applied to **each arm on its own** — which is precisely the repair
+21.2 prescribes for the asymmetry it named. Sweep: `lr` in {1e-4, 3e-4, 1e-3}, 4000 updates,
+one seed, argmin of that arm's own `e_25` on the **val** split. A run that fails to train or to
+evaluate finitely is excluded from the argmin; a diverged run cannot win. If no listed rate
+trains, that arm has no trainable rate at this regime and the fact is published, exactly as
+16.2(4) prescribes. **No off-list rate is tried.**
+
+### 23.4 These roots have NO gate
+
+12.4 (*"the five pass INDIVIDUALLY; no reducer, no averaging"*) is a **gate** rule and does not
+apply here, because there is no gate to pass. Stated explicitly rather than violated quietly.
+A median may DISPLAY in a figure; it decides nothing. Per-seed values are published alongside
+it in every panel.
+
+21.4's clause (*"no phase-E comparative claim is authorized by this section"*) is **lifted for
+these three roots, and for them only**, by this section, dated. The campaigns below ARE
+comparative claims; running them under a protocol that forbids them would be the first thing a
+reviewer of a dossier sold on methodological honesty would find.
+
+### 23.5 The primary reading rules, written before the numbers
+
+| campaign | primary estimand | pre-registered prediction | what kills it |
+|---|---|---|---|
+| **A** | the SIGN of the interaction `gain(structure) x log n_episodes` | the gain of `on-stable` over `off` DECREASES as `n` grows | no detectable interaction at 5 seeds -> published as such |
+| **B** | the SIGN of the slope of `gain(structure)` against `delta(c)` | the gain DECREASES as `delta` grows | a null or opposite slope falsifies the conditional form of the thesis, and it is written that way |
+| **C** | does the `ssm` family have a trainable rate at `delta_max = 4*dt`? | yes | no -> 18.0's negative result is strengthened and becomes citable as measured |
+| **on-free vs on-stable** | does the gain come from the structure or from the bound? | **not predicted — this is the open question** | nothing: both outcomes are the result |
+
+Effect sizes are published with the sign. **No pass/fail verdict is issued on any of these
+roots.**
+
+Three prohibitions, binding:
+
+1. no additional level of `n` or of `c` after the numbers are seen;
+2. no third rate sweep, whatever the outcome (21.3(5)'s clause, applied here too);
+3. no figure ships whose recomputation disagrees with the table it cites — **the discrepancy
+   becomes the result**, the treatment 19.8 already applied to the `grad_clip` wiring defect.
+
+### 23.6 Campaign C — the ssm family, re-opened on a physical argument
+
+18.0 records that the `ssm` family diverges at every declared rate under `h_fr = 25`, with
+gradient norm 2.4e18 against 28.2 for `mlp`, and a first-epoch loss **quasi-invariant to the
+clip** (6.4413e24 clipped against 6.4415e24 unclipped). A loss invariant to gradient clipping is
+not an optimiser step that is too large: it is a forward map that diverges.
+
+`SelectiveSSMPredictor` bounds its diagonal transition by construction
+(`a_cont = -exp(a_log)`, so every entry of `A_bar` lies in `(0, 1)`), so the divergence cannot
+come from the recurrence's spectrum. What is NOT bounded is the selective gate:
+`delta_t = clamp(softplus(W_delta(c)), 1e-4, 10.0)` and `B_bar_t = delta_t * b_t` with `b_t`
+unconstrained. **`delta_max = 10.0` is 200x the pendulum's physical step and 500x the
+oscillators'**; at that value `A_bar -> 0` (the state is forgotten entirely) while the input
+term is amplified by 10, and in a CLOSED rollout that input is the model's own prediction.
+
+The declared factor is `delta_max` at two levels, `10.0` (the value under which the family was
+declared dead) and `4*dt` (0.20 here). The second is a **physical** argument — a latent
+discretisation step should not exceed a few physical steps — not a tuned value, and it is fixed
+here and does not move. Both outcomes are reportable and neither is a repair of the other: if
+the family trains at the bounded level, 18.0's sentence is amended to name the configuration it
+was measured under; if it does not, 18.0 stands and is no longer attributable to a
+configuration choice.
+
+### 23.7 Campaign B — misspecification with a closed-form axis
+
+`CoupledOscillators` takes its viscous damping `c` as a constructor parameter. For the frozen
+`m1 = m2 = 1, k1 = 1, k_c = 0.5, k2 = 1.5`, the stiffness matrix has eigenvalues
+`kappa = {1.191, 2.309}` and each mode obeys `lambda^2 + c*lambda + kappa = 0`, so a mode is
+oscillatory while `c < 2*sqrt(kappa)`; the two thresholds are `2.183` and `3.039`.
+
+A rotation-scaling block imposes `lambda = alpha +- i*omega`: either a conjugate pair or a
+**double real root**. Two DISTINCT real eigenvalues therefore cannot be represented, and the
+best block sets `alpha` to their mean and `omega = 0`, at spectral distance exactly
+`|lambda_a - lambda_b| / 2`. That is the declared misspecification metric `delta(c)`, computed
+in closed form and not estimated:
+
+| `c` | eigenvalues of `A` | regime | `delta` |
+|---|---|---|---|
+| 0.10 | -0.050 +- 1.519i, -0.050 +- 1.090i | two conjugate pairs | **0.000** (prior exact) |
+| 2.30 | -1.150 +- 1.010i, -0.762, -1.488 | one pair + two reals | **0.363** |
+| 2.60 | -1.300 +- 0.812i, -0.594, -2.006 | one pair + two reals | **0.706** |
+| 3.00 | -1.500 +- 0.278i, -0.471, -2.529 | one pair + two reals | **1.029** |
+
+**`c` does not go past 3.039.** Beyond it all four eigenvalues are real and `delta` DECREASES
+(0.468 at c = 3.05, 0.188 at c = 4.0); the axis would stop being monotone. The four values above
+are the whole axis and no fifth is added later.
+
+**The pairing convention, declared (added 2026-08-11).** `delta(c)` is a distance from a spectrum
+to the nearest block-diagonal rotation-scaling spectrum, so it depends on WHICH eigenvalues are
+paired into which block. The four values above hold under the convention **a conjugate pair is
+never split**: each surviving oscillatory pair takes one block, and the remaining real
+eigenvalues pair among themselves. It is the physically meaningful convention here -- an
+oscillatory mode of the true system is exactly what a rotation-scaling block exists to carry --
+and it is the one the campaign uses.
+
+It is not the only one, and the difference is not negligible: under **free pairing**, which
+minimises the distance over all pairings without regard to physical modes, `c = 2.60` gives
+**0.529** rather than 0.706. Free pairing also makes `delta` DISCONTINUOUS at the second
+threshold `c* = 3.039`, where a conjugate pair collapses to a double real root and the optimal
+pairing jumps; the declared convention is continuous there. Both quantities are computed and
+published in `notebooks/00_dynamique_latente_structuree.ipynb` section 3, so the reading rule of
+23.5 applies to a number whose definition is on the record rather than implied.
+
+Nothing in 23.5's prediction depends on which convention is used -- it is a statement about the
+SIGN of a slope, and `delta` is monotone under both on the declared interval. The convention is
+declared because a metric on a figure's x-axis must have one definition, not because the result
+turns on it.
+
+### 23.8 Honesty declaration
+
+- **Decided, not derived**: the three levels, the two extra axes, the `4*dt` bound, and the four
+  values of `c`. Each has an argument above; none is a measurement.
+- **A parametrisation was rejected on its own test.** The symplectic-Euler form was the first
+  candidate and its bound was checked before adoption, not after; it failed outside the
+  oscillatory regime and was dropped. The check is recorded because the failure is what selects
+  the shipped form.
+- **Nothing here converts a past failure into a success.** 21.0's result stands as measured, and
+  these campaigns are new measurements on new roots, never a re-reading of it.
+- **R4**: this section precedes every run it authorizes.
+
+## 24. Amendment 15 — the ssm family trains under a physically bounded latent step; 18.0's sentence names its configuration (dated 2026-08-11)
+
+### 24.0 What ran, and what it returned
+
+Campaign C of 23.6 executed in full: **20 cells** (`min_ssm`, `ssm_k` x `delta_max` in
+{10.0, 0.20} x 5 seeds) on `CoupledOscillators`, 8000 updates each, `results_ssm_delta/`,
+`lr = 3e-4` and `grad_clip = 100` unchanged from 16.2/17.1. The declared factor moved and
+nothing else did.
+
+| `delta_max` | family | completed | dies at epoch | first-step grad norm | median `val_loss` | median `e_25` (test) | median `m_low` |
+|---|---|---|---|---|---|---|---|
+| 10.0 (= 500x `dt`) | `min_ssm` | **0 / 5** | 0, 0, 0, 0, 0 | *none — no step completed* | — | — | — |
+| 10.0 | `ssm_k` | **0 / 5** | 28, 36, 37, 56, 56 | **1.807 - 2.355** | — | — | — |
+| **0.20 (= 4x `dt`)** | `min_ssm` | **5 / 5** | — | **22.40 - 27.86** | 0.1995 | 0.0484 | 0.150 |
+| **0.20** | `ssm_k` | **5 / 5** | — | **1.806 - 2.355** | 0.0253 | 0.1128 | 0.350 |
+
+**The primary result is the first two columns and it is unanimous**: zero of ten cells complete
+at `delta_max = 10.0`, ten of ten at `4*dt`. Per-seed values are in
+`_private/AGENT_JOURNAL.md`; no median decides anything here (23.4).
+
+### 24.1 The two families fail differently, and the first step is not the discriminator
+
+This is where the campaign contradicts what was expected of it, so it is stated before the
+amendment it supports.
+
+- **`min_ssm` at 10.0 fails immediately**: non-finite `val_loss` at **epoch 0**, in all five
+  seeds, before a single row reaches `metrics.csv`. There is no trajectory and no gradient norm
+  to report, and that absence is the measurement.
+- **`ssm_k` at 10.0 fails slowly, from an ordinary start**: its first optimizer step is
+  **indistinguishable** from the bounded arm's. Seed-matched, the two levels' first-step
+  gradient norms agree to three decimals (1.807/1.806, 2.068/2.067, 2.167/2.167, 2.217/2.217,
+  2.355/2.355), and their loss trajectories first differ at **epoch 1**, by ~1e-5. The clamp
+  binds from the first update; its consequence is cumulative, and takes 28 to 56 updates to
+  become terminal.
+
+**Therefore the first-step gradient norm is NOT what separates the two levels on this root**,
+and 18.0's `2.4e18` cannot be placed beside these numbers as if it were: that figure was
+measured on `min_ssm`, on `DampedPendulum`, in `results_probe_d/` — a different family, a
+different system and a different root, and 23.0 requires this root to be self-sufficient. The
+mechanism 18.0 identified (a forward map that diverges at initialization) is what `min_ssm`
+does here; it is **not** what `ssm_k` does here.
+
+**How this was caught.** 24.0's first table wrote *"—"* for `ssm_k` at 10.0, because the
+tabulation only read `grad_norm` from cells that carried a completion sentinel. The figure's
+reader takes it from `metrics.csv` regardless, so figure E plotted five points where the table
+claimed none. Under 23.5(3) the discrepancy is the result: the table was wrong, the figure was
+right, and the mechanism sentence this section first carried was wrong with it. Corrected here,
+with the disagreement on the record rather than silently reconciled.
+
+### 24.2 The amendment to 18.0
+
+18.0's sentence — *"the family ultimately does not train here"* — **is amended to name the
+configuration it was measured under**:
+
+> The ssm family has no trainable rate at the D regime **under `delta_max = 10.0`, i.e. 200x
+> the pendulum's physical step and 500x the oscillators'**. Under a physically bounded latent
+> step (`delta_max = 4*dt = 0.20`) it trains: on `CoupledOscillators`, 10/10 cells complete
+> 8000 updates with finite losses, against 0/10 at `delta_max = 10.0`, every other knob held.
+
+The supporting magnitude, within this root: `min_ssm` at the bounded level takes its first
+optimizer step at a gradient norm of **22.40 - 27.86** — an ordinary number for this harness —
+where at 10.0 it takes no step at all.
+
+### 24.3 What this does NOT establish
+
+**Scope, per 25.6**: every statement in this section holds **under the declared regime**
+(`h_fr = 25`). Root 1 of amendment 16 has since measured that the sign of the structure
+effect is unchanged at `h_fr = 5` (25.8), so the scope is narrower than the claim would be
+without it and wider than "at one horizon"; it is stated rather than assumed either way.
+
+
+Named explicitly, because the distance between "trains" and "works" is where this repository
+would most easily overclaim.
+
+- **"Trains" is not "learns", and neither is a gate verdict.** These roots have **no gate**
+  (23.4). `gate.json` is written on test for the figures and its `status` column decides
+  nothing here. For the record and not as a criterion: 10/10 bounded cells clear `m_low < 1`
+  (0.115 - 0.562, i.e. they beat both trivial baselines), and 2 of 10 also clear the upper
+  bound — one of them at `m_high = 0.999515`, a margin of 5e-4. A verdict that turns on the
+  fourth decimal is exactly why 23.4 declares these roots ungated.
+- **The withdrawal from the competitive grid is NOT reversed.** 18.0's decision was the
+  author's, taken on grounds that included cost and the phase-D calendar, not only
+  trainability. This amendment corrects one clause of one sentence; it re-admits no arm to any
+  grid.
+- **No claim is made about the pendulum.** Campaign C ran on `CoupledOscillators`. 18.0's
+  measurements were taken at the D regime on `DampedPendulum`. The bound `4*dt` was declared in
+  23.6 as a physical argument for both, but only the oscillator has been measured, and 14.6
+  forbids reading one root through another.
+- **The mechanism is not identified, only bounded.** That the clamp binds and that the
+  unbounded arm dies are both measured. *Why* `ssm_k` needs 28-56 updates to die while
+  `min_ssm` dies at once is not, and no explanation is offered here.
+- **`delta_max` was not tuned.** Two levels, declared in 23.6 before the runs, `4*dt` fixed by
+  a physical argument. No third value was tried and none will be.
+
+### 24.4 Honesty declaration
+
+- **Withdrawn by measurement, not repaired.** 18.0's grounds 1-4 stand on the record, unedited,
+  and were correct about what they measured. What is corrected is the *scope* of the sentence
+  they support: a property attributed to a family belonged to a configuration of it. That is
+  the same class of error 22.0 corrected in 21.1, and it is recorded the same way.
+- **This section's own first draft was wrong, and its figure caught it.** Two errors, both
+  recorded above rather than quietly fixed: a rounding that put two of four cited bounds
+  outside the values they claimed to contain, and a missing column that carried a false
+  mechanism sentence. 23.5(3) found both before either shipped.
+- **This was the pre-declared outcome, not a rescue.** 23.6 wrote both branches before the runs
+  ("if the family trains at the bounded level, 18.0's sentence is amended to name the
+  configuration it was measured under; if it does not, 18.0 stands"). The branch taken is the
+  one the numbers selected.
+- **No threshold moved**, no level was added, no rate was re-swept. `lr`, `grad_clip`, `gamma`,
+  `gamma_1`, `tau_1` and the budget are exactly what 16.2/17.1 fixed.
+- **R4**: this amendment follows the runs it reports and authorizes none.
+
+## 25. Amendment 16 — two roots declared together: the training-horizon regime, then the decomposition (dated 2026-08-12)
+
+### 25.0 Scope, and the correction it starts from
+
+**Author's decision, this date.** Campaign A returned a structure penalty at every sample
+size (24 is campaign C; A's table is in the run journal and figure C). Before that is read
+as "explicit dynamical structure does not pay", one variable shared by every negative
+result this repository holds must be measured rather than assumed: **the free-running
+horizon `h_fr` is pinned at 25 from the first optimizer step, with no ramp.**
+
+Two corrections to how that argument was first stated, both found by checking the harness
+rather than trusting the memory of it, and both recorded because the first version would
+have entered this document as fact:
+
+1. **Teacher forcing is ACTIVE, at full weight.** Every campaign cell carries
+   `w_tf = 1.0` and `w_fr = 1.0`: the loss is a teacher-forced term threaded over the true
+   prefix PLUS a 25-step free-running rollout, equally weighted (4, and
+   `trainer._composite_loss`'s two branches). The shared variable is therefore **not**
+   "a closed rollout without teacher forcing" — it is the free-running horizon, and its
+   fixity.
+2. **17.0 is NOT cited in support of this.** Its sentence — *"No published work trains an
+   SSM's dynamics loss on a 25-step self-consumed rollout from initialization **without
+   such a guard**"* — concerns the GRADIENT GUARD, which 17.1 then added (`grad_clip =
+   100`). It establishes nothing about curricula. The argument below rests on the author's
+   declaration and on the two levels' own internal history, and on nothing else.
+
+**Two roots are declared here, together, before either runs.** Execution order is part of
+the declaration: the regime root first, because it is decisive for how the second is read.
+
+### 25.1 Root 1 — `results_osc_hfr/`, the regime root (20 cells)
+
+| axis | levels |
+|---|---|
+| `h_fr` | **5**, **25** |
+| `structure` | `off`, `on-stable` |
+| seeds | 0-4 |
+
+`n_episodes = 32`, `CoupledOscillators` at `c = 0.10`, every other knob exactly as campaign
+A. Self-sufficient (14.6): it re-runs its own `h_fr = 25` reference cells rather than
+reading campaign A's.
+
+**Zero new code, and that is the point.** `h_fr` is already a scalar config key, already
+hashed into the run identity, already validated. **Both values are already this
+protocol's**: 4 fixed `h_fr = 5` as the v0 choice; 15.2 raised it to 25. The contrast is
+therefore INTERNAL — between two horizons this document has itself declared — and no
+curriculum from the literature is cited, needed, or implied.
+
+**Why two levels and not a ramp.** A ramp varies the horizon AND the trajectory the
+horizon takes; two fixed levels isolate the variable. If an effect exists, the shape of a
+schedule is a question for after it, not a question to entangle with it now.
+
+**One confound, named before the runs.** 23.3's sweep selected `lr = 1e-3` for all three
+arms **at `h_fr = 25`**, and 23.5(2) forbids a third sweep whatever the outcome. The
+`h_fr = 5` cells therefore run at a rate selected under the OTHER level of the very factor
+being varied. Its direction is unknown and is not guessed at. What this does and does not
+damage is precise:
+
+- **Within** each `h_fr` level, `off` and `on-stable` run at the SAME rate, so the
+  structure contrast — the estimand of 25.2 — is fair at each level;
+- **Across** levels, any difference in the size of the structure effect is confounded with
+  the rate's suitability. The reading rule below is about the **sign** at each level and
+  its change between them, which is the reading least exposed to this.
+
+### 25.2 Root 1's reading rule, written before the numbers
+
+| outcome | what follows |
+|---|---|
+| the sign of the structure effect **inverts** between `h_fr = 5` and `h_fr = 25` | the training free-running horizon was the active variable. Every negative result in this repository is republished as **conditional on `h_fr = 25`**, in this document, in the README, and in the caption of every figure already rendered |
+| the sign is **preserved** | the negative is robust to the horizon, and it becomes the repository's principal result |
+| an effect of `h_fr` **without** a change of sign | published as such, with its effect size |
+
+No pass/fail. This root has no gate. No threshold moves. **No third level of `h_fr`,
+whatever the outcome.**
+
+### 25.3 Root 2 — `results_osc_decomp/` (30 cells), and the regime it runs under
+
+The question: is campaign A's penalty attributable to the structured TRANSITION, or to the
+lift/projection pair that accompanies it?
+
+| axis | levels |
+|---|---|
+| `structure` | `off`, `on-stable`, **`on-stable-nolift`** |
+| `n_episodes` | 8, 256 |
+| seeds | 0-4 |
+
+`on-stable-nolift` is the structured transition acting directly on `z`, with
+`psi = pi = identity`.
+
+**This one DOES need new code, and the amendment says so rather than discovering it at
+launch.** `d_z = 4` and `2r = 4`, so the lift preserves dimension — necessary, not
+sufficient: `psi` and `pi` are always built by `_make_mlp`, and `_kwargs_for` passes
+`psi_hidden = (w,)`, so they are one-hidden-layer GELU MLPs; even `hidden = ()` yields a
+learned `nn.Linear`, never the identity. An explicit identity option is required, hashed
+into the run identity, and verified not to move the `config_hash` of any existing run —
+the same check the 17.1 guard's key received.
+
+**The regime it runs under is fixed HERE, before root 1's numbers exist**: if root 1
+inverts the sign, the decomposition runs at `h_fr = 5`; in **both** other branches it runs
+at `h_fr = 25`. No third possibility, and no choice made after looking.
+
+**Reading rule, written before the numbers:**
+
+| outcome | attribution |
+|---|---|
+| `nolift` ~ `off` | the penalty is attributable to `psi`/`pi` |
+| `nolift` ~ `on-stable` | the penalty is attributable to the transition |
+| between the two | partial attribution, published with its effect size |
+
+No pass/fail; this root has no gate either.
+
+### 25.4 Why the decomposition is worth its 30 runs
+
+**Reference verified by the author, cited as such** (this agent has not read it; only the
+fields the author verified are reproduced): *Koopman Dreamer: Spectrally Constrained Latent
+Dynamics for Stable World-Model Imagination*, Li, Zhang, Xie, Lan, Pan, Xu,
+arXiv:2607.19719, 22 July 2026. It uses a latent transition in **2x2 rotation-scaling
+blocks with a BOUNDED radius** — the same parametrisation as this repository's `on-stable`
+level — and reports improvement over DreamerV3 on **8 of 9** proprioceptive DMC tasks, and
+UAV-LiDAR navigation from **53.8 % to 73.8 %**. Its section VI-D "Structural Ablation"
+ablates only its own components, and it contains no sample-size study.
+
+The same parametrisation helps there and costs here. The two settings differ in more than
+one way — there, a jointly learned representation; here, an identity representation and an
+unconstrained `psi`/`pi` pair — so the disagreement is not itself evidence for either.
+**This root turns that disagreement into a measurement instead of an explanation**, which
+is the only reason it is authorized.
+
+### 25.5 Binding clause
+
+**These are the LAST TWO roots of this cycle.** No further root is declared after them,
+whatever they return.
+
+Campaign B's status under this amendment is fixed now: it is **stopped**, not abandoned —
+26 completed cells and 2 divergences stand as measured under `h_fr = 25`. It resumes ONLY
+if root 1 preserves the sign. If root 1 inverts it, B is re-declared under the new regime
+and its already-run cells are **published as measured under `h_fr = 25`, never merged with
+the new ones**.
+
+### 25.6 A scope correction to every statement already written
+
+Until root 1 has spoken, every claim this repository makes about the structure axis carries
+**"under the declared regime"**. This is not a stylistic hedge: it is the true scope of what
+was measured. It applies to 24, to the captions of figures A, B, C and E, and to the README.
+
+### 25.7 Honesty declaration
+
+- **Decided, not derived**: that the regime is measured before the decomposition; the two
+  levels of `h_fr`; the two levels of `n`; the regime under which root 2 runs in each
+  branch. Each has an argument above; none is a measurement.
+- **Two errors in this section's own first framing were corrected before it was written**,
+  by checking the harness: teacher forcing is active, and 17.0's sentence is about the
+  gradient guard. Both are recorded in 25.0 rather than quietly fixed.
+- **A confound is named that cannot be removed**: the rate was selected at `h_fr = 25` and
+  23.5(2) forbids re-selecting it. The reading rule was chosen to be the one least exposed
+  to it, and the exposure is stated rather than minimised.
+- **No threshold moves**, no level is added to an existing root, and campaign A's result is
+  not re-read by either root — both are new measurements on new roots.
+- **R4**: this section precedes every run it authorizes, including root 1's first cell.
+
+### 25.8 What root 1 returned, and three things recorded rather than chased (dated 2026-08-13)
+
+`results_osc_hfr/`, **20/20 completed, zero divergence at either level**, scored 20/20 on
+test. `m_low` per cell -- lower is better, `< 1` beats both trivial baselines:
+
+| `h_fr` | arm | the 5 seeds | median | IQR | range |
+|---|---|---|---|---|---|
+| 5 | `off` | 0.1501 0.1044 0.1184 0.1174 0.1388 | **0.1184** | [0.1174, 0.1388] | [0.1044, 0.1501] |
+| 5 | `on-stable` | 3.1925 3.1302 3.7970 2.2951 1.3954 | **3.1302** | [2.2951, 3.1925] | [1.3954, 3.7970] |
+| 25 | `off` | 0.2857 0.2624 0.2760 0.2151 0.2209 | **0.2624** | [0.2209, 0.2760] | [0.2151, 0.2857] |
+| 25 | `on-stable` | 0.3911 0.6149 1.0380 0.9029 0.9183 | **0.9029** | [0.6149, 0.9183] | [0.3911, 1.0380] |
+
+**25.2's estimand -- the SIGN of the structure effect at each level**: `on-stable` is worse
+than `off` at **both** levels (ratio **26.44** at `h_fr = 5`, **3.44** at `h_fr = 25`).
+
+**The sign is PRESERVED. 25.2's second branch fires: the negative is robust to the training
+horizon, and it becomes this repository's principal result.** 25.2's third branch fires with
+it -- there IS an effect of `h_fr`, on the effect SIZE, and it is published here with that
+size. Consequences, both fixed before the numbers existed: root 2 runs at **`h_fr = 25`**
+(25.3), and campaign B **resumes** (25.5).
+
+**(1) An interaction, recorded as an OBSERVATION and not pursued.** The two arms move in
+OPPOSITE directions when the horizon shortens: `off` improves **2.2x** (0.2624 -> 0.1184)
+while `on-stable` degrades **3.5x** (0.9029 -> 3.1302). That is not a common regime effect
+with a shared sign; it is an interaction between the horizon and the structure axis.
+
+Its confound is named: `lr = 1e-3` was selected at `h_fr = 25` (23.3), and 23.5(2) forbids
+re-selecting it, so **both arms are off-rate at `h_fr = 5`**. Within each level the two arms
+share the rate, so the sign at each level is clean; the comparison of effect SIZES across
+levels is not. But the confound does not, by itself, explain a **divergence of direction**:
+being off-rate is expected to hurt both arms, and here it coincides with one improving and
+the other degrading. **No cause is advanced, and no experiment is declared to pursue this.**
+The two-root ceiling of 25.5 holds.
+
+**(2) The structured arm is admissible only at the horizon it is evaluated at.** At
+`h_fr = 25` its median `m_low` is **0.9029**, below 1: it beats persistence and linear
+extrapolation. At `h_fr = 5` it is **3.1302**, with **all five seeds above 1**: trained at a
+horizon shorter than the one it is scored at, it does not beat the trivial baselines at all.
+
+**(3) An instrument validation, published as one.** By 14.6's self-sufficiency requirement
+this root re-runs its own `h_fr = 25` reference cells, which are the same cells campaign A
+ran at `n = 32`. They reproduce them: `m_low` **identical to 1e-12 on 10/10 cells**, and the
+saved **weights are bit-identical -- maximum absolute difference exactly 0.0** across all 16
+predictor and encoder tensors. `run_dir`, `config_hash` and `ckpt_sha1` all differ, because
+`exp_name` and `results_root` enter the run identity; the checkpoint hash differs by
+serialized metadata alone, verified by loading both and comparing tensors. **14.6's
+self-sufficiency costs compute and nothing in consistency.**
+
+The first probe of this control returned 3/10 and was wrong: it matched cells on
+`h_fr = 25` without matching on `n = 32`, and all three of campaign A's datasets carry
+`h_fr = 25`. Re-run on the correct pairing. The corrected probe is reported with its
+original error because a probe whose correction is stated is a probe that can be relied on.
+
+## 26. Two dated precisions after the last root (dated 2026-08-13)
+
+Precisions on existing sections, not amendments, on 20.4's precedent. **No root is declared
+here and none is authorized.** 25.5's ceiling of two roots holds; neither precision below
+runs anything -- the first is a closed-form computation, the second a re-reading of numbers
+already published.
+
+### 26.0 Why `on-stable-nolift` is worse than both arms: it is refused by the coordinates, not by the optimizer
+
+25.3's reading rule placed `nolift` between `off` and `on-stable`. It landed above both
+(3.1x `on-stable` at `n = 8`, 13.1x at `n = 256`). The reason is structural and computable
+in closed form.
+
+**The claim.** In STATE coordinates the true generator
+`A = [[0, I], [-K, -c*I]]` does not belong to the block-diagonal rotation-scaling class for
+ANY pairing of the four coordinates. Two immediate counterexamples, verified:
+
+- pairing `(1,2)(3,4)` requires `A[1,3] = A[3,1] = 0`; measured **1.0** and **-1.5**;
+- pairing `(1,3)(2,4)` requires `a11 = a22` inside the block; measured **0.0** against
+  **-c**.
+
+**Quantified**, the same way 23.7 quantified `delta(c)`: the minimal Frobenius distance from
+`A` to the set of block-diagonal rotation-scaling generators, minimised over the three
+pairings AND over each block's `(alpha_i, omega_i)`. For a pairing, the best block for
+`[[a, b], [c, d]]` is `alpha = (a+d)/2`, `omega = (c-b)/2`, residual
+`((a-d)^2 + (b+c)^2)/2`; off-block entries must vanish and contribute in full.
+
+| `c` | `delta(c)` (spectral, 23.7) | distance in the IDENTITY basis | `‖A‖_F` | relative |
+|---|---|---|---|---|
+| **0.10** | **0.000** | **1.0654** | 2.9614 | **36 %** |
+| 2.30 | 0.363 | 2.5328 | 4.3966 | 58 % |
+| 2.60 | 0.706 | 2.8080 | 4.7191 | 60 % |
+| 3.00 | 1.029 | 2.9580 | 5.1720 | 57 % |
+
+**And in the best basis it is exactly zero.** At `c = 0.10` the four eigenvalues are two
+conjugate pairs, so the real Jordan form IS block-diagonal rotation-scaling: measured
+distance **1.97e-15**, with blocks `(-0.05, +-1.5187)` and `(-0.05, +-1.0902)`.
+
+So at the configuration where campaign B's declared axis reads `delta = 0.000` -- "the prior
+is exact" -- the prior is exact **in a basis**, and that basis is not the identity. `nolift`
+is forced into the identity basis and therefore faces a misspecification of **1.0654**,
+where `on-stable` faces **0**.
+
+**The bounded conclusion.** `psi` and `pi` are not an overhead on top of the structured
+transition: they ARE THE CHANGE OF BASIS the structure requires. `_private/PLAN_REFOCUS.md`
+section 7 already declared that exact representability assumes `A` diagonalisable -- i.e.
+that a basis EXISTS. This section measures that the basis is not the identity, and how far
+from it. **25.3's branch 1 is refuted for a structural reason, not an empirical one**: it
+could not have held.
+
+**What this suggests about campaign A, written as the most explanatory CANDIDATE and not as
+established**: the penalty is neither `psi`/`pi` alone nor the transition alone, but their
+COUPLING -- the structure demands a basis, the basis has to be learned jointly with the
+operator, and 20.1 already measured that the joint problem is not reached by gradient
+descent even where ordinary least squares recovers the operator to 2.11e-08. **No experiment
+is declared to test this**, and 25.5's ceiling is why.
+
+### 26.1 Campaign B: the ratio confirmed the predicted sign, and hid the mechanism
+
+23.5's estimand for campaign B is the SIGN of the slope of the structure gain against
+`delta(c)`, and the measured slope confirms the prediction: the cost ratio rises **+9.61**
+(`on-free`) and **+10.52** (`on-stable`) per unit of `delta`. **That reading stands.** What
+follows does not overturn it; it names what the ratio was made of.
+
+**The absolutes, which the ratio does not show:**
+
+| `delta` | `off` | `on-free` | `on-stable` | persistence `e_25` | linear `e_25` |
+|---|---|---|---|---|---|
+| 0.000 | **0.2624** | 1.0790 | 0.9029 | 1.3925 | 1.5323 |
+| 0.363 | 0.0891 | 1.1690 | 1.0294 | 2.1225 | 2.4175 |
+| 0.706 | 0.0845 | 0.9716 | 1.1200 | 2.1489 | 3.0029 |
+| 1.029 | **0.0715** | 1.1122 | 1.0572 | 2.1867 | 4.0641 |
+
+- `on-stable` spans **x1.24** across the whole axis, `on-free` **x1.20** -- **flat**. Both
+  sit PINNED at `m_low ~ 1`, i.e. they beat the two trivial baselines by very nearly exactly
+  the factor `gamma = 5` the gate demands, and by no more, at every level of misspecification
+  including `delta = 0`.
+- `off` spans **x3.67**, and in the direction that matters: it IMPROVES as `c` grows.
+
+**So the growth of the ratio is a DENOMINATOR effect.** The structured arms do not degrade
+with misspecification; the unstructured arm improves. The pre-registered sign is confirmed
+and **its mechanism is not the one the prediction supposed** -- the prediction assumed a
+structure whose advantage erodes as the prior degrades, and what is measured is a structure
+whose absolute performance is insensitive to the prior at all.
+
+The baselines belong to this reading because `m_low = e_25 * gamma / min(persistence, linear)`
+and they move with the damping: persistence `e_25` goes 1.39 -> 2.19, linear 1.53 -> 4.06.
+`m_low` is therefore a ratio of ratios, and both terms move.
+
+23.5's "step, not ramp" observation stands and is reinforced: the ratio jumps between
+`delta = 0` and `delta = 0.363` and is flat after, which is what a denominator effect looks
+like when the denominator makes its move early.
+
+### 26.2 Honesty declaration
+
+- **Neither precision runs anything.** 26.0 is closed-form arithmetic on a frozen system;
+  26.1 re-reads published numbers. 25.5's ceiling holds.
+- **26.0's conclusion is bounded and 26.1's is a correction of mechanism, not of sign.** The
+  candidate explanation for campaign A is labelled a candidate.
+- **A metric caveat, stated rather than smoothed**: `delta(c)` is a SPECTRAL distance and
+  26.0's is a FROBENIUS distance on the generator. They are not commensurable term by term;
+  the comparison that carries the argument is within ONE metric -- identity basis **1.0654**
+  against best basis **1.97e-15**, at the same `c`.
+- **Third time in this cycle that an aggregate hid a mechanism** (the two earlier ones are on
+  record in `_private/`). Disaggregation is not a reading precaution here; it is the
+  measurement.
+

@@ -1,0 +1,69 @@
+# CAMPAIGN C -- the ssm family's trainable-rate question, re-opened on a
+# physical argument. Declared in full by PROTOCOL.md section 23.6 BEFORE this
+# file's first run (R4).
+#
+# One factor, two levels: `delta_max`, the upper clamp on the selective gate's
+# latent step. 10.0 is the value under which section 18.0 declared the family
+# dead; it is 500x this dataset's physical dt. 0.20 = 4*dt is a physical bound,
+# fixed in 23.6 and not tuned.
+#
+# The diagonal recurrence is NOT the suspect: `a_cont = -exp(a_log)` already
+# puts every entry of A_bar in (0, 1). The suspect is the gate, where
+# `B_bar_t = delta_t * b_t` with b_t unconstrained and the context fed by the
+# model's own prediction under a closed rollout.
+#
+# Both outcomes are reportable and neither repairs the other (23.6).
+exp_name: ssm_delta
+
+datasets:
+  oscillator:
+    system:
+      name: CoupledOscillators
+      params: {}            # c = 0.1, underdamped, the prior-exact configuration
+    regime:
+      name: OURegime
+      params: {theta_ou: 1.0}
+    obs: null
+    n_episodes: 256         # 14.2
+    T: 120
+    dt: 0.05
+    seed: 0
+
+  # `delta` and `r` live in the STRUCTURED arms' overrides, never in `base`:
+  # trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families only,
+  # and a base-level key is merged into EVERY arm -- including the `off` arms,
+  # whose family (mlp / min_ssm) rejects them at construction. expand() cannot
+  # catch this: it validates `base` against the UNION of the grid's families.
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []        # REQUIRED in identity mode
+  target_params: 10000      # 14.2
+  epochs: 8000              # 16.1
+  h_fr: 25                  # 15.2
+  grad_clip: 100            # 17.1 -- proven a no-op on healthy arms (17.2)
+  step_subsample: 1.0
+  results_root: results_ssm_delta
+
+representation:
+  # identity, so e_recon = 2.60e-08 and the measurement scores the predictor
+  # rather than the shared readout (19.1)
+  kind: identity
+  d_z: 4
+
+arms:
+  - backbone: ssm
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.0003, delta_max: 10.0}
+  - backbone: ssm
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.0003, delta_max: 0.20}
+  - backbone: ssm
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.0003, delta: 0.05, radius: free, r: 2, delta_max: 10.0}
+  - backbone: ssm
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.0003, delta: 0.05, radius: free, r: 2, delta_max: 0.20}
+
+seeds: [0, 1, 2, 3, 4]

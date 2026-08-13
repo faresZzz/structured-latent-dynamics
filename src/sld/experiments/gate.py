@@ -516,6 +516,13 @@ def _read_run_digests(run_dir: Path) -> dict:
     }
 
 
+def gate_filename(split: str) -> str:
+    """The artifact filename for ``split``. The gate's own verdict keeps
+    ``gate.json``; a 16.4 selection reading on val lands in ``gate_val.json``
+    beside it, never over it."""
+    return "gate.json" if split == "test" else f"gate_{split}.json"
+
+
 def write_gate_artifact(
     run_dir: str | Path,
     result: FreeRolloutResult | RolloutDivergence,
@@ -609,7 +616,11 @@ def write_gate_artifact(
         "first_step": first_step,
     }
 
-    gate_path = run_dir / "gate.json"
+    # The FILENAME carries the split, so a selection reading can never be
+    # mistaken for a gate verdict: 15.5/16.4 put the gate on test and every
+    # SELECTION on val, and `sld.viz.ingest.load_gate` globs `gate.json`
+    # only. A val reading therefore lands beside the verdict, never over it.
+    gate_path = run_dir / gate_filename(split)
     tmp_path = gate_path.with_name(gate_path.name + ".tmp")
     tmp_path.write_text(json.dumps(payload))
     os.replace(tmp_path, gate_path)
@@ -621,6 +632,7 @@ def read_gate_artifact(
     *,
     expected_protocol: dict | None = None,
     expected_digests: dict | None = None,
+    split: str = "test",
 ) -> dict:
     """Load and VALIDATE ``run_dir/gate.json`` -- trusts nothing about the
     bytes on disk, same doctrine as ``factorial._validate_completion_sentinel``.
@@ -646,9 +658,9 @@ def read_gate_artifact(
             ``expected_digests`` entry.
     """
     run_dir = Path(run_dir)
-    path = run_dir / "gate.json"
+    path = run_dir / gate_filename(split)
     if not path.exists():
-        raise ValueError(f"no gate.json at {path}")
+        raise ValueError(f"no {path.name} at {path}")
     try:
         payload = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError, UnicodeError) as exc:
@@ -770,17 +782,17 @@ def read_gate_artifact(
 # ------------------------------------------------------------------------
 
 
-def _gate_cell_status(run_dir: Path) -> tuple[str, str, str]:
+def _gate_cell_status(run_dir: Path, split: str = "test") -> tuple[str, str, str]:
     """``(status, m_low, m_high)`` for one cell's ``run_dir``, read from
     ``gate.json`` alone -- mirrors ``factorial._cell_status``'s discipline:
     read from DISK, never from what this process happened to compute, so a
     shard that never touched this cell still reports another shard's
     already-written verdict correctly."""
-    gate_path = Path(run_dir) / "gate.json"
+    gate_path = Path(run_dir) / gate_filename(split)
     if not gate_path.exists():
         return "missing", "", ""
     try:
-        payload = read_gate_artifact(run_dir)
+        payload = read_gate_artifact(run_dir, split=split)
     except ValueError:
         # present but untrustworthy -- distinct from both a valid verdict
         # and a cell that was never gated at all (same M9 doctrine
@@ -793,7 +805,7 @@ def _gate_cell_status(run_dir: Path) -> tuple[str, str, str]:
     return status, str(measures["m_low"]), str(measures["m_high"])
 
 
-def _write_gate_index(results_root: Path, exp_name: str, cells: list[dict]) -> None:
+def _write_gate_index(results_root: Path, exp_name: str, cells: list[dict], split: str = "test") -> None:
     """Regenerate ``results_root/exp_name/gate_index.csv`` from the full,
     resolved cell list -- ``factorial._write_index``'s own contract, copied:
     ALWAYS the full expected grid (never just this shard's slice), atomic
@@ -803,14 +815,14 @@ def _write_gate_index(results_root: Path, exp_name: str, cells: list[dict]) -> N
     """
     index_dir = results_root / exp_name
     index_dir.mkdir(parents=True, exist_ok=True)
-    final_path = index_dir / "gate_index.csv"
+    final_path = index_dir / ("gate_index.csv" if split == "test" else f"gate_index_{split}.csv")
     tmp_path = final_path.with_name(final_path.name + ".tmp")
     with open(tmp_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["run_dir", "regime", "family", "structure", "seed", "status", "m_low", "m_high"])
         for cell in cells:
             run_dir = cell["run_dir"]
-            status, m_low, m_high = _gate_cell_status(run_dir)
+            status, m_low, m_high = _gate_cell_status(run_dir, split)
             writer.writerow(
                 [run_dir, cell["dataset"], cell["family"], cell["structure"], cell["seed"], status, m_low, m_high]
             )
@@ -823,12 +835,23 @@ def _evaluate_gate_cell(
     representations: dict[str, FrozenRepresentationArtifact],
     results_root: Path,
     n: int,
+    split: str = "test",
 ) -> dict:
     """Gate one cell: refuse loudly if its run is not complete, evaluate the
-    free rollout on the TEST split (PROTOCOL.md section 15.5/16.4: "the gate
-    scores on test; anything that *selects* reads val" -- this function
-    never touches ``val``), write ``gate.json``, and return a small summary
-    dict. NEVER raises for a merely-incomplete or diverged cell -- both are
+    free rollout on ``split``, write the matching artifact, and return a small
+    summary dict.
+
+    ``split`` defaults to ``"test"`` and every GATE reading keeps it there:
+    PROTOCOL.md 15.5/16.4 fix "the gate scores on test; anything that
+    *selects* reads val". 23.3's per-arm rate selection is such a selection,
+    so it asks for ``"val"`` explicitly and the SAME
+    ``evaluate_run_free_rollout`` call is made with the split swapped -- 16.4
+    already declared that change mechanical ("no new measurement is
+    defined"), and it is the identical criterion ``probe.py::_val_reading``
+    computes for round 3. The artifact lands in ``gate_val.json``, never in
+    ``gate.json``, so no val reading can ever be read back as a verdict.
+
+    NEVER raises for a merely-incomplete or diverged cell -- both are
     reported, by name, and the campaign loop continues (``factorial.main``'s
     own F17d discipline: one bad cell must not silently drop every other
     cell's already-computed verdict from the index).
@@ -844,7 +867,7 @@ def _evaluate_gate_cell(
         return {"index": cell["index"], "run_dir": str(run_dir), "status": "missing"}
 
     representation = representations[cell["dataset"]]
-    eval_split = datasets[cell["dataset"]]["test"]
+    eval_split = datasets[cell["dataset"]][split]
     e_1_pers = representation.manifest["e_1_pers"]
     e_recon = representation.e_recon
     tau_1_value = protocol_mod.tau_1(e_1_pers)
@@ -886,11 +909,11 @@ def _evaluate_gate_cell(
             tau_1=tau_1_value,
         )
     except RolloutDivergence as exc:
-        write_gate_artifact(run_dir, exc, identity=identity, protocol=protocol, split="test")
+        write_gate_artifact(run_dir, exc, identity=identity, protocol=protocol, split=split)
         print(f"{label} -> {run_dir} (DIVERGENCE at free-running step {exc.first_step})")
         return {"index": cell["index"], "run_dir": str(run_dir), "status": "divergence"}
 
-    gate_path = write_gate_artifact(run_dir, result, identity=identity, protocol=protocol, split="test")
+    gate_path = write_gate_artifact(run_dir, result, identity=identity, protocol=protocol, split=split)
     print(f"{label} -> {run_dir} (OK, verdict={result.positive_control.verdict})")
     return {
         "index": cell["index"],
@@ -900,7 +923,9 @@ def _evaluate_gate_cell(
     }
 
 
-def evaluate_gate_campaign(config_path: str | Path, *, shard: tuple[int, int] | None = None) -> list[dict]:
+def evaluate_gate_campaign(
+    config_path: str | Path, *, shard: tuple[int, int] | None = None, split: str = "test"
+) -> list[dict]:
     """Score every cell of ``config_path``'s grid against its already-trained
     run, writing one ``gate.json`` per cell plus one campaign-wide
     ``gate_index.csv``.
@@ -964,9 +989,12 @@ def evaluate_gate_campaign(config_path: str | Path, *, shard: tuple[int, int] | 
 
     run_cells = _shard_cells(cells, shard)
     n = len(cells)
-    results = [_evaluate_gate_cell(cell, datasets, representations, results_root, n) for cell in run_cells]
+    results = [
+        _evaluate_gate_cell(cell, datasets, representations, results_root, n, split)
+        for cell in run_cells
+    ]
 
-    _write_gate_index(results_root, exp_name, cells)
+    _write_gate_index(results_root, exp_name, cells, split)
     return results
 
 
@@ -984,8 +1012,18 @@ def main(argv: list[str] | None = None) -> int:
             "(PROTOCOL.md section 14.7)."
         ),
     )
+    parser.add_argument(
+        "--split",
+        choices=("test", "val"),
+        default="test",
+        help=(
+            "which split to score. test (default) is the GATE reading; val is a "
+            "SELECTION reading (PROTOCOL.md 15.5/16.4, 23.3's per-arm rate argmin) "
+            "and writes gate_val.json, never gate.json."
+        ),
+    )
     args = parser.parse_args(argv)
-    results = evaluate_gate_campaign(args.config, shard=args.shard)
+    results = evaluate_gate_campaign(args.config, shard=args.shard, split=args.split)
     any_failed = any(r["status"] in ("missing", "divergence") for r in results)
     return 1 if any_failed else 0
 

@@ -1,0 +1,58 @@
+# THE RATE SWEEP of PROTOCOL.md section 23.3, run BEFORE campaigns A and B.
+#
+# 16.2's procedure, unchanged, applied to EACH ARM ON ITS OWN -- which is the
+# repair 21.2 prescribes for the asymmetry it named. Selected on ONE stratum
+# (c = 0.10, n = 32) and applied across the strata of both campaigns, exactly
+# as 16.2 selected on the D regime and applied across its two strata.
+#
+# 3 arms x 3 rates x 1 seed = 9 runs, 4000 updates each.
+# Criterion: per arm, the listed rate minimising THAT ARM's own e_25 on the
+# VAL split (16.4's reading rules; never test). A run that fails to train or to
+# evaluate finitely is excluded from the argmin; a diverged run cannot win.
+# If no listed rate trains for an arm, that arm has no trainable rate at this
+# regime and the fact is published -- no off-list rate is tried (16.2(4)).
+exp_name: sweep_osc_lr
+
+datasets:
+  c010_n32:
+    system: {name: CoupledOscillators, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+
+  # `delta` and `r` live in the STRUCTURED arms' overrides, never in `base`:
+  # trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families only,
+  # and a base-level key is merged into EVERY arm -- including the `off` arms,
+  # whose family (mlp / min_ssm) rejects them at construction. expand() cannot
+  # catch this: it validates `base` against the UNION of the grid's families.
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []
+  target_params: 10000
+  epochs: 4000
+  h_fr: 25
+  grad_clip: 100
+  step_subsample: 1.0
+  results_root: results_sweep_osc
+
+representation:
+  kind: identity
+  d_z: 4
+
+arms:
+  - {backbone: mlp, structure: 'off', overrides: {mu_j: 0.0, lr: 0.0001}}
+  - {backbone: mlp, structure: 'off', overrides: {mu_j: 0.0, lr: 0.0003}}
+  - {backbone: mlp, structure: 'off', overrides: {mu_j: 0.0, lr: 0.001}}
+  - {backbone: mlp, structure: 'on',  overrides: {mu_j: 0.0, lr: 0.0001, delta: 0.05, radius: free, r: 2}}
+  - {backbone: mlp, structure: 'on',  overrides: {mu_j: 0.0, lr: 0.0003, delta: 0.05, radius: free, r: 2}}
+  - {backbone: mlp, structure: 'on',  overrides: {mu_j: 0.0, lr: 0.001,  delta: 0.05, radius: free, r: 2}}
+  - {backbone: mlp, structure: 'on',  overrides: {mu_j: 0.0, lr: 0.0001, delta: 0.05, radius: bounded, r: 2}}
+  - {backbone: mlp, structure: 'on',  overrides: {mu_j: 0.0, lr: 0.0003, delta: 0.05, radius: bounded, r: 2}}
+  - {backbone: mlp, structure: 'on',  overrides: {mu_j: 0.0, lr: 0.001,  delta: 0.05, radius: bounded, r: 2}}
+
+seeds: [0]

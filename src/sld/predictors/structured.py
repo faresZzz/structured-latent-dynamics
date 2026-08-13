@@ -25,10 +25,36 @@ not by convention:
   context state. The invariant is structural, not a discipline a test has to
   police. It is what keeps the cell linear in the action, hence what makes
   "identical treatment, three backbones" a true sentence.
-- ``alpha`` is FREE — no ``-exp(nu)``, no ``-softplus``. The structured axis
-  must not smuggle a contraction treatment in with it (PROTOCOL section 13.2);
-  stable AND unstable modes stay representable and stability is measured, not
-  imposed.
+- ``alpha`` is FREE by default — no ``-exp(nu)``, no ``-softplus``. The
+  structured axis must not smuggle a contraction treatment in with it
+  (PROTOCOL section 13.2); stable AND unstable modes stay representable and
+  stability is measured, not imposed. That is ``radius="free"``.
+- ``radius="bounded"`` is the THIRD LEVEL of the structure factor (PROTOCOL
+  section 23), not a repair of the second. It reparametrises the SAME cell so
+  that the discrete spectral radius is bounded by construction:
+
+      free     : alpha = theta                  -> r = exp(Delta*alpha), unbounded
+      bounded  : alpha = log(sigmoid(rho))/Delta -> r = exp(Delta*alpha) = sigmoid(rho) <= 1
+
+  The guarantee is ``r <= 1``, hence ``r**H`` bounded at every horizon -- and
+  it is exact: swept over 400 001 values of rho in [-50, 50] at float32 AND
+  float64, ZERO radii above 1. In exact arithmetic the radius is strictly
+  inside (0, 1); at the working precision ``sigmoid`` saturates to exactly 1.0
+  above rho ~ 17.33 (float32, what the Trainer runs) and ~ 37.43 (float64),
+  because ``1 - epsilon`` stops being representable near 1. That saturation is
+  benign -- r = 1 gives r**H = 1 -- and is the opposite of the divergence this
+  level exists to exclude (PROTOCOL section 23.1's dated precision,
+  2026-08-11; tests/test_structured_radius.py localises it and tests it).
+
+  Nothing else changes: omega, the exact ZOH input integral Phi, B_bar and
+  every contract test are untouched, and the head still emits TWO numbers per
+  block, so section 13.7's fairness argument holds without amendment. The
+  bounded level DOES impose stability rather than measure it -- which is why
+  it is a level to be compared against ``free``, never a substitute for it.
+  Its justification is the spiking-neuron literature (SE-adLIF, Nature
+  Communications 2025; BRF, ICML 2024; LinOSS, ICLR 2025), where an
+  unbounded-radius forward-Euler discretisation of the same 2x2 generator is
+  the documented cause of divergence under long closed rollouts.
 - The head is a single affine map ``theta_0 + W_theta c`` (one ``nn.Linear``,
   its bias IS ``theta_0``). No hidden second MLP — that would be a fourth
   backbone in disguise, and it would destroy the exact meaning of a neutral
@@ -59,6 +85,14 @@ from torch import Tensor, nn
 
 from sld.predictors.base import PredictorModule, PredictorState
 from sld.predictors.blocks2x2 import block_diagonal, rotation_scaling_zoh
+
+# the two levels of the lift parametrisation (PROTOCOL section 25.3). Kept
+# beside _VALID_RADIUS and validated the same way: a typo must be a refusal,
+# never a silent fallback to the default.
+_VALID_LIFT = ("mlp", "identity")
+
+# the two levels of the radius parametrisation (PROTOCOL section 23)
+_VALID_RADIUS: tuple[str, ...] = ("free", "bounded")
 from sld.predictors.koopman_ssm import _make_mlp
 from sld.predictors.min_ssm import SelectiveSSMContextBackbone
 from sld.predictors.mlp import MLPContextBackbone
@@ -107,6 +141,13 @@ class StructuredPredictor(PredictorModule):
         delta: the fixed ZOH step ``Delta``. Finite and strictly positive.
         psi_hidden: hidden widths of ``psi``; ``()`` makes it a single Linear.
         pi_hidden: hidden widths of ``pi``; ``()`` makes it a single Linear.
+        lift: ``"mlp"`` (default) builds ``psi``/``pi`` as MLPs; ``"identity"``
+            replaces BOTH with ``nn.Identity`` so the structured transition
+            acts directly on ``z``. Requires ``2r == d_z`` -- necessary and
+            sufficient, and refused loudly otherwise. PROTOCOL section 25.3's
+            ``on-stable-nolift`` level: it exists to attribute campaign A's
+            penalty to the transition or to the ``psi``/``pi`` pair, so it
+            must remove the pair entirely rather than shrink it.
         dtype: parameter dtype at construction.
     """
 
@@ -119,11 +160,23 @@ class StructuredPredictor(PredictorModule):
         delta: float,
         psi_hidden: tuple[int, ...] = (64,),
         pi_hidden: tuple[int, ...] = (64,),
+        radius: str = "free",
+        lift: str = "mlp",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
         if r < 1:
             raise ValueError(f"r must be >= 1, got {r}")
+        if radius not in _VALID_RADIUS:
+            raise ValueError(f"radius must be one of {_VALID_RADIUS}, got {radius!r}")
+        if lift not in _VALID_LIFT:
+            raise ValueError(f"lift must be one of {_VALID_LIFT}, got {lift!r}")
+        if lift == "identity" and 2 * r != d_z:
+            raise ValueError(
+                f"lift='identity' requires 2r == d_z, got 2*{r} != {d_z}. The identity "
+                "lift is not a projection: it can only be the identity when the lifted "
+                "state and the latent have the SAME dimension."
+            )
         delta_f = float(delta)
         # NaN fails every comparison, so `<= 0` alone would admit NaN and +inf
         if not math.isfinite(delta_f) or delta_f <= 0.0:
@@ -134,8 +187,17 @@ class StructuredPredictor(PredictorModule):
         self.d_u = d_u
         self.d_h = 2 * r
         self.delta = delta_f
-        self.psi = _make_mlp(d_z, self.d_h, psi_hidden, dtype)
-        self.pi = _make_mlp(self.d_h, d_z, pi_hidden, dtype)
+        self.radius = radius
+        self.lift_mode = lift
+        if lift == "identity":
+            # nn.Identity carries no parameters, so this arm's psi/pi
+            # contribute exactly zero to the budget -- see PROTOCOL 25.3's
+            # width note: match_budget will size the backbone against that.
+            self.psi = nn.Identity()
+            self.pi = nn.Identity()
+        else:
+            self.psi = _make_mlp(d_z, self.d_h, psi_hidden, dtype)
+            self.pi = _make_mlp(self.d_h, d_z, pi_hidden, dtype)
         # ONE affine head. bias IS theta_0; weight IS W_theta, so zeroing the
         # weight makes the context exactly neutral. Output layout, in order:
         #   [0 : r)                 alpha
@@ -155,7 +217,16 @@ class StructuredPredictor(PredictorModule):
         # contraction constraint returning under another name.
         with torch.no_grad():
             self.head.weight.zero_()
-            self.head.bias[: r].uniform_(-1.5, -0.5)  # alpha_0
+            if radius == "free":
+                self.head.bias[: r].uniform_(-1.5, -0.5)  # alpha_0
+            else:
+                # SAME initial spectral-radius distribution as the free arm, so
+                # the two levels differ by their parametrisation and by nothing
+                # else at step 0. alpha_0 in [-1.5, -0.5] at this Delta gives
+                # r = exp(Delta*alpha_0); rho_0 is its sigmoid pre-image.
+                lo = math.log(math.exp(delta_f * -0.5) / (1.0 - math.exp(delta_f * -0.5)))
+                hi = math.log(math.exp(delta_f * -1.5) / (1.0 - math.exp(delta_f * -1.5)))
+                self.head.bias[: r].uniform_(min(lo, hi), max(lo, hi))  # rho_0
             self.head.bias[r : 2 * r].uniform_(0.1, 2.0)  # omega_0
             self.head.bias[2 * r :].normal_(0.0, 0.01)  # vec B_0
 
@@ -175,6 +246,25 @@ class StructuredPredictor(PredictorModule):
 
     # -- the structured transition -------------------------------------------
 
+    def _alpha(self, head_slice: torch.Tensor) -> torch.Tensor:
+        """Map the head's first ``r`` outputs to the continuous real part.
+
+        ``free``: identity -- the head emits alpha directly, unbounded.
+        ``bounded``: ``alpha = log(sigmoid(rho)) / Delta``, so the discrete
+        radius ``exp(Delta*alpha)`` equals ``sigmoid(rho)`` and never exceeds
+        1 for any real ``rho``, with no side condition -- measured over
+        400 001 values at both precisions, zero above 1. Strictly inside
+        ``(0, 1)`` in exact arithmetic; at the working precision the value
+        saturates to exactly 1.0 above ``rho ~ 17.33`` (float32), which is
+        bounded and therefore benign (PROTOCOL section 23.1, dated precision
+        of 2026-08-11). The logarithm is taken through ``logsigmoid`` rather
+        than ``log(sigmoid(.))`` so the left tail does not underflow to -inf.
+        """
+        if self.radius == "free":
+            return head_slice
+        return torch.nn.functional.logsigmoid(head_slice) / self.delta
+
+
     def _operator_from_context(self, c: Tensor) -> tuple[Tensor, Tensor]:
         """``(A_bar, B_bar)`` from a context ``c``: ``(B, 2r, 2r)``, ``(B, 2r, d_u)``.
 
@@ -182,7 +272,7 @@ class StructuredPredictor(PredictorModule):
         ``local_operator`` cannot drift apart.
         """
         theta = self.head(c)
-        alpha = theta[..., : self.r]
+        alpha = self._alpha(theta[..., : self.r])
         omega = theta[..., self.r : 2 * self.r]
         B_cont = theta[..., 2 * self.r :].reshape(*theta.shape[:-1], self.d_h, self.d_u)
         A_bar_blocks, B_bar = rotation_scaling_zoh(alpha, omega, self.delta, B_cont)
@@ -248,11 +338,13 @@ class MLPKPredictor(StructuredPredictor):
         width: int = 64,
         psi_hidden: tuple[int, ...] = (64,),
         pi_hidden: tuple[int, ...] = (64,),
+        radius: str = "free",
+        lift: str = "mlp",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(
             MLPContextBackbone(2 * r, width, dtype=dtype),
-            d_z, r, d_u, delta, psi_hidden, pi_hidden, dtype,
+            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, dtype,
         )
 
 
@@ -272,6 +364,8 @@ class TransformerKPredictor(StructuredPredictor):
         width: int = 64,
         psi_hidden: tuple[int, ...] = (64,),
         pi_hidden: tuple[int, ...] = (64,),
+        radius: str = "free",
+        lift: str = "mlp",
         dtype: torch.dtype = torch.float32,
         *,
         n_heads: int = 2,
@@ -283,7 +377,7 @@ class TransformerKPredictor(StructuredPredictor):
                 2 * r, d_u, width,
                 n_heads=n_heads, n_layers=n_layers, max_len=max_len, dtype=dtype,
             ),
-            d_z, r, d_u, delta, psi_hidden, pi_hidden, dtype,
+            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, dtype,
         )
 
 
@@ -303,6 +397,8 @@ class SSMKPredictor(StructuredPredictor):
         width: int = 64,
         psi_hidden: tuple[int, ...] = (64,),
         pi_hidden: tuple[int, ...] = (64,),
+        radius: str = "free",
+        lift: str = "mlp",
         dtype: torch.dtype = torch.float32,
         *,
         delta_min: float = 1e-4,
@@ -312,5 +408,5 @@ class SSMKPredictor(StructuredPredictor):
             SelectiveSSMContextBackbone(
                 2 * r, d_u, width, delta_min=delta_min, delta_max=delta_max, dtype=dtype
             ),
-            d_z, r, d_u, delta, psi_hidden, pi_hidden, dtype,
+            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, dtype,
         )

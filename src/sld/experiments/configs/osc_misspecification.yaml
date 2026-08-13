@@ -1,0 +1,86 @@
+# CAMPAIGN B -- gain against PRIOR MISSPECIFICATION, with a closed-form axis.
+# Declared by PROTOCOL.md section 23.7 BEFORE this file's first run (R4).
+#
+# `delta(c)` is COMPUTED, not estimated: a rotation-scaling block imposes
+# lambda = alpha +- i*omega, so two DISTINCT real eigenvalues sit at spectral
+# distance exactly |lambda_a - lambda_b| / 2 from the nearest block. The four
+# values of c below give delta = 0.000 / 0.363 / 0.706 / 1.029, monotone.
+#
+# c NEVER exceeds 3.039: past it all four eigenvalues go real and delta comes
+# back DOWN (0.468 at 3.05, 0.188 at 4.0). The axis would stop being monotone.
+# These four values are the whole axis; no fifth is added after the numbers.
+#
+# n_episodes is fixed at 32 -- the intermediate regime of campaign A -- so this
+# root varies ONE thing.
+exp_name: osc_misspecification
+
+datasets:
+  c010:                      # delta = 0.000  -- two conjugate pairs, prior EXACT
+    system: {name: CoupledOscillators, params: {c: 0.10}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+  c230:                      # delta = 0.363  -- one pair + two reals
+    system: {name: CoupledOscillators, params: {c: 2.30}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+  c260:                      # delta = 0.706
+    system: {name: CoupledOscillators, params: {c: 2.60}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+  c300:                      # delta = 1.029  -- just below the 3.039 threshold
+    system: {name: CoupledOscillators, params: {c: 3.00}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+
+  # `delta` and `r` live in the STRUCTURED arms' overrides, never in `base`:
+  # trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families only,
+  # and a base-level key is merged into EVERY arm -- including the `off` arms,
+  # whose family (mlp / min_ssm) rejects them at construction. expand() cannot
+  # catch this: it validates `base` against the UNION of the grid's families.
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []
+  target_params: 10000
+  epochs: 8000
+  h_fr: 25
+  grad_clip: 100
+  step_subsample: 1.0
+  results_root: results_osc_delta
+
+representation:
+  kind: identity
+  d_z: 4
+
+arms:
+  # lr is a PLACEHOLDER until the 23.3 sweep has run. Do not execute this file
+  # before `make sweep-osc` has written its argmin per arm into the run log,
+  # and do not edit any other field when substituting them in.
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: free, r: 2}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2}
+
+seeds: [0, 1, 2, 3, 4]

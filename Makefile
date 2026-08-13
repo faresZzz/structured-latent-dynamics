@@ -1,7 +1,13 @@
-.PHONY: setup test smoke grid-core fig1 fig2 fig3 fig4 fig5 reproduce-all clean-nb
+.PHONY: setup test smoke grid-core figA figB figC figD figE figF figG figures reproduce-figures clean-nb
 
 CONFIGS := src/sld/experiments/configs
-CORE_CONFIGS := pendulum_core_partial oscillators lorenz cartpole encoder_axis koopman_ablations
+# Declared configs are written configs. `oscillators`, `lorenz`, `cartpole`,
+# `encoder_axis` and `koopman_ablations` were declared here and never written,
+# so `grid-core` could not run. Lorenz in particular is not wired: it is absent
+# from experiments.factorial._SYSTEMS and is autonomous (action_dim = 0), which
+# the action-conditioned stack does not carry. It is the declared NEXT system,
+# not a silently missing one.
+CORE_CONFIGS := pendulum_core_partial
 
 # --- Bootstrap ------------------------------------------------------------
 
@@ -41,29 +47,47 @@ grid-core:
 		uv run sld-factorial --config $(CONFIGS)/$$cfg.yaml || exit 1; \
 	done
 
-# --- Figures (each regenerates from results/, never retrains — REGLES §2) --
+# --- Figures (each regenerates from results*/, never retrains -- REGLES 2) ---
+#
+# DECLARED FIGURES ARE DELIVERED FIGURES. The previous block declared fig1..fig5
+# and a `reproduce-all` that depended on all five; none of the five modules
+# existed, so every one of those targets failed on `require_module` and the
+# publication gate could not be passed with a figure in the repo at all. That
+# was the repository's real lock -- not the runs. The list below grows as
+# figures ship, and never before.
+#
+# Each target reads verdict artifacts (gate.json / d3_gold.json) through
+# sld.viz.ingest, which imports no torch: a figure module that could import a
+# predictor could, one refactor later, retrain one.
 
-fig1:
-	$(call require_module,viz.fig1_rollout)
-	uv run python -m sld.viz.fig1_rollout
+FIGURES := figA figB figC figD figE figF figG
 
-fig2:
-	$(call require_module,viz.fig2_spectrum)
-	uv run python -m sld.viz.fig2_spectrum
+figA:                     ## D3 control: they learn, they do not identify
+	uv run python -m sld.viz.figA_d3_exactness
 
-fig3:
-	$(call require_module,viz.fig3_panel)
-	uv run python -m sld.viz.fig3_panel
+figC:                     ## campagnes A: structure contre taille d'echantillon, dispersion explicite
+	uv run python -m sld.viz.figC_sample_size --which C
 
-fig4:
-	$(call require_module,viz.fig4_bill)
-	uv run python -m sld.viz.fig4_bill
+figD:                     ## campagne B: absolus + baselines, puis le ratio
+	uv run python -m sld.viz.figD_misspecification
 
-fig5:
-	$(call require_module,viz.fig5_instrument)
-	uv run python -m sld.viz.fig5_instrument
+figF:                     ## conditionnement de la jacobienne d'action a H=25
+	uv run python -m sld.viz.figF_action_conditioning
 
-reproduce-all: grid-core fig1 fig2 fig3 fig4 fig5
+figG:                     ## decomposition: retirer psi/pi degrade, et pourquoi
+	uv run python -m sld.viz.figC_sample_size --which G
+
+figE:                     ## campagne C: la divergence ssm appartient a delta_max, pas a la famille
+	uv run python -m sld.viz.figE_ssm_delta
+
+figB:                     ## D4 horizon-resolved: where the structured arms pay and where they cost
+	uv run python -m sld.viz.figB_horizon
+
+figures: $(FIGURES)
+
+# Regenerate every shipped figure from the artifacts already on disk. This
+# target trains nothing, by construction.
+reproduce-figures: figures
 
 # --- Notebook hygiene (relies on nb-clean, already a dev dependency and   --
 # --- pre-commit hook — no bespoke check script, cf. _publication's own    --

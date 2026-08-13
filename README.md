@@ -4,6 +4,32 @@
 
 **Fig 1 is retired pending phase D.** `make fig1` (`sld.viz.fig1_rollout.make_fig1`) now raises `NotImplementedError` by design: the per-run OLS readout it used to fit is a free parameter *per arm*, so a rollout-drift comparison built on it is not an equal-footing comparison across the factorial. The replacement is a shared, frozen encoder/readout built once in phase D; no figure ships before that exists — a wrong figure is worse than no figure. No `assets/fig1_rollout.png` is committed.
 
+## Result of the oscillator cycle (2026-08-13)
+
+**Under the declared regime**, and stated with that scope because that is the scope of what
+was measured: on `CoupledOscillators` — the one system where the rotation-scaling prior is
+*exactly correct* — explicit structure in the latent predictor **does not improve** rollout
+stability. It costs, at every sample size (n = 8, 32, 256), at every level of prior
+misspecification (`delta` from 0.000 to 1.029), and at both training horizons measured
+(`h_fr` = 5 and 25). 164 cells across six self-sufficient roots; `PROTOCOL.md` sections 23
+to 26 carry the pre-registrations, the readings and every confound.
+
+What "under the declared regime" covers, and what it does not:
+
+- **Measured robust**: the sign of the effect is unchanged between `h_fr = 5` and `h_fr = 25`
+  (section 25.8), so it is not an artifact of the training horizon within that pair.
+- **Still conditional**: one system, one shared-representation choice (identity), one rate
+  list whose argmin sat at its edge, one optimizer. Every claim here inherits those.
+- **Not a claim about structured world models in general.** `PROTOCOL.md` 25.4 records a
+  published result using the *same* parametrisation and reporting a gain, under a jointly
+  learned representation. Section 26.0 measures the difference that most plausibly separates
+  the two settings and names it as a candidate, not as established.
+
+The negative results are published as measured, and two were corrected by their own figures
+after the fact rather than after the reading (sections 24 and 26.1) — the corrections are on
+the record beside the measurements.
+
+
 ## Motivation
 
 When does explicit dynamical structure in a JEPA world model's latent predictor improve rollout stability, state sufficiency, and planning — at equal compute cost? Generic predictors (MLP, causal transformer) can fit the one-step loss well and still drift catastrophically under free-running rollout; structured predictors (2×2 rotation-scaling blocks, selective SSM, Koopman-style lifting) impose an explicit transition law on the latent state, at the cost of expressivity. This repo runs that comparison as a controlled factorial rather than a leaderboard.

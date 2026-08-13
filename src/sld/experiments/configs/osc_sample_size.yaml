@@ -1,0 +1,76 @@
+# CAMPAIGN A -- gain against SAMPLE SIZE, on the system where the
+# rotation-scaling prior is exactly correct. Declared by PROTOCOL.md section 23
+# BEFORE this file's first run (R4).
+#
+# Why this axis. At n = 256 (24,480 transitions on a 4-state LTI) section 20.1
+# measures that ordinary least squares recovers the operator to 2.11e-08: the
+# problem is over-determined by three orders of magnitude and an inductive
+# prior has nothing left to buy. At n = 8 (~765 transitions) it has an a priori
+# reason to pay. The declared prediction is the SIGN of the interaction (23.5).
+#
+# Backbone FROZEN, budget NOT matched (23.2). `radius` does not change the
+# head's output size, so the three levels are parameter-identical.
+exp_name: osc_sample_size
+
+datasets:
+  n8:
+    system: {name: CoupledOscillators, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 8
+    T: 120
+    dt: 0.05
+    seed: 0
+  n32:
+    system: {name: CoupledOscillators, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+  n256:
+    system: {name: CoupledOscillators, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 256
+    T: 120
+    dt: 0.05
+    seed: 0
+
+  # `delta` and `r` live in the STRUCTURED arms' overrides, never in `base`:
+  # trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families only,
+  # and a base-level key is merged into EVERY arm -- including the `off` arms,
+  # whose family (mlp / min_ssm) rejects them at construction. expand() cannot
+  # catch this: it validates `base` against the UNION of the grid's families.
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []
+  target_params: 10000
+  epochs: 8000
+  h_fr: 25
+  grad_clip: 100
+  step_subsample: 1.0
+  results_root: results_osc_n
+
+representation:
+  kind: identity
+  d_z: 4
+
+arms:
+  # lr is a PLACEHOLDER until the 23.3 sweep has run. Do not execute this file
+  # before `make sweep-osc` has written its argmin per arm into the run log,
+  # and do not edit any other field when substituting them in.
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: free, r: 2}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2}
+
+seeds: [0, 1, 2, 3, 4]

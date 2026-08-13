@@ -18,6 +18,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from sld.data.generate import build_dataset
@@ -1578,6 +1579,180 @@ def test_resume_restores_python_random_state(tmp_path, monkeypatch):
 
     assert captured.get("state") is not None
     assert captured["state"] == saved_state
+
+
+def test_resume_with_intact_metrics_csv_still_resumes(tmp_path, monkeypatch):
+    # POSITIVE half of the metrics.csv resume guard (2026-08-11 incident,
+    # see the corruption test below): an INTACT metrics.csv must still take
+    # the resume path. The discriminating assertion is the "resuming from
+    # epoch" log line, not just the final row count -- a guard that wrongly
+    # restarts every run from scratch still produces a correct-looking final
+    # metrics.csv, so row count alone proves nothing.
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    n_epochs = 6
+    cfg = _mlp_config(tmp_path, exp_name="trainer_test_intact_metrics_resume", epochs=n_epochs)
+
+    orig_update = jepa_mod.EMATarget.update
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        hit["n"] += 1
+        if hit["n"] == 4:  # past >=1 checkpoint interval, before completion
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    result = Trainer(dict(cfg)).fit(data)  # metrics.csv untouched -- must resume
+
+    log_text = (trainer_1.run_dir / "train.log").read_text()
+    print(f"[resume, intact metrics.csv] train.log:\n{log_text}")
+    assert "resuming from epoch" in log_text
+    assert "restarting this run from epoch 0" not in log_text
+
+    with open(result["paths"]["metrics_csv"], newline="") as f:
+        rows = list(csv.reader(f))[1:]
+    assert len(rows) == n_epochs
+    assert [int(r[0]) for r in rows] == list(range(n_epochs))
+
+
+# Incident 2026-08-11: campaign A was killed after 5 runs left a metrics.csv
+# full of NUL bytes (filesystem blocks allocated, contents never flushed)
+# WHERE CLAIMED ROWS should have been. Resume's history rebuild died on a
+# bare ValueError from deep inside csv/int() parsing, killing a whole shard
+# instead of retraining the one cell -- every shape below must restart just
+# that cell instead of propagating it. Corruption strictly BEYOND what the
+# checkpoint claims is a DIFFERENT (benign) case, covered separately by
+# test_torn_tail_beyond_checkpoint_still_resumes below -- _truncate_metrics_csv
+# already discards that tail by design and must keep doing so.
+@pytest.mark.parametrize(
+    "corruption", ("nul_claimed_row", "torn_claimed_row", "no_header", "header_only")
+)
+def test_corrupt_metrics_csv_restarts_run_instead_of_raising(tmp_path, monkeypatch, corruption):
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    n_epochs = 6
+    cfg = _mlp_config(tmp_path, exp_name=f"trainer_test_corrupt_{corruption}", epochs=n_epochs)
+
+    orig_update = jepa_mod.EMATarget.update
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        hit["n"] += 1
+        if hit["n"] == 4:  # past >=1 checkpoint interval, before completion
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    run_dir = trainer_1.run_dir
+    metrics_path = run_dir / "metrics.csv"
+    resume_path = run_dir / trainer_mod.RESUME_CHECKPOINT_FILENAME
+    assert resume_path.exists()  # left VALID -- only metrics.csv is corrupted below
+
+    # n_rows is what the resume checkpoint CLAIMS, and therefore what
+    # _metrics_csv_defect value-checks (rows[:n_rows]) -- computed, not
+    # hardcoded, so this stays correct if the crash timing above ever moves.
+    n_rows = torch.load(resume_path, weights_only=False)["epoch"] + 1
+    assert n_rows >= 2, "test corrupts claimed row index 1 -- needs >=2 claimed rows"
+
+    lines = metrics_path.read_text().splitlines(keepends=True)
+    header, data_lines = lines[0], lines[1:]
+
+    if corruption == "nul_claimed_row":  # a CLAIMED row -- the incident's exact shape
+        data_lines[1] = "\x00" * 64 + "\n"
+        metrics_path.write_text(header + "".join(data_lines))
+    elif corruption == "torn_claimed_row":  # a CLAIMED row, fewer fields than the header
+        data_lines[1] = "1,0.5\n"
+        metrics_path.write_text(header + "".join(data_lines))
+    elif corruption == "no_header":
+        metrics_path.write_text("".join(data_lines))
+    elif corruption == "header_only":  # zero data rows, checkpoint claims completed epochs
+        metrics_path.write_text(header)
+
+    Trainer(dict(cfg)).fit(data)  # must NOT raise
+
+    with open(metrics_path, newline="") as f:
+        rows = list(csv.reader(f))[1:]
+    print(f"[corrupt metrics.csv={corruption}] final row count = {len(rows)} (expected {n_epochs})")
+    assert len(rows) == n_epochs
+    assert [int(r[0]) for r in rows] == list(range(n_epochs))
+
+    log_text = (run_dir / "train.log").read_text()
+    print(f"[corrupt metrics.csv={corruption}] train.log:\n{log_text}")
+    assert "restarting this run from epoch 0" in log_text
+    assert "resuming from epoch" not in log_text
+    assert not resume_path.exists()
+
+
+@pytest.mark.parametrize("tail", ("nul_line", "short_row"))
+def test_torn_tail_beyond_checkpoint_still_resumes(tmp_path, monkeypatch, tail):
+    # Non-regression pin for _metrics_csv_defect's rows[:n_rows] slice: a
+    # torn/garbage tail STRICTLY BEYOND what the checkpoint claims is the
+    # ORDINARY shape of a kill mid-write (_truncate_metrics_csv's own
+    # docstring, trainer.py:270-274 -- "possibly with a torn last row"), and
+    # _truncate_metrics_csv already discards it correctly on every resume.
+    # An over-broad guard that value-checks the WHOLE file (the regression
+    # this pins against) fails this test: it restarts from epoch 0 instead
+    # of resuming, silently discarding completed epochs the checkpoint
+    # already covers.
+    import sld.objectives.jepa as jepa_mod
+    import sld.training.trainer as trainer_mod
+
+    data = _small_dataset(n_episodes=6, T=10)
+    monkeypatch.setattr(trainer_mod, "RESUME_CHECKPOINT_INTERVAL", 2)
+    n_epochs = 6
+    cfg = _mlp_config(tmp_path, exp_name=f"trainer_test_torn_tail_{tail}", epochs=n_epochs)
+
+    orig_update = jepa_mod.EMATarget.update
+    hit = {"n": 0}
+
+    def _boom(self, encoder):
+        hit["n"] += 1
+        if hit["n"] == 4:  # past >=1 checkpoint interval, before completion
+            raise RuntimeError("simulated crash")
+        return orig_update(self, encoder)
+
+    trainer_1 = Trainer(dict(cfg))
+    with monkeypatch.context() as m:
+        m.setattr(jepa_mod.EMATarget, "update", _boom)
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            trainer_1.fit(data)
+
+    run_dir = trainer_1.run_dir
+    metrics_path = run_dir / "metrics.csv"
+
+    if tail == "nul_line":
+        metrics_path.write_text(metrics_path.read_text() + "\x00" * 64 + "\n")
+    elif tail == "short_row":
+        metrics_path.write_text(metrics_path.read_text() + "3,0.5\n")
+
+    Trainer(dict(cfg)).fit(data)  # must RESUME, not restart
+
+    log_text = (run_dir / "train.log").read_text()
+    print(f"[torn tail={tail}] train.log:\n{log_text}")
+    assert "resuming from epoch" in log_text
+    assert "restarting this run from epoch 0" not in log_text
+
+    with open(metrics_path, newline="") as f:
+        rows = list(csv.reader(f))[1:]
+    assert len(rows) == n_epochs
+    assert [int(r[0]) for r in rows] == list(range(n_epochs))
 
 
 def test_failure_json_survives_both_cleanup_paths(tmp_path, monkeypatch):

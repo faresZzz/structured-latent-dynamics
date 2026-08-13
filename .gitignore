@@ -97,6 +97,21 @@ GEMINI.md
 # sixth, separate root.
 /results_d3_oscillator/
 /results_d3_diagnostic/
+# PROTOCOL.md section 23's three NEW self-sufficient roots, plus the 23.3 rate
+# sweep that feeds them and the 21.3 re-run root -- 140 runs x one ckpt.pt.
+/results_sweep_osc/
+/results_ssm_delta/
+/results_osc_n/
+/results_osc_delta/
+/results_gate_d2/
+/results_osc_hfr/
+/results_osc_decomp/
+/results_smoke/
+# Comptabilite d'execution, pas des sources : marqueurs de reprise et journaux
+# de shards. Le contenu scientifique vit dans les racines results_* (ignorees)
+# et dans PROTOCOL.md / _private/AGENT_JOURNAL.md (versionne / prive).
+/.runstate/
+/logs/
 *.npz
 
 # --- Private planning / candidacy context (never publish) ---

@@ -1,0 +1,77 @@
+# ROOT 2 of PROTOCOL.md section 25 -- the DECOMPOSITION. Declared in full by
+# 25.3 BEFORE this file's first run (R4).
+#
+# The question: is campaign A's penalty attributable to the structured
+# TRANSITION, or to the lift/projection pair that accompanies it?
+#
+# `on-stable-nolift` is the same structured transition acting directly on z,
+# with psi = pi = identity (`lift: identity`, legal because 2r = d_z = 4).
+# Its backbone is IDENTICAL to `on-stable`'s -- match_budget sizes it as if
+# the lift were an MLP, so width and psi_hidden match exactly and the only
+# parameters it lacks are the pair itself (8423 against 9997, -15.7%). That
+# is 23.2's frozen backbone: letting the matcher spend those parameters on a
+# wider backbone would make this root measure width while calling it
+# structure, which is the mu_J fault 23.2 exists to refuse.
+#
+# h_fr = 25 because root 1 (results_osc_hfr/) preserved the sign of the
+# structure effect -- 25.3 fixed that mapping before root 1's numbers existed.
+#
+# THIS IS THE LAST ROOT OF THE CYCLE (25.5). No other is declared after it,
+# whatever it returns.
+exp_name: osc_decomp
+
+datasets:
+  n8:
+    system: {name: CoupledOscillators, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 8
+    T: 120
+    dt: 0.05
+    seed: 0
+  n256:
+    system: {name: CoupledOscillators, params: {}}
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 256
+    T: 120
+    dt: 0.05
+    seed: 0
+
+  # `delta` and `r` live in the STRUCTURED arms' overrides, never in `base`:
+  # trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families only,
+  # and a base-level key is merged into EVERY arm -- including the `off` arms,
+  # whose family (mlp) rejects them at construction. expand() cannot catch
+  # this: it validates `base` against the UNION of the grid's families.
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []
+  target_params: 10000
+  epochs: 8000
+  h_fr: 25                  # root 1 preserved the sign -> 25.3's reference regime
+  grad_clip: 100
+  step_subsample: 1.0
+  results_root: results_osc_decomp
+
+representation:
+  kind: identity
+  d_z: 4
+
+arms:
+  # lr = 1e-3 for all three: the 23.3 sweep's argmin, per arm, unchanged.
+  # 23.5(2) forbids a second sweep, so the nolift arm inherits `on-stable`'s
+  # rate rather than selecting its own -- stated because it is a real
+  # asymmetry, not because it is free of cost.
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2, lift: identity}
+
+seeds: [0, 1, 2, 3, 4]

@@ -311,6 +311,12 @@ def _kwargs_for(family: str, w: int, d_z: int, d_u: int, fixed: dict) -> dict:
             d_z=d_z,
             d_u=d_u,
             delta=fixed["delta"],
+            # "free" (alpha unbounded) or "bounded" (alpha = logsigmoid(rho)/Delta,
+            # so the discrete radius is sigmoid(rho) in (0,1)) -- PROTOCOL section 23
+            radius=fixed.get("radius", "free"),
+            # "mlp" (psi/pi are MLPs) or "identity" (both are nn.Identity, so
+            # the structured transition acts directly on z) -- PROTOCOL 25.3
+            lift=fixed.get("lift", "mlp"),
             # r defaults to d_z HERE, not to the r=2 default the three
             # constructors carry in structured.py -- deliberately: this is
             # the only path get_predictor uses, so every run sees r=d_z,
@@ -413,8 +419,30 @@ def match_budget(family: str, d_z: int, d_u: int, target_params: int = 10_000, *
 
     lo = step = fixed.get("n_heads", 2) if family in _HEAD_DIVISIBLE else 1
 
+    # PROTOCOL 25.3's `on-stable-nolift`: with `lift="identity"` psi and pi are
+    # nn.Identity, so BOTH knobs this function searches lose their effect --
+    # psi_hidden entirely (the fine stage below diverges and raises), and the
+    # width stage would have ~1574 free parameters to spend on the backbone.
+    #
+    # 23.2 already decided which of the three constraints gives. It freezes the
+    # backbone and SUSPENDS budget matching for these roots, publishing the
+    # realised parameter count per arm, precisely because letting the matcher
+    # widen a backbone would mean "measuring width while calling it structure --
+    # that is the mu_J fault, and it is the one this section must not
+    # reproduce". A nolift arm sized to the same 10 000 parameters would differ
+    # from `on-stable` in TWO ways and could attribute nothing.
+    #
+    # So the search runs as if the lift were an MLP, and the identity is
+    # substituted afterwards: the nolift arm inherits `on-stable`'s width and
+    # psi_hidden EXACTLY, its backbone and head are parameter-identical, and it
+    # comes out 15.7% smaller overall (8423 against 9997 at d_z=4, r=2,
+    # target 10 000). That difference IS the lift pair, which is the whole
+    # quantity this root exists to attribute.
+    identity_lift = fixed.get("lift") == "identity"
+    search_fixed = {**fixed, "lift": "mlp"} if identity_lift else fixed
+
     def build_at(w: int, extra: dict):
-        return _FAMILY_CONSTRUCTORS[family](**_kwargs_for(family, w, d_z, d_u, {**fixed, **extra}))
+        return _FAMILY_CONSTRUCTORS[family](**_kwargs_for(family, w, d_z, d_u, {**search_fixed, **extra}))
 
     # every construction below is throwaway (shape/param-count driven only);
     # fork the global RNG so the search leaves no trace on it -- the caller's
@@ -448,9 +476,14 @@ def match_budget(family: str, d_z: int, d_u: int, target_params: int = 10_000, *
             )
             trim = {"psi_hidden": (p,), "pi_hidden": (p,)}
         kwargs = _kwargs_for(family, w, d_z, d_u, {**fixed, **trim})
-        achieved = count_params(build_at(w, trim))
+        achieved = count_params(
+            _FAMILY_CONSTRUCTORS[family](**kwargs) if identity_lift else build_at(w, trim)
+        )
 
-    rel_err = abs(achieved - target_params) / target_params
+    # the +/-5% contract is a statement about a matched budget; the nolift arm
+    # is declared NOT matched (23.2), so it is exempt BY NAME rather than by a
+    # widened tolerance, and its realised count is returned for publication.
+    rel_err = 0.0 if identity_lift else abs(achieved - target_params) / target_params
     if rel_err > 0.05:
         raise ValueError(
             f"match_budget: could not hit target_params={target_params} for family={family!r} "
