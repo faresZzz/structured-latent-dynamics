@@ -3891,3 +3891,216 @@ like when the denominator makes its move early.
   record in `_private/`). Disaggregation is not a reading precaution here; it is the
   measurement.
 
+
+## 27. Amendment 17 — the ceiling of 25.5 is lifted for ONE root: the backbone axis, never measured (dated 2026-08-14)
+
+### 27.0 Scope, and the measurement gap that justifies lifting a binding clause
+
+25.5 declared two roots the last of that cycle. Both ran. This section lifts that ceiling
+for **exactly one further root** and for one reason, which is a gap and not a hope.
+
+**Every cell of the oscillator cycle ran with the `mlp` backbone.** Verified by scan over
+the six roots' own `config.yaml` files, by two independent methods that agree: the distinct
+values of `family` across `results_sweep_osc/`, `results_osc_n/`, `results_osc_delta/`,
+`results_osc_decomp/` and `results_osc_hfr/` are `mlp` and `mlp_k` and nothing else.
+`results_ssm_delta/` adds `min_ssm` and `ssm_k`, on its own one-factor question. The
+family `transformer` has **never** run on `CoupledOscillators` at all; `transformer_k` ran
+five cells there once, as amendment 10's D3 control, never as a comparison.
+
+So this repository's principal result — that explicit structure in the latent predictor
+does not pay on `CoupledOscillators` — is measured **on one backbone**. The design this
+project was built around is `3 backbones x 2 structures`. That factorial has never been
+run on the system where the arms demonstrably learn. It is the one measurement whose
+absence the six roots cannot repair by any re-reading, and no amount of further analysis
+of the existing 164 cells produces it.
+
+**This is a lift, not a repeal.** 25.5's ceiling is replaced by this section's ceiling:
+one root, declared in full below, and no other. Campaign B's status under 25.5 is
+untouched.
+
+**The author's decision, dated 2026-08-14**, taken with the six roots' results in hand.
+Decided, not derived.
+
+### 27.1 The root — `results_primary_factorial/`, 30 cells
+
+A **separate results root**, named so that no cell of it can ever be confused with, or
+merged into, a cell of the six roots that precede it. 14.6's self-sufficiency applies in
+full: this root re-runs its own reference cells and reads nothing out of
+`results_osc_hfr/` or any other root, even where a cell would be nominally identical.
+
+One stratum, six arms, five seeds:
+
+| axis | levels | count |
+|---|---|---|
+| stratum | `CoupledOscillators`, `OURegime(theta_ou = 1.0)`, `n = 32`, `T = 120`, `dt = 0.05` | 1 |
+| backbone | `mlp`, `transformer`, `ssm` | 3 |
+| structure | `off`, `on` | 2 |
+| seed | 0, 1, 2, 3, 4 | 5 |
+
+`N_expected = 1 x 3 x 2 x 5 = 30`. The six arms resolve to exactly
+`{mlp, mlp_k, transformer, transformer_k, min_ssm, ssm_k}`. `koopman_ssm` is not a cell
+of this grid, as 13.x already fixed.
+
+Held fixed, all inherited and none tuned here: `d_x = d_z = 4`, `d_u = 1`,
+`target_params = 10000` (14.2), `epochs = 8000` (16.1), `h_fr = 25` (15.2),
+`grad_clip = 100` (17.1), `step_subsample = 1.0`, `representation.kind = identity`
+(so `e_recon = 2.60e-08` and the measurement scores the predictor, 19.1), `mu_j = 0.0`.
+
+The `on` treatment is **one wrapper, identical across the three backbones**:
+`delta = 0.05`, `radius = bounded`, `r = 2`. `bounded` is the level under which 25.8's
+principal result was measured (`on-stable`), and it is carried unchanged rather than
+re-chosen.
+
+The `ssm` arms additionally carry `delta_max = 0.20`. This is not a tuning choice: 24.0
+measured **0/10 cells complete at `delta_max = 10.0` and 10/10 at `4*dt = 0.20`**, and
+23.6 fixed `4*dt` as a physical bound before that measurement. Running the ssm arms at
+the value under which 18.0 declared the family dead would measure the clamp, not the
+backbone.
+
+**Budget parity, verified before this section was committed**, by an independent parameter
+count against `sum(p.numel())` at `d_z = 4`, `d_u = 1`, `target_params = 10000`:
+`mlp` 10074 (+0.74 %), `mlp_k` 9997 (-0.03 %), `transformer` 10324 (+3.24 %),
+`transformer_k` 10006 (+0.06 %), `min_ssm` 10069 (+0.69 %), `ssm_k` 10003 (+0.03 %).
+**6/6 within the +-5 % of 13.7**, which that section recorded as the fragile condition.
+
+### 27.2 The rates, and the confound they carry — named, not removed
+
+23.3 selected `lr` **per arm, for itself**, by an argmin of that arm's own `e_25` on the
+val split. That sweep covered the `mlp` arms only. This root does **not** re-run it and
+does not extend it. Each family enters at the rate under which it is already known to
+train on this system, and nowhere else does a rate come from:
+
+| arms | `lr` | provenance |
+|---|---|---|
+| `mlp`, `mlp_k` | `1e-3` | 23.3's argmin, applied unchanged (23.5(2) forbids re-selection) |
+| `transformer`, `transformer_k` | `1e-3` | the rate under which `transformer_k` completed 5/5 on this system as amendment 10's D3 control |
+| `min_ssm`, `ssm_k` | `3e-4` | 24.0's rate, inherited from 16.2/17.1, under which the family completed 10/10 at `delta_max = 4*dt` |
+
+**The confound this creates, stated in full.** The three backbones do not share a rate,
+and no rate on this grid was selected by a sweep run on this grid. Two consequences,
+which point in opposite directions and are both real:
+
+1. **Within a backbone, the structure contrast is clean.** `off` and `on` of the same
+   backbone share their rate, their dataset, their seed and their budget. The ON-OFF
+   contrast is therefore fair for each backbone taken alone, and that is the contrast
+   prediction 3 of 27.3 is about.
+2. **Across backbones, the comparison is confounded with rate suitability.** A backbone
+   ordering read off this root cannot separate "this backbone is better here" from "this
+   backbone's inherited rate happens to suit this stratum better". Predictions 1 and 2 of
+   27.3 are exposed to this and their verdicts carry it in every statement.
+
+The alternative — a per-arm sweep on this grid — was considered and refused: it triples
+the root's cost, and 23.3's own rule already returned its argmin **at the edge** of the
+declared list `{1e-4, 3e-4, 1e-3}` with the criterion still decreasing, so a sweep over
+the same list would inherit that defect rather than fix it. **Naming the confound is
+cheaper and more honest than a sweep that would not resolve it.** No off-list rate is
+tried, here as in 23.3.
+
+### 27.3 The reading rule, written before the numbers
+
+**The primary statistic is `VPT` at `tau = 0.5`**, as 12.x pre-registered it from Vlachas
+et al. 2020 (arXiv:1910.05266): the first horizon at which the normalized state error
+crosses `tau`, on the free rollout in true-state coordinates, higher is better. The
+per-run value is the **median over the run's evaluation episodes**, which is what
+`gate.json` already writes as `vpt_median`. The per-cell value is the mean over the five
+seeds, with `SE = std(ddof = 1) / sqrt(5)`.
+
+**One endpoint, one set of bytes.** The `e_h` curve of the figures, the VPT of the
+ordering, and `m_low` are all read out of the same `gate.json` produced by one free
+rollout per run. No second rollout, no per-run OLS readout, no auto-decoded
+reconstruction. `m_low` is reported alongside for continuity with the six roots but is
+**not** the ordering statistic here.
+
+**Censoring is conservative.** A run whose error never crosses `tau` within the scored
+horizon has `vpt_status = "censored"`. Censored values are published, counted, and shown
+in the figure. **Any order comparison whose outcome depends on a censored value is
+recorded `indeterminate`** — never resolved in either direction, never replaced by
+`Hmax + 1`, never dropped. Same for an exact tie.
+
+**The verdict is descriptive and pre-registered, not confirmatory.** With `n = 5` this
+section declares no test, no alpha and no multiplicity correction, and **no `p`-value will
+be computed or reported for these orders**. A relation is `supported` when the paired
+contrast has the predicted strict sign and its `+-1 SE` interval excludes zero;
+`contradicted` when it has the opposite strict sign under the same condition;
+`indeterminate` otherwise, including every censored or tied case.
+
+**Eligibility.** A cell is eligible only with **5/5 seeds terminal and `ok`**. If any of
+the five is `does_not_learn`, `divergence` or `missing`, the cell is named in the table
+and the figure with its five statuses and **no mean, SE or aggregated VPT is computed for
+it**. It is never silently excluded and never averaged over the survivors. A divergence
+is a result (15.3), not a gap.
+
+**Pairing.** An ON-OFF contrast uses the same seed, the same stratum, the same dataset
+hash and the same representation. Pairing by file order or by group mean is forbidden.
+
+**The nine predicted relations**, taken unchanged from `_private/PLAN_REFOCUS.md` and not
+modified here, read in the stratum:
+
+1. structured: `ssm_k > transformer_k > mlp_k`;
+2. unstructured: `min_ssm > transformer > mlp`;
+3. structure effect: `mlp_k > mlp`, `transformer_k > transformer`, `ssm_k > min_ssm`;
+4. **no order is predicted** between `min_ssm` and `mlp_k`, and none will be reported.
+
+Nine relations, three within each of the first three groups. The pair in 4 is recorded
+`not_tested` and no verdict is written for it.
+
+**One leg of prediction 3 is already known to fail on this system, and it is left
+standing.** 25.8 measured `on-stable` worse than `off` on `mlp` at both training
+horizons, and 23.5 measured it worse at every sample size and every misspecification
+level. `mlp_k > mlp` is therefore expected to be `contradicted` here. It is **not**
+withdrawn, softened or rewritten: a prediction that has lost once is worth more standing
+than quietly replaced, and the question this root actually asks is whether the negative
+**generalizes across backbones** or is a property of the `mlp` dorsal alone. Both answers
+are publishable and neither repairs the other.
+
+### 27.4 The figures, engaged before the data
+
+Three figures, fixed now, with no panel to be added or removed after the numbers exist:
+
+- **Fig. 1** — `e_h` curves in true-state coordinates, mean `+-1 SE` over five seeds, six
+  cells, non-eligible cells named rather than drawn as a curve;
+- **Fig. 2** — VPT, the **five raw per-seed values** per cell with their statuses, censored
+  values visibly marked;
+- **Fig. 3** — the three paired ON-OFF contrasts, five seeds each.
+
+Each figure writes a sidecar CSV and a hash, and each caption names system, regime, `H`,
+`sigma_train`, `tau`, the censoring convention, `n = 5`, and every non-eligible cell.
+A figure that does not reproduce the table it cites does not ship, and the gap is the
+result (23.5(3)).
+
+### 27.5 What this root does NOT do, and the ceiling it leaves behind
+
+It does not measure the pendulum. 21.4 stands unmodified: **M4 is not crossed**, seven of
+eight positive-control cells on `DampedPendulum` do not pass, and **no claim of this root
+extends to that system**. Every statement produced here carries "on `CoupledOscillators`,
+`OURegime`, `n = 32`, `h_fr = 25`", exactly as 25.6 requires.
+
+It does not test 26.0's coupling candidate, and it does not touch
+`representation.kind`. 20.4's measurement — that the pre-trained representation's
+`e_recon` floor is 28.8x above the `1e-3` bound on this system — is why the second is not
+attempted incidentally.
+
+No threshold moves. `gamma = 5`, `gamma_1 = 2`, `tau_1`, the `1e-3` bound, the 8000-update
+budget and the loss are untouched.
+
+**This is the LAST root declared. No further root follows it, whatever it returns.** The
+ceiling of 25.5 is restored by this sentence, over this section.
+
+### 27.6 Honesty declaration
+
+- **Decided, not derived**: that the ceiling is lifted at all; that it is lifted for one
+  root and not a programme; the single stratum and its `n = 32`; the inherited per-family
+  rates; `radius = bounded` as the common treatment. Each has an argument above; none is a
+  measurement.
+- **The confound that cannot be removed is named twice** (27.2), once for what it spares
+  and once for what it costs, and the rejected alternative is stated with its reason.
+- **A prediction expected to fail is published unmodified** (27.3), because the value of
+  this root is the same whichever way it goes.
+- **A risk is declared rather than hedged**: the ssm family's 10/10 completion was measured
+  at `n = 256` (24.0) and this root runs at `n = 32`. 24.0 attributes the flip to
+  `delta_max` and records that nothing else moved, but `n` was not itself varied there. If
+  the ssm arms diverge at `n = 32` **that is published as measured** and no rate, clamp or
+  sample size is changed to rescue them.
+- **Budget parity was verified before this section was written**, not after, and the six
+  numbers are in 27.1.
+- **R4**: this section precedes every run it authorizes, including this root's first cell.

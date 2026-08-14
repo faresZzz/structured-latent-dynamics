@@ -1,0 +1,93 @@
+# THE PRIMARY FACTORIAL -- the backbone axis, declared in full by PROTOCOL.md
+# section 27 (Amendment 17) BEFORE this file's first run (R4).
+#
+# Why this root exists. Every cell of the oscillator cycle ran with the `mlp`
+# backbone; `transformer` has never run on CoupledOscillators at all. The
+# repository's principal result -- explicit structure does not pay on this
+# system -- is therefore measured on ONE backbone, and the 3x2 design the
+# project was built around has never been run where the arms demonstrably
+# learn. 27.0 lifts 25.5's ceiling for this root and restores it after.
+#
+# SEPARATE ROOT, deliberately. `results_primary_factorial/` shares no directory
+# with the six roots that precede it, so no cell of this grid can be merged
+# into, or confused with, a cell measured under a different declaration. 14.6's
+# self-sufficiency applies in full: the reference cells are re-run here, never
+# read out of `results_osc_hfr/`.
+#
+# N_expected = 1 stratum x 3 backbones x 2 structures x 5 seeds = 30.
+#
+# `delta`, `radius` and `r` live in the STRUCTURED arms' overrides, never in
+# `base`: trainer._FAMILY_CONFIG_KEYS makes them applicable to the *_k families
+# only, and a base-level key is merged into EVERY arm -- including the `off`
+# arms, whose family (mlp / transformer / min_ssm) rejects them at
+# construction. expand() cannot catch this: it validates `base` against the
+# UNION of the grid's families, so the failure surfaces at the Trainer, after
+# --dry-run has already passed.
+exp_name: primary_factorial
+
+datasets:
+  c010_n32:
+    system: {name: CoupledOscillators, params: {}}   # c = 0.1, prior EXACT
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []        # REQUIRED in identity mode
+  target_params: 10000      # 14.2 -- budget parity verified 6/6 within +-5 % (27.1)
+  epochs: 8000              # 16.1
+  h_fr: 25                  # 15.2 -- fixed here, NOT an axis of this root
+  grad_clip: 100            # 17.1 -- proven a no-op on healthy arms (17.2)
+  step_subsample: 1.0
+  results_root: results_primary_factorial
+
+representation:
+  # identity, so e_recon = 2.60e-08 and the measurement scores the predictor
+  # rather than the shared readout (19.1). 20.4 is why a learned representation
+  # is NOT attempted incidentally here.
+  kind: identity
+  d_z: 4
+
+arms:
+  # RATES. No sweep is run on this grid (27.2). Each family enters at the rate
+  # under which it is already known to train on this system:
+  #   mlp / mlp_k                 1e-3   23.3's argmin, unchanged (23.5(2))
+  #   transformer / transformer_k 1e-3   amendment 10's D3 control, 5/5 complete
+  #   min_ssm / ssm_k             3e-4   24.0's rate, 10/10 at delta_max = 4*dt
+  # The confound this creates is named in full in 27.2: WITHIN a backbone the
+  # structure contrast is clean (shared rate, seed, dataset, budget); ACROSS
+  # backbones the ordering is confounded with rate suitability, and predictions
+  # 1 and 2 carry that in every verdict.
+
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001}
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2}
+
+  - backbone: transformer
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001}
+  - backbone: transformer
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2}
+
+  # delta_max = 0.20 = 4*dt is a PHYSICAL bound fixed by 23.6 before it was
+  # measured, not a tuning choice: 24.0 measured 0/10 cells complete at
+  # delta_max = 10.0 and 10/10 at 4*dt. Running these arms at 10.0 would
+  # measure the clamp, not the backbone.
+  - backbone: ssm
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.0003, delta_max: 0.20}
+  - backbone: ssm
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.0003, delta: 0.05, radius: bounded, r: 2, delta_max: 0.20}
+
+seeds: [0, 1, 2, 3, 4]
