@@ -36,6 +36,10 @@ weights/
 # selection SONT la donnee mesuree, et "publie" ne veut rien dire si Git ne les
 # suit pas (tests/test_historical_manifest.py le verifie desormais).
 !reports/historical/**/*.csv
+# ...et les sidecars des figures publiees, pour la meme raison exactement :
+# PROTOCOL.md 27.4 exige que chaque point remonte a un CSV verifiable, et le
+# .sha256 seul ne prouve rien si le fichier qu'il hache n'est pas suivi.
+!assets/*.csv
 *.tar
 *.tar.gz
 *.zip
