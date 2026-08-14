@@ -4104,3 +4104,54 @@ ceiling of 25.5 is restored by this sentence, over this section.
 - **Budget parity was verified before this section was written**, not after, and the six
   numbers are in 27.1.
 - **R4**: this section precedes every run it authorizes, including this root's first cell.
+
+### 27.7 Dated precision to 27.3 — the primary statistic is `e_H`, because VPT is censored by construction on this system (dated 2026-08-14)
+
+27.3 named **VPT at `tau = 0.5`** the primary ordering statistic. That choice is a defect
+of this section, and it is corrected here **before a single datum of this root exists**:
+at the moment this precision is written, `results_primary_factorial/` contains **0
+`gate.json` and 0 `run_complete.json`**. Nothing of this root has been read, because
+nothing of it has been produced.
+
+**The measurement that forces the correction**, taken on the roots that already exist and
+not on this one: across the **162 scored runs** of `results_osc_n/`,
+`results_osc_delta/`, `results_osc_decomp/`, `results_osc_hfr/` and
+`results_ssm_delta/`, **1179 of 1346 evaluation episodes are censored — 87.6 %** — and
+only **30 of 162 runs** reach `e_h >= 0.5` at all within `H = 25`. The normalized state
+error on `CoupledOscillators` at this horizon has a median `e_h_gate` of **0.1592**, a
+factor of three below `tau`.
+
+VPT is therefore not censored by accident here; it is censored **by construction**. Under
+27.3's own conservative censoring rule — any comparison depending on a censored value is
+`indeterminate` — a VPT-primary reading would return `indeterminate` on very nearly every
+one of the nine relations, whatever the models did. A statistic that cannot separate the
+arms is not a conservative choice; it is an empty one.
+
+**The correction.** The primary ordering statistic becomes **`e_H` at `H = 25`**, the
+field `measures.e_h_gate` of the `gate/1` artifact, **lower is better**. This is option
+(b) of the phase's own open decision on the primary statistic, which listed it as
+admissible alongside VPT; it is not a new invention. Per-cell value: mean over the five
+seeds, `SE = std(ddof = 1) / sqrt(5)`, unchanged.
+
+**What does not change.** The endpoint is still one free rollout in true-state
+coordinates, and `e_h_gate` is read from the **same bytes** as the `e_h` curve of Fig. 1
+— 27.3's one-endpoint rule is strengthened by this change, not weakened, since `e_h_gate`
+IS a point of that curve. `m_low` continues to be reported. The eligibility rule, the
+pairing rule, the descriptive verdict without a `p`-value, and the nine relations with
+their one untested pair are untouched.
+
+**VPT is not dropped.** It was pre-registered and it stays published: Fig. 2 shows the
+five raw per-seed VPT values per cell **with their censoring status and the censored
+count**, exactly as 27.4 engaged. What changes is that the ORDER VERDICTS no longer rest
+on it. Removing a pre-registered quantity because it turned out uninformative is the
+fault this repository exists to forbid; publishing it as measured, and saying why it
+could not carry the ordering, is not.
+
+**Note on direction.** `e_H` is an error: **lower is better**, the opposite of VPT. Every
+predicted relation `X > Y` of 27.3 means "X is better than Y", so on this statistic it is
+tested as `e_H(X) < e_H(Y)`. The sign convention is fixed here, before the numbers, and a
+reading that inverts it is a defect the negative tests must catch.
+
+**R4**: this precision precedes every reading it governs. It does not authorize any run,
+and it changes no threshold: `tau = 0.5`, `gamma = 5`, `gamma_1 = 2`, `tau_1`, the budget
+and the loss are untouched.
