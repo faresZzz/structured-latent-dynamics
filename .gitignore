@@ -106,6 +106,7 @@ GEMINI.md
 /results_gate_d2/
 /results_osc_hfr/
 /results_osc_decomp/
+/results_primary_factorial/
 /results_smoke/
 # Comptabilite d'execution, pas des sources : marqueurs de reprise et journaux
 # de shards. Le contenu scientifique vit dans les racines results_* (ignorees)
