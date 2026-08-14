@@ -36,7 +36,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from sld.viz.style import INK_FAINT, INK_MUTED, INK_PRIMARY, apply_style, save_fig
+from sld.viz.style import INK_FAINT, INK_MUTED, apply_style, save_fig
 
 DEFAULT_ROOT = "results_ssm_delta"
 DEFAULT_OUT = "assets/figE_ssm_delta.png"

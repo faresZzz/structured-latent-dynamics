@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from sld.viz.style import INK_FAINT, INK_MUTED, INK_PRIMARY, STRUCTURE_COLORS, apply_style, save_fig
+from sld.viz.style import INK_FAINT, INK_MUTED, STRUCTURE_COLORS, apply_style, save_fig
 
 DEFAULT_ROOT = "results_osc_delta"
 DEFAULT_OUT = "assets/figD_misspecification.png"
@@ -95,7 +95,7 @@ def make_figD(root: str | Path = DEFAULT_ROOT, out: str | Path = DEFAULT_OUT) ->
     # the baselines, in ink: they are not arms
     twin = ax_abs.twinx()
     pers = [float(np.median([p for p, _ in base[c]])) for c in levels]
-    lin = [float(np.median([l for _, l in base[c]])) for c in levels]
+    lin = [float(np.median([lin_e for _, lin_e in base[c]])) for c in levels]
     twin.plot(xs, pers, color=INK_MUTED, linewidth=1.1, linestyle="--", marker="s", markersize=3.5)
     twin.plot(xs, lin, color=INK_FAINT, linewidth=1.1, linestyle="-.", marker="^", markersize=3.5)
     twin.set_ylabel(r"baseline $e_{25}$", color=INK_MUTED, fontsize=8)

@@ -33,6 +33,8 @@ from sld.experiments.loading import (
     read_index,
 )
 from sld.predictors.registry import get_predictor
+from sld.viz import fig2_vpt, fig3_factorial_effects
+from sld.viz import results as results_mod
 from sld.viz.fig1_rollout import _aggregate_curves, make_fig1
 from sld.viz.fig2_spectrum import _plot_family_panel, make_fig2
 from sld.viz.style import CONSTRAINT_LINESTYLES, FAMILY_COLORS
@@ -322,14 +324,19 @@ def test_fr_drift_target_is_true_state_not_encoder_reconstruction() -> None:
     assert np.all(err_new > 1e-3)
 
 
-def test_make_fig1_raises_pending_phase_d() -> None:
-    """Fig. 1's per-run OLS readout is retired (a free parameter per arm,
-    not an at-arms-length comparison method) pending phase D's shared,
-    frozen readout; a wrong figure is worse than no figure, so
-    ``make_fig1`` now refuses to render instead of plotting on the
-    superseded method."""
-    with pytest.raises(NotImplementedError, match="phase D"):
-        make_fig1()
+def test_make_fig1_reactivated_on_primary_factorial_shared_frozen_readout() -> None:
+    """PROTOCOL.md section 27.1 supplies exactly the condition the OLD
+    retirement doctring named as the reactivation trigger: a SHARED, FROZEN
+    readout (``representation.kind = identity``, one ``e_recon`` for all 30
+    cells), so no per-run OLS fit exists to distort the cross-arm
+    comparison. ``make_fig1`` must therefore render, not raise."""
+    assert callable(make_fig1)
+    # the retirement's own module docstring text must be gone from the
+    # active code path (still present in the module docstring as history,
+    # never as make_fig1's behavior)
+    import inspect
+
+    assert "NotImplementedError" not in inspect.getsource(make_fig1)
 
 
 # -- fig1 / fig2 --------------------------------------------------------------
@@ -561,3 +568,379 @@ def test_expected_grid_derives_from_yaml_arms_and_seeds(tmp_path: Path) -> None:
     assert len(cells_fb) == 14
     assert len(set(cells_fb)) == len(cells_fb)  # no duplicated cell
     assert seeds_fb == frozenset(range(5))
+
+
+# ---------------------------------------------------------------------------
+# PROTOCOL.md section 27.4 -- Fig. 1 (reactivated), Fig. 2 (VPT), Fig. 3
+# (factorial effects). Every fixture is synthetic, built entirely under
+# ``tmp_path`` -- no real ``results_primary_factorial/`` bytes are read (that
+# campaign is live, see the packet's INTERDIT #2). Mirrors
+# ``tests/viz/test_results.py``'s fixture shape but kept self-contained in
+# this file (no ``tests/`` package init exists for a cross-file import).
+# ---------------------------------------------------------------------------
+
+_PF_ARMS = [
+    ("mlp", "off"), ("mlp", "on"),
+    ("transformer", "off"), ("transformer", "on"),
+    ("ssm", "off"), ("ssm", "on"),
+]
+_PF_SEEDS = (0, 1, 2, 3, 4)
+_PF_SYSTEM = "SynthOscillators"
+_PF_REGIME = "SynthOURegime"
+
+
+def _pf_write_configs(configs_dir: Path, exp_name: str) -> None:
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "datasets": {"s0": {"system": {"name": _PF_SYSTEM}, "regime": {"name": _PF_REGIME}}},
+        "arms": [{"backbone": b, "structure": s} for b, s in _PF_ARMS],
+        "seeds": list(_PF_SEEDS),
+    }
+    (configs_dir / f"{exp_name}.yaml").write_text(yaml.safe_dump(doc))
+
+
+def _pf_gate_payload(*, cell_id, backbone, structure, family, seed, status="learns",
+                      e_h=(0.1, 0.2, 0.3), vpt_median=3.0) -> dict:
+    return {
+        "schema": "gate/1",
+        "identity": {
+            "cell_id": cell_id, "arm": {"backbone": backbone, "structure": structure, "family": family},
+            "seed": seed, "stratum_system": _PF_SYSTEM, "stratum_regime": _PF_REGIME, "run_dir": "",
+        },
+        "digests": {"config_hash": "c" * 40, "data_hash": "d" * 8, "representation_digest": "r" * 8},
+        "split": "test",
+        "protocol": {"h_gate": len(e_h), "gamma": 5, "tau_1": 0.1, "tau_vpt": 0.5, "horizon": len(e_h),
+                     "gamma_1": 2, "e_1_pers": 0.2, "e_recon": 1e-8, "attainable": True},
+        "measures": {
+            "e_h": list(e_h), "persistence_e_h": list(e_h), "linear_e_h": list(e_h), "e_1": e_h[0],
+            "e_h_gate": e_h[-1], "m_low": 0.05, "m_high": 0.05, "lower_bound": True, "upper_bound": False,
+            "near_miss": False, "vpt_median": vpt_median, "vpt_censored": 0, "per_episode_vpt": [vpt_median],
+        },
+        "status": status, "first_step": None,
+    }
+
+
+def _pf_build_grid(
+    tmp_path: Path,
+    exp_name: str = "pf",
+    *,
+    e_h_by_family_seed: dict[tuple[str, int], tuple[float, ...]] | None = None,
+    vpt_by_family_seed: dict[tuple[str, int], float] | None = None,
+    status_overrides: dict[tuple[str, int], str] | None = None,
+    missing_family: str | None = None,
+) -> tuple[Path, str]:
+    """Full 6-family x 5-seed grid. ``missing_family``, if given, gets NO
+    gate.json for any of its 5 seeds at all -- ``status='missing'`` (a
+    'cellule absente' in the packet's own words), distinct from
+    ``does_not_learn``/``divergence`` which at least ran."""
+    e_h_by_family_seed = e_h_by_family_seed or {}
+    vpt_by_family_seed = vpt_by_family_seed or {}
+    status_overrides = status_overrides or {}
+    results_root = tmp_path / "results"
+    exp_root = results_root / exp_name
+    idx = 0
+    for backbone, structure in _PF_ARMS:
+        family = results_mod._FAMILY_BY_PAIR[(backbone, structure)]
+        for seed in _PF_SEEDS:
+            if family == missing_family:
+                idx += 1
+                continue
+            status = status_overrides.get((family, seed), "learns")
+            e_h = e_h_by_family_seed.get((family, seed), (0.1, 0.2, 0.3))
+            vpt = vpt_by_family_seed.get((family, seed), 3.0)
+            payload = _pf_gate_payload(cell_id=idx, backbone=backbone, structure=structure,
+                                        family=family, seed=seed, status=status, e_h=e_h, vpt_median=vpt)
+            run_dir = exp_root / f"{family}-{seed}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "gate.json").write_text(json.dumps(payload))
+            idx += 1
+    _pf_write_configs(tmp_path / "configs", exp_name)
+    return results_root, exp_name
+
+
+@pytest.fixture
+def _pf_configs(monkeypatch):
+    """Points ``results._CONFIGS_DIR`` at whatever ``tmp_path/configs`` a
+    test writes -- never the real committed ``primary_factorial.yaml``."""
+    def _apply(tmp_path):
+        monkeypatch.setattr(results_mod, "_CONFIGS_DIR", tmp_path / "configs")
+    return _apply
+
+
+def _pf_write_state_scale(path: Path, *, sigma_train, system=_PF_SYSTEM, regime=_PF_REGIME, e_recon=1.866e-08):
+    """A synthetic ``state_scale/1`` JSON -- the torch-free artifact
+    ``sld.audit.scan_state_scale`` writes, faked here without touching torch
+    or a real representation checkpoint."""
+    payload = {
+        "schema": "state_scale/1",
+        "strata": {"s0": {"system": system, "regime": regime, "digest": "d" * 8,
+                          "sigma_train": list(sigma_train), "e_recon": e_recon, "e_1_pers": 0.2}},
+    }
+    path.write_text(json.dumps(payload))
+
+
+# --- Fig. 1 -------------------------------------------------------------
+
+def test_fig1_analytic_mean_se_and_matches_results_module(tmp_path, _pf_configs):
+    """POSITIVE: mlp's 5 seeds carry constant curves 1..5 -> textbook mean 3,
+    SE sqrt(0.5) (independent hand computation, same numeric lock as
+    ``tests/viz/test_results.py``'s own). Also: Fig. 1's returned data is
+    BYTE-IDENTICAL to a fresh, independent call of
+    ``results.aggregate_rollout_curves`` on the same table -- Fig. 1 must
+    consume ``results.py``'s own e_h reading, never recompute it."""
+    _pf_configs(tmp_path)
+    e_h_by_seed = {("mlp", s): (float(s + 1),) * 3 for s in _PF_SEEDS}
+    results_root, exp_name = _pf_build_grid(tmp_path, e_h_by_family_seed=e_h_by_seed)
+
+    out = make_fig1(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig1.png"))
+    mean_curve = np.array(out["data"]["mlp"]["mean_e_h"])
+    se_curve = np.array(out["data"]["mlp"]["se_e_h"])
+    assert np.allclose(mean_curve, 3.0, atol=1e-12)
+    assert np.allclose(se_curve, np.sqrt(0.5), atol=1e-12)
+
+    rows = results_mod.build_primary_results_table(results_root, exp_name)
+    independent = results_mod.aggregate_rollout_curves(rows)
+    assert out["data"] == independent
+
+    assert out["image_path"].exists() and out["image_path"].stat().st_size > 0
+    assert out["sidecar_csv"].exists()
+    import hashlib
+    assert out["sidecar_hash"] == hashlib.sha256(out["sidecar_csv"].read_bytes()).hexdigest()
+
+
+def test_fig1_absent_and_ineligible_cells_never_drawn_or_averaged(tmp_path, _pf_configs):
+    """NEGATIVE 1 ('cellule absente'): ``ssm_k`` has NO gate.json at all (5/5
+    'missing') -- must be named, never averaged. Also covers a
+    does_not_learn seed on ``mlp`` in the same run."""
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(
+        tmp_path, status_overrides={("mlp", 0): "does_not_learn"}, missing_family="ssm_k",
+    )
+    out = make_fig1(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig1.png"))
+    assert out["data"]["mlp"]["eligible"] is False
+    assert "mean_e_h" not in out["data"]["mlp"]
+    assert out["data"]["ssm_k"]["eligible"] is False
+    assert out["data"]["ssm_k"]["statuses"] == {s: "missing" for s in _PF_SEEDS}
+    assert "mlp" in out["non_eligible"] and "ssm_k" in out["non_eligible"]
+    assert "does_not_learn" in out["caption"] and "ssm_k" in out["caption"]
+
+    # the CSV -- what actually feeds the plot -- has no 'step' rows for the
+    # non-eligible families (a broken eligibility filter WOULD emit them)
+    rows_csv = list(csv.DictReader(out["sidecar_csv"].open()))
+    mlp_rows = [r for r in rows_csv if r["family"] == "mlp"]
+    assert all(r["step"] == "" for r in mlp_rows)
+    assert {r["seed"] for r in mlp_rows} == {str(s) for s in _PF_SEEDS}
+    # untouched families keep their step rows
+    ssm_k_step_rows = [r for r in rows_csv if r["family"] == "ssm_k"]
+    assert all(r["step"] == "" for r in ssm_k_step_rows)
+    transformer_rows = [r for r in rows_csv if r["family"] == "transformer"]
+    assert len(transformer_rows) == 3 and all(r["step"] != "" for r in transformer_rows)
+
+
+def test_fig1_caption_has_the_eight_fields_and_no_forbidden_vocabulary(tmp_path, _pf_configs):
+    """POSITIVE: the 8 fields section 27.4 requires. NEGATIVE 4: the legacy
+    ``mu_j``/``constraint`` vocabulary (REGLES section 3's banned/renamed
+    terms) never leaks into a caption."""
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(tmp_path)
+    out = make_fig1(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig1.png"))
+    caption = out["caption"]
+    for field in ("CoupledOscillators", "OURegime", "H=", "sigma_train", "tau=0.5", "n=5"):
+        assert field in caption, field
+    assert "mu_j" not in caption
+    assert "constraint" not in caption
+    # NO state_scale_path given -- must say so explicitly, never a silent blank
+    assert "NOT READ" in caption
+
+
+def test_fig1_caption_cites_measured_sigma_train_when_state_scale_given(tmp_path, _pf_configs):
+    """POSITIVE: with a ``state_scale_path``, the caption carries the
+    FORMATTED NUMBERS from that JSON, not prose. NEGATIVE: a state_scale
+    JSON that does NOT cover this grid's stratum (system/regime mismatch)
+    must raise -- the file was supplied, so silence is not an option."""
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(tmp_path)
+    sigma = [1.6057, 1.5271, 1.8577, 2.0715]
+    state_scale = tmp_path / "state_scale.json"
+    _pf_write_state_scale(state_scale, sigma_train=sigma)
+
+    out = make_fig1(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig1.png"),
+                     state_scale_path=str(state_scale))
+    assert "NOT READ" not in out["caption"]
+    for v in sigma:
+        assert f"{v:.4f}" in out["caption"]
+    assert "1.866e-08" in out["caption"]
+
+    mismatched = tmp_path / "state_scale_wrong.json"
+    _pf_write_state_scale(mismatched, sigma_train=sigma, system="SomeOtherSystem")
+    with pytest.raises(ValueError, match="no stratum matching"):
+        make_fig1(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig1.png"),
+                  state_scale_path=str(mismatched))
+
+
+def test_fig1_empty_root_raises_clear_error_not_a_raw_traceback(tmp_path, _pf_configs):
+    """NEGATIVE 6 ('figure lancée avant index clos'): an empty results root
+    (no gate.json anywhere) must raise a named, catchable error -- not let
+    an obscure KeyError/IndexError escape from deep inside the plotting
+    code."""
+    _pf_configs(tmp_path)
+    _pf_write_configs(tmp_path / "configs", "pf")
+    with pytest.raises(FileNotFoundError, match="nothing to plot"):
+        make_fig1(results_root=tmp_path / "nope", exp_name="pf", out_path=str(tmp_path / "fig1.png"))
+
+
+# --- Fig. 2 ---------------------------------------------------------------
+
+def test_fig2_five_points_per_cell_censored_never_zero_or_hmax_plus_one(tmp_path, _pf_configs):
+    """POSITIVE: 5 raw VPT values/statuses per cell, censored count shown.
+    NEGATIVE (part of N1/N3-adjacent, and 27.3's own forbidden
+    replacements): the CSV field for a censored seed is BLANK, never '0'
+    and never 'Hmax + 1' (H = 25 here, so never '26')."""
+    _pf_configs(tmp_path)
+    vpt = {("mlp", 0): float("inf"), ("mlp", 1): 4.0, ("mlp", 2): 5.0, ("mlp", 3): 6.0, ("mlp", 4): 7.0}
+    results_root, exp_name = _pf_build_grid(tmp_path, vpt_by_family_seed=vpt)
+
+    out = fig2_vpt.make_fig2(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig2.png"))
+    assert len(out["data"]["mlp"]["per_seed"]) == 5
+    assert out["data"]["mlp"]["n_censored"] == 1
+    assert out["data"]["mlp"]["per_seed"][0]["status"] == "censored"
+    assert all(out["data"]["mlp"]["per_seed"][s]["status"] == "crossed" for s in (1, 2, 3, 4))
+
+    rows_csv = list(csv.DictReader(out["sidecar_csv"].open()))
+    censored_row = next(r for r in rows_csv if r["family"] == "mlp" and r["seed"] == "0")
+    assert censored_row["vpt_median"] == ""
+    assert censored_row["vpt_median"] not in ("0", "26")
+    assert censored_row["vpt_status"] == "censored"
+
+    assert out["image_path"].exists() and out["image_path"].stat().st_size > 0
+
+
+def test_fig2_caption_names_censoring_convention_and_no_forbidden_vocabulary(tmp_path, _pf_configs):
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(tmp_path)
+    out = fig2_vpt.make_fig2(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig2.png"))
+    caption = out["caption"]
+    for field in ("CoupledOscillators", "OURegime", "H=25", "sigma_train", "tau=0.5", "n=5", "censor"):
+        assert field in caption, field
+    assert "mu_j" not in caption
+    assert "constraint" not in caption
+    assert "NOT READ" in caption
+
+
+def test_fig2_caption_cites_measured_sigma_train_when_state_scale_given(tmp_path, _pf_configs):
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(tmp_path)
+    sigma = [1.6057, 1.5271, 1.8577, 2.0715]
+    state_scale = tmp_path / "state_scale.json"
+    _pf_write_state_scale(state_scale, sigma_train=sigma)
+    out = fig2_vpt.make_fig2(results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig2.png"),
+                              state_scale_path=str(state_scale))
+    assert "NOT READ" not in out["caption"]
+    for v in sigma:
+        assert f"{v:.4f}" in out["caption"]
+
+
+def test_fig2_empty_root_raises_clear_error(tmp_path, _pf_configs):
+    _pf_configs(tmp_path)
+    _pf_write_configs(tmp_path / "configs", "pf")
+    with pytest.raises(FileNotFoundError, match="nothing to plot"):
+        fig2_vpt.make_fig2(results_root=tmp_path / "nope", exp_name="pf", out_path=str(tmp_path / "fig2.png"))
+
+
+# --- Fig. 3 -----------------------------------------------------------------
+
+def test_fig3_pairs_three_backbones_by_five_seeds_analytic_lock(tmp_path, _pf_configs):
+    """POSITIVE: on-off contrasts [1, 2, 3, 4, 5] per backbone -> mean 3,
+    SE sqrt(0.5), same numeric lock as
+    ``tests/viz/test_results.py::test_paired_structure_contrasts_numeric_lock``,
+    now checked THROUGH ``make_fig3`` for all three backbones at once."""
+    _pf_configs(tmp_path)
+    e_h_by_seed: dict[tuple[str, int], tuple[float, ...]] = {}
+    for backbone, off_family, on_family in (("mlp", "mlp", "mlp_k"),
+                                             ("transformer", "transformer", "transformer_k"),
+                                             ("ssm", "min_ssm", "ssm_k")):
+        for s in _PF_SEEDS:
+            e_h_by_seed[(off_family, s)] = (0.0, 0.0, 0.0)
+            e_h_by_seed[(on_family, s)] = (float(s + 1),) * 3
+    results_root, exp_name = _pf_build_grid(tmp_path, e_h_by_family_seed=e_h_by_seed)
+
+    out = fig3_factorial_effects.make_fig3(
+        results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig3.png")
+    )
+    for backbone in ("mlp", "transformer", "ssm"):
+        c = out["data"][backbone]
+        assert len(c["contrasts"]) == 5
+        assert np.allclose(sorted(c["contrasts"]), [1.0, 2.0, 3.0, 4.0, 5.0])
+        assert abs(c["mean"] - 3.0) < 1e-12
+        assert abs(c["se"] - np.sqrt(0.5)) < 1e-12
+    assert out["image_path"].exists() and out["image_path"].stat().st_size > 0
+
+
+def test_fig3_skips_a_seed_missing_on_one_side_never_fakes_it(tmp_path, _pf_configs):
+    """NEGATIVE 2 ('seed filtrée'): a diverged ON arm for one seed of ``mlp``
+    contributes NO contrast for that seed -- 4/5, never a faked 5th."""
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(
+        tmp_path, status_overrides={("mlp_k", 2): "divergence"},
+    )
+    out = fig3_factorial_effects.make_fig3(
+        results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig3.png")
+    )
+    assert len(out["data"]["mlp"]["contrasts"]) == 4
+
+
+def test_fig3_caption_states_within_backbone_confound_and_no_forbidden_vocabulary(tmp_path, _pf_configs):
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(tmp_path)
+    out = fig3_factorial_effects.make_fig3(
+        results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig3.png")
+    )
+    caption = out["caption"]
+    for field in ("CoupledOscillators", "OURegime", "H=25", "sigma_train", "tau=0.5", "n=5"):
+        assert field in caption, field
+    assert "mu_j" not in caption
+    assert "constraint" not in caption
+    assert "NOT READ" in caption
+
+
+def test_fig3_caption_cites_measured_sigma_train_when_state_scale_given(tmp_path, _pf_configs):
+    _pf_configs(tmp_path)
+    results_root, exp_name = _pf_build_grid(tmp_path)
+    sigma = [1.6057, 1.5271, 1.8577, 2.0715]
+    state_scale = tmp_path / "state_scale.json"
+    _pf_write_state_scale(state_scale, sigma_train=sigma)
+    out = fig3_factorial_effects.make_fig3(
+        results_root=results_root, exp_name=exp_name, out_path=str(tmp_path / "fig3.png"),
+        state_scale_path=str(state_scale),
+    )
+    assert "NOT READ" not in out["caption"]
+    for v in sigma:
+        assert f"{v:.4f}" in out["caption"]
+
+
+def test_fig3_empty_root_raises_clear_error(tmp_path, _pf_configs):
+    _pf_configs(tmp_path)
+    _pf_write_configs(tmp_path / "configs", "pf")
+    with pytest.raises(FileNotFoundError, match="nothing to plot"):
+        fig3_factorial_effects.make_fig3(results_root=tmp_path / "nope", exp_name="pf", out_path=str(tmp_path / "fig3.png"))
+
+
+# --- shared sidecar writer: hash differs when content differs -------------
+
+def test_write_sidecar_csv_hash_changes_with_content():
+    """NEGATIVE 3 ('hash différent'): two different row sets must write two
+    different digests -- an implementation that hashed a constant (e.g. the
+    file path) instead of the bytes would pass every other test here and
+    still be wrong."""
+    import hashlib
+    import tempfile
+
+    from sld.viz.style import write_sidecar_csv
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        d1 = write_sidecar_csv([{"a": "1"}], ["a"], td / "x.csv")
+        d2 = write_sidecar_csv([{"a": "2"}], ["a"], td / "y.csv")
+        assert d1 != d2
+        assert d1 == hashlib.sha256((td / "x.csv").read_bytes()).hexdigest()
+        assert (td / "x.csv.sha256").read_text().strip() == d1

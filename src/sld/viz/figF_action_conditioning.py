@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from sld.viz.style import INK_FAINT, INK_MUTED, INK_PRIMARY, STRUCTURE_COLORS, apply_style, save_fig
+from sld.viz.style import INK_MUTED, INK_PRIMARY, STRUCTURE_COLORS, apply_style, save_fig
 
 DEFAULT_ROOT = "results_osc_n"
 DEFAULT_OUT = "assets/figF_action_conditioning.png"

@@ -88,6 +88,69 @@ INK_MUTED = "#6b6b68"
 INK_FAINT = "#b3b3ae"
 
 
+def sigma_train_caption_fragment(
+    state_scale_path: str | Path | None, stratum_system: str, stratum_regime: str
+) -> str:
+    """The ``sigma_train`` clause a caption cites, read from
+    ``sld.audit.scan_state_scale``'s ``state_scale/1`` JSON.
+
+    The schema is re-checked here with plain ``json`` rather than by
+    importing ``sld.audit.scan_state_scale.load_state_scale``: that module's
+    OWN top-level imports are torch-free, but it lives inside the ``sld.audit``
+    PACKAGE, whose ``__init__.py`` imports ``jacobian``/``rollout`` and pulls
+    in ``torch`` as a side effect of the package import alone -- exactly what
+    ``sld/viz`` must never do (REGLES section 2). Same doctrine as
+    ``figF_action_conditioning.py``, which reads ``action_jacobian.json``
+    with ``json.loads`` directly rather than importing
+    ``sld.audit.scan_action_jacobian``.
+
+    Three outcomes, never a silent blank: ``state_scale_path`` is ``None``
+    -> the caption says explicitly that ``sigma_train`` was not read (never
+    a fabricated number, never an empty field); the path is given and a
+    stratum matching ``(stratum_system, stratum_regime)`` exists -> the
+    formatted values and the cross-checkable ``e_recon``; the path is given
+    but no matching stratum exists -> raise, because the file WAS supplied
+    and did not have what the caption needs -- that is a real defect, not a
+    "not read yet" state.
+    """
+    import json
+
+    if state_scale_path is None:
+        return "sigma_train: NOT READ (no state_scale.json path given -- pass state_scale_path=... to cite it)"
+    payload = json.loads(Path(state_scale_path).read_text())
+    if payload.get("schema") != "state_scale/1":
+        raise ValueError(f"{state_scale_path}: expected schema 'state_scale/1', got {payload.get('schema')!r}")
+    for block in payload["strata"].values():
+        if block["system"] == stratum_system and block["regime"] == stratum_regime:
+            formatted = ", ".join(f"{v:.4f}" for v in block["sigma_train"])
+            return f"sigma_train=[{formatted}] (state_scale/1, e_recon={block['e_recon']:.3e})"
+    raise ValueError(
+        f"{state_scale_path}: no stratum matching system={stratum_system!r} regime={stratum_regime!r}"
+    )
+
+
+def write_sidecar_csv(rows: list[dict], fieldnames: list[str], out_csv: str | Path) -> str:
+    """Write ``rows`` to ``out_csv`` and a ``.sha256`` digest beside it.
+
+    PROTOCOL.md section 27.4: "each figure writes a sidecar CSV and a hash".
+    One shared writer so fig1/fig2/fig3 agree on the mechanics rather than
+    each reinventing csv+hashlib -- returns the hex digest, which the caller
+    also gets back from the file it writes, so a test can check either.
+    """
+    import csv
+    import hashlib
+
+    out_csv = Path(out_csv)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with out_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    digest = hashlib.sha256(out_csv.read_bytes()).hexdigest()
+    out_csv.with_suffix(out_csv.suffix + ".sha256").write_text(digest + "\n")
+    return digest
+
+
 def reference_line(ax, y: float, label: str, *, style: str = ":", color: str = INK_MUTED) -> None:
     """Draw a horizontal reference at ``y``, labelled INSIDE the axes.
 

@@ -1,4 +1,4 @@
-.PHONY: setup test smoke grid-core figA figB figC figD figE figF figG figures reproduce-figures clean-nb
+.PHONY: setup test smoke grid-core figA figB figC figD figE figF figG fig1 fig2 fig3 figures reproduce-figures clean-nb
 
 CONFIGS := src/sld/experiments/configs
 # Declared configs are written configs. `oscillators`, `lorenz`, `cartpole`,
@@ -82,6 +82,23 @@ figE:                     ## campagne C: la divergence ssm appartient a delta_ma
 
 figB:                     ## D4 horizon-resolved: where the structured arms pay and where they cost
 	uv run python -m sld.viz.figB_horizon
+
+# fig1/fig2/fig3 -- PROTOCOL.md section 27.4, the primary factorial
+# (results_primary_factorial/). NOT added to FIGURES yet: that campaign is
+# still running (30 cells, live at the time these targets were written) and
+# main() refuses to render on an empty/partial root rather than ship a wrong
+# figure (same doctrine as figA..figG). Add all three to FIGURES together,
+# once the root actually produces images -- "declared figures are delivered
+# figures" above applies to this trio too.
+
+fig1:                     ## e_h rollout curves, mean +-1 SE, 3 backbones x 2 structures
+	uv run python -m sld.viz.fig1_rollout
+
+fig2:                     ## VPT, five raw per-seed values per cell, censoring shown
+	uv run python -m sld.viz.fig2_vpt
+
+fig3:                     ## the three paired ON-OFF contrasts of e_h_gate
+	uv run python -m sld.viz.fig3_factorial_effects
 
 figures: $(FIGURES)
 

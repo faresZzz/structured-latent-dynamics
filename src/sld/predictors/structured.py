@@ -85,6 +85,10 @@ from torch import Tensor, nn
 
 from sld.predictors.base import PredictorModule, PredictorState
 from sld.predictors.blocks2x2 import block_diagonal, rotation_scaling_zoh
+from sld.predictors.koopman_ssm import _make_mlp
+from sld.predictors.min_ssm import SelectiveSSMContextBackbone
+from sld.predictors.mlp import MLPContextBackbone
+from sld.predictors.transformer import CausalTransformerContextBackbone
 
 # the two levels of the lift parametrisation (PROTOCOL section 25.3). Kept
 # beside _VALID_RADIUS and validated the same way: a typo must be a refusal,
@@ -93,10 +97,6 @@ _VALID_LIFT = ("mlp", "identity")
 
 # the two levels of the radius parametrisation (PROTOCOL section 23)
 _VALID_RADIUS: tuple[str, ...] = ("free", "bounded")
-from sld.predictors.koopman_ssm import _make_mlp
-from sld.predictors.min_ssm import SelectiveSSMContextBackbone
-from sld.predictors.mlp import MLPContextBackbone
-from sld.predictors.transformer import CausalTransformerContextBackbone
 
 
 @runtime_checkable

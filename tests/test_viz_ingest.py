@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from sld.viz.ingest import D3_GOLD_SCHEMA, GATE_SCHEMA, arm_label, load_d3_gold, load_gate

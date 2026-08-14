@@ -20,8 +20,6 @@ structure; it is the structure's change of basis.
 
 from __future__ import annotations
 
-import itertools
-
 import numpy as np
 
 
