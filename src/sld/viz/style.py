@@ -151,7 +151,9 @@ def write_sidecar_csv(rows: list[dict], fieldnames: list[str], out_csv: str | Pa
     return digest
 
 
-def reference_line(ax, y: float, label: str, *, style: str = ":", color: str = INK_MUTED) -> None:
+def reference_line(
+    ax, y: float, label: str, *, style: str = ":", color: str = INK_MUTED, dy: float = 2
+) -> None:
     """Draw a horizontal reference at ``y``, labelled INSIDE the axes.
 
     Reference lines are thresholds and analytic anchors (a planted gold, a
@@ -162,13 +164,18 @@ def reference_line(ax, y: float, label: str, *, style: str = ":", color: str = I
     The label sits inside the axes, left-aligned just above the line, and not
     in the right margin: in a multi-panel figure a right-margin label lands on
     the next panel's y-axis and only the last panel stays readable.
+
+    ``dy``: vertical offset in points above the line (default 2, unchanged
+    for every existing caller). Only a caller whose data sits close to the
+    line at the label's x position needs a larger value to clear a nearby
+    point -- a pure placement knob, the line's ``y`` itself never moves.
     """
     ax.axhline(y, linestyle=style, linewidth=1.0, color=color, zorder=1)
     ax.annotate(
         label,
         xy=(0.02, y),
         xycoords=("axes fraction", "data"),
-        xytext=(0, 2),
+        xytext=(0, dy),
         textcoords="offset points",
         va="bottom",
         ha="left",

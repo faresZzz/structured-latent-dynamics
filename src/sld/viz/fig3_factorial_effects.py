@@ -81,6 +81,7 @@ def make_fig3(
     apply_style()
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
 
+    n_by_backbone: dict[str, int] = {}
     for i, backbone in enumerate(_BACKBONES):
         c = contrasts[backbone]
         diffs = c["contrasts"]
@@ -92,13 +93,16 @@ def make_fig3(
         if c["mean"] is not None:
             ax.errorbar([i], [c["mean"]], yerr=[c["se"]], fmt="D", color=INK_PRIMARY, markersize=6,
                        capsize=4, linewidth=1.6, zorder=5)
-        n = len(diffs)
-        ax.annotate(f"n={n}", xy=(i, 0), xycoords=("data", "axes fraction"), xytext=(0, -18),
-                    textcoords="offset points", ha="center", fontsize=7, color=INK_MUTED)
+        n_by_backbone[backbone] = len(diffs)
 
-    reference_line(ax, 0.0, "0: no effect  (negative = structure helps, lower e_h_gate is better)", style="--")
+    # Readability fix (coordinator review): the separate "n=5" annotation
+    # sat right where the xtick labels are drawn and overlapped them --
+    # folded into the tick label itself instead, so there is exactly one
+    # piece of text per column rather than two competing for the same strip.
+    reference_line(ax, 0.0, "0: no effect  (negative = structure helps, lower e_h_gate is better)",
+                    style="--", dy=6)
     ax.set_xticks(range(len(_BACKBONES)))
-    ax.set_xticklabels([_CONTRAST_LABEL[b] for b in _BACKBONES])
+    ax.set_xticklabels([f"{_CONTRAST_LABEL[b]}\n(n={n_by_backbone[b]})" for b in _BACKBONES])
     ax.set_xlim(-0.5, len(_BACKBONES) - 0.5)
     ax.set_xlabel("paired ON - OFF contrast, by backbone")
     ax.set_ylabel(r"$e_h\_gate$(on) $-$ $e_h\_gate$(off)   (negative = structure helps)")

@@ -211,14 +211,19 @@ def make_fig1(
         ax.legend(fontsize=7.5, loc="upper left", framealpha=0.95, ncol=2)
 
     if non_eligible:
-        lines = []
-        for family, statuses in non_eligible:
-            per_seed = ", ".join(f"seed {s}: {statuses[s]}" for s in sorted(statuses))
-            lines.append(f"{family} NOT ELIGIBLE -- {per_seed}")
+        # Readability fix (coordinator review): the old per-cell status box
+        # was drawn INSIDE the axes and covered the low end of both curves
+        # plus clipped the y-label. The full per-seed detail already lives
+        # in the caption's own "Non-eligible:" clause below -- this stays a
+        # single compact line, INSIDE the axes but in the one corner no
+        # curve reaches: both eligible curves RISE monotonically from ~0 at
+        # h=1 to their max at h=25 (top-right), so the empty corner is
+        # bottom-right, not top-right or either left corner (legend sits
+        # top-left).
         ax.annotate(
-            "\n".join(lines), xy=(0.985, 0.02), xycoords="axes fraction", ha="right", va="bottom",
-            fontsize=6.6, color=INK_MUTED,
-            bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": INK_MUTED, "linewidth": 0.7},
+            f"{len(non_eligible)} cellules non eligibles -- voir legende",
+            xy=(0.985, 0.03), xycoords="axes fraction", ha="right", va="bottom",
+            fontsize=7.0, color=INK_MUTED, style="italic", zorder=6,
         )
 
     sigma_clause = sigma_train_caption_fragment(

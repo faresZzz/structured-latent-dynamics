@@ -87,7 +87,6 @@ def make_fig2(
             f"fig2: no gate.json under {Path(results_root) / exp_name} -- nothing to plot yet"
         )
     vpt = results_mod.summarize_vpt(rows)
-    by_key = {(r["family"], r["seed"]): r for r in rows}
 
     apply_style()
     fig, ax = plt.subplots(figsize=(9.0, 5.0))
@@ -97,7 +96,13 @@ def make_fig2(
         for entry in vpt[family]["per_seed"].values()
         if entry["status"] == "crossed"
     ]
-    ceiling = max(finite) * 1.15 if finite else 30.0
+    # Readability fix (coordinator review): with only ONE finite value on the
+    # real grid (ssm_k seed 1, VPT=10) the old `*1.15` ceiling sat at 11.5 --
+    # 1.5 units above the one informative point, so it visually blended into
+    # the ring of censored markers sitting right on the reference line. A
+    # wider, fixed-fraction gap keeps the true height (never moved, never
+    # rescaled) but gives it clear air below the ceiling band.
+    ceiling = max(finite) * 2.0 if finite else 30.0
 
     for i, family in enumerate(_FAMILY_ORDER):
         per_seed = vpt[family]["per_seed"]
@@ -105,7 +110,6 @@ def make_fig2(
         jitter = np.linspace(-0.14, 0.14, n) if n > 1 else np.zeros(1)
         for j, seed in enumerate(sorted(per_seed)):
             entry = per_seed[seed]
-            run_status = by_key[(family, seed)]["status"]
             x = i + jitter[j]
             color = FAMILY_COLORS[family]
             if entry["status"] == "crossed":
@@ -114,12 +118,25 @@ def make_fig2(
             else:
                 ax.scatter(x, ceiling, s=42, facecolor="none", edgecolor=color, linewidth=1.4,
                            zorder=4, marker="^")
-            if run_status != "ok":
-                ax.annotate(run_status, xy=(x, entry["vpt_median"] if entry["status"] == "crossed" else ceiling),
-                            xytext=(0, 5), textcoords="offset points", ha="center", fontsize=5.6, color=INK_MUTED)
+        # Readability fix: per-point run_status labels ("does_not_learn" on
+        # every marker) used to stack into unreadable overlap -- that status
+        # is already carried by marker shape (crossed/censored) and this
+        # count, and the exact per-seed run_status stays readable in the
+        # sidecar CSV (run_status column), never dropped, just decluttered.
+        # Readability fix: placing this text BELOW the axes collided with
+        # the xtick labels (and, once pushed further down, with the xlabel
+        # itself). Every crossed/censored point sits at y=10 or y=ceiling
+        # (~20) -- the bottom of the plot is provably empty on this grid --
+        # so the count goes INSIDE the axes near y=0 instead, where nothing
+        # is ever drawn.
+        # ponytail: assumes the bottom ~4% of the y-range stays clear of
+        # crossed points -- true on the current grid (lowest crossed VPT is
+        # 10, ceiling ~20) but not guaranteed for a future re-run with a
+        # near-zero crossing. If that happens, move this back below the
+        # axes with `fig.subplots_adjust(bottom=...)` reserving real room.
         n_censored = vpt[family]["n_censored"]
-        ax.annotate(f"{n_censored}/{n} censored", xy=(i, -0.06), xycoords=("data", "axes fraction"),
-                    ha="center", va="top", fontsize=6.8, color=INK_MUTED)
+        ax.annotate(f"{n_censored}/{n} censored", xy=(i, ceiling * 0.04), xycoords="data",
+                    ha="center", va="bottom", fontsize=6.8, color=INK_MUTED)
 
     reference_line(ax, ceiling, "censored -- placement only, NOT a value (never 0, never Hmax+1)", style=":")
     ax.set_xticks(range(len(_FAMILY_ORDER)))

@@ -4155,3 +4155,128 @@ reading that inverts it is a defect the negative tests must catch.
 **R4**: this precision precedes every reading it governs. It does not authorize any run,
 and it changes no threshold: `tau = 0.5`, `gamma = 5`, `gamma_1 = 2`, `tau_1`, the budget
 and the loss are untouched.
+
+### 27.8 What the primary factorial returned (dated 2026-08-14)
+
+`results_primary_factorial/`, **30/30 cells complete, zero divergence**, scored 30/30 on the
+test split. Index: 30 rows, 30 unique identities, `missing = 0`, duplicates `0`, verified by
+two independent methods that agree — the on-disk sentinels and `index.csv`.
+
+**The measurement**, primary statistic `e_H` at `H = 25` (27.7), **lower is better**, mean
+over five seeds with `SE = std(ddof = 1) / sqrt(5)`:
+
+| family | `e_H` mean | SE | `m_low` median | gate verdict |
+|---|---|---|---|---|
+| `mlp` | **0.0702** | 0.0040 | 0.2624 | `learns` |
+| `transformer` | 0.1197 | 0.0106 | 0.4464 | `learns` |
+| `mlp_k` | 0.2153 | 0.0329 | 0.9029 | `does_not_learn` |
+| `min_ssm` | 0.3353 | 0.0542 | 1.4218 | `does_not_learn` |
+| `transformer_k` | 0.3681 | 0.0673 | 1.3101 | `does_not_learn` |
+| `ssm_k` | **0.6189** | 0.2021 | 1.5229 | `does_not_learn` |
+
+#### 27.8.1 The pre-registered verdict, as 27.3 declared it
+
+**One relation `contradicted`, eight `indeterminate`, one `not_tested`.**
+
+`transformer > mlp` is `contradicted`: paired difference **+0.0496 +- 0.0097**, i.e.
+`transformer` is *worse*, where the prediction had it better. The other eight relations each
+involve at least one cell that is not eligible under 27.3 — 20 of the 30 runs carry the gate
+verdict `does_not_learn` — and 27.3's rule sends every such comparison to `indeterminate`.
+`min_ssm` vs `mlp_k` stays `not_tested`, and no verdict is written for it.
+
+**That is the confirmatory result of this root, and it is reported first because it is the
+one that was declared first.**
+
+#### 27.8.2 Why the cells fail, disaggregated — the failure is itself ordered
+
+`does_not_learn` covers two different things, and the ventilation separates them:
+
+| family | lower bound (arm-neutral) | upper bound (`tau_1`) | `near_miss` |
+|---|---|---|---|
+| `mlp` | **5/5** | **5/5** | 0/5 |
+| `transformer` | **5/5** | **5/5** | 0/5 |
+| `mlp_k` | 4/5 | 0/5 | 3/5 |
+| `transformer_k` | 2/5 | 0/5 | 0/5 |
+| `min_ssm` | 2/5 | 0/5 | 0/5 |
+| `ssm_k` | **0/5** | 0/5 | 0/5 |
+
+`ssm_k` fails even the arm-neutral lower bound on every seed: it does not beat the trivial
+baselines at all. `mlp_k` passes that bound on 4 of 5 seeds and falls only on the upper
+bound — the one 21.4 records as failed by seven of eight cells and whose surrounding
+conclusion 22.0 withdrew. **The two labels are the same word and not the same fact**, and a
+reading that did not disaggregate would have said so.
+
+#### 27.8.3 The question 27.0 asked, and its answer
+
+27.0 opened this root on one gap: the repository's negative was measured on one backbone.
+**It generalizes to all three.** The paired ON-OFF contrast of `e_H` — the one comparison
+27.2 certifies as confound-free, since off and on of a backbone share rate, dataset, seed
+and budget — is positive on every backbone, meaning structure *costs*:
+
+| backbone | contrast `on - off` | SE | five per-seed contrasts |
+|---|---|---|---|
+| `mlp` | **+0.1451** | 0.0351 | 0.0294, 0.0982, 0.2122, 0.1915, 0.1942 |
+| `transformer` | **+0.2484** | 0.0670 | 0.1119, 0.2596, 0.2667, 0.4822, 0.1213 |
+| `ssm` | **+0.2836** | 0.2379 | 0.0016, 1.2141, -0.0005, 0.2412, -0.0384 |
+
+The `mlp` negative was not a property of the `mlp` dorsal. **The structured arm is worse on
+three backbones out of three**, and the two whose rate provenance is strongest (`mlp`,
+`transformer`) carry it with intervals well clear of zero.
+
+#### 27.8.4 An exploratory reading, labelled as such and carrying no confirmatory weight
+
+**This subsection is post-hoc.** It was written after the numbers existed, it was NOT
+pre-registered, and under section 9 it is exploratory. It changes no verdict of 27.8.1.
+
+27.3's eligibility rule conflates two things that this grid shows to be different:
+*"the run produced a valid measurement"* and *"the run passed the two-sided positive
+control"*. Every one of the 30 runs did the first — 30 complete sentinels, 30 `gate.json`,
+zero divergence, a readable `e_h` curve everywhere. 20 did not do the second. The rule I
+wrote discards the second group entirely, which is why eight relations are `indeterminate`.
+
+Had eligibility been defined on the first, the nine paired differences are:
+
+| relation | paired diff | SE | `+-1 SE` excludes 0 |
+|---|---|---|---|
+| `ssm_k > transformer_k` | +0.2508 | 0.2071 | yes |
+| `transformer_k > mlp_k` | +0.1528 | 0.0661 | yes |
+| `ssm_k > mlp_k` | +0.4036 | 0.2148 | yes |
+| `min_ssm > transformer` | +0.2155 | 0.0588 | yes |
+| `transformer > mlp` | +0.0496 | 0.0097 | yes |
+| `min_ssm > mlp` | +0.2651 | 0.0534 | yes |
+| `mlp_k > mlp` | +0.1451 | 0.0351 | yes |
+| `transformer_k > transformer` | +0.2484 | 0.0670 | yes |
+| `ssm_k > min_ssm` | +0.2836 | 0.2379 | yes |
+
+**All nine positive, all nine excluding zero: all nine relations contradicted, and the
+predicted ordering exactly inverted on both axes.** Predicted `ssm > transformer > mlp`
+among the structured arms and again among the unstructured; measured
+`mlp < transformer < ssm` in error, in both rows, with `off` beating `on` in every column.
+
+**This is not promoted to a finding.** It is recorded because suppressing it would be worse
+than labelling it, and because the honest object of this root is the contrast in 27.8.3,
+which does not depend on it.
+
+#### 27.8.5 Honesty declaration
+
+- **The pre-registered rule was not moved to get a result.** 27.3's eligibility clause turns
+  out to be the wrong instrument for this grid, and it is left exactly where it was written.
+  The reading it produces — one relation out of nine — is published as the primary verdict.
+- **This is the SECOND defect of my own section 27.3**, after the VPT choice corrected in
+  27.7. The first was caught before any datum existed and was therefore repaired; this one
+  was not visible until the cells were scored, and is therefore *recorded*, not repaired.
+  The distinction between the two is the whole of R4 and it is why 27.7 is an amendment and
+  27.8.4 is an observation.
+- **Decided, not derived**: that the exploratory reading is published alongside rather than
+  omitted or promoted.
+- **The confound of 27.2 stands on 27.8.1 and 27.8.4 and NOT on 27.8.3.** The backbone
+  ordering is confounded with rate suitability, and every ordering statement above carries
+  it. The paired within-backbone contrast does not, and that is why it, and not the
+  ordering, is what this root is reported as having measured.
+- **Scope, per 25.6**: everything here holds under `CoupledOscillators`, `OURegime`,
+  `n = 32`, `h_fr = 25`, `delta_max = 0.20` on the ssm arms, and the inherited rates of
+  27.2. **21.4 is untouched: M4 is not crossed and no statement here reaches the pendulum.**
+- **No threshold moved.** `gamma = 5`, `gamma_1 = 2`, `tau_1`, `tau = 0.5`, the 8000-update
+  budget and the loss are exactly where they were.
+- **The ceiling of 27.5 holds.** This root is the last one declared, and nothing here
+  declares another.

@@ -1,0 +1,18 @@
+{
+  "schema": "state_scale/1",
+  "strata": {
+    "CoupledOscillators__OURegime__3cb3e669": {
+      "digest": "409a5317b5658311e5c6368512e1a650922e52f6",
+      "e_1_pers": 0.04792920511889889,
+      "e_recon": 1.8655799589441226e-08,
+      "regime": "OURegime",
+      "sigma_train": [
+        1.6056969251336461,
+        1.5271486280371358,
+        1.8577194713126763,
+        2.0714621523282224
+      ],
+      "system": "CoupledOscillators"
+    }
+  }
+}
