@@ -4430,10 +4430,28 @@ from the true `A`, which no arm is otherwise allowed to see. This root therefore
 is not a fair competitor to `off`. Any sentence that reports 28.3's P3 without the word
 "oracle" is a misreport of this section.
 
-**Budget parity.** `on-oracle`'s `psi`/`pi` carry zero parameters, as `"identity"`'s do.
-`match_budget` sizes the backbone against that, exactly as 25.3's width note prescribes, and
-the three per-arm parameter counts are written into this section **before** the first run,
-not after.
+**Budget — matching is SUSPENDED, not applied. Corrected 2026-08-15, before any run.**
+
+*What this paragraph said when 28 was first committed (`bf901bc`), and why it was wrong:* it
+said `match_budget` sizes the backbone against `on-oracle`'s zero-parameter lift "exactly as
+25.3's width note prescribes". 25.3 and 23.2 prescribe the opposite, and the code implements
+the opposite. `budget.py` suspends matching for a zero-parameter lift precisely so that the
+matcher cannot widen a backbone to compensate — "measuring width while calling it structure,
+that is the mu_J fault, and it is the one this section must not reproduce". Sizing
+`on-oracle` up to `on-learned`'s parameter count would have made the two arms differ in TWO
+ways and attributed nothing. The error was mine, it was caught while scoping the
+implementation, and no cell had run.
+
+*What holds instead.* `on-oracle` inherits `on-learned`'s `width` and `psi_hidden`
+**exactly**; its backbone and head are parameter-identical; its `psi`/`pi` are replaced by
+frozen linear maps carrying **zero trainable parameters** and `2 * d_z^2` non-trainable ones
+(`T` and `T^-1`). The arm therefore comes out smaller in trainable parameters by exactly the
+learned lift pair — **and that difference is the quantity this root exists to attribute**, so
+removing it would remove the measurement. This is the same treatment `on-stable-nolift`
+receives under 23.2, for the same stated reason.
+
+The three realised counts — total and trainable, per arm — are written into this section
+**before** the first run, not after.
 
 **Cost is measured, not estimated.** One cell of `on-oracle` runs first, alone; its wall-clock
 and its seconds-per-update are recorded here; the remaining fourteen are launched only after
