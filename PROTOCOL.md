@@ -4280,3 +4280,265 @@ which does not depend on it.
   budget and the loss are exactly where they were.
 - **The ceiling of 27.5 holds.** This root is the last one declared, and nothing here
   declares another.
+
+### 27.9 Dated precision to 27.8.3 — what the three-backbone statement covers, and where it stops (dated 2026-08-15)
+
+27.8.3 reports the paired ON-OFF contrast as "positive on every backbone" and the structured
+arm as "worse on three backbones out of three". Both sentences are true of the means. Neither
+holds at the same strength across the three columns, and this precision says where the
+difference lies. **It changes no verdict**: 27.8.1 stands unmodified, 27.8.4 stands
+unmodified, and every number below is already published in 27.8.3 and in
+`assets/fig3_factorial_effects.csv` — read differently, not recomputed.
+
+**The sign, counted per seed.** A descriptive count, not a test: 27.3's prohibition on
+`p`-values is untouched and none is computed here.
+
+| backbone | seeds with a positive contrast | mean | median | mean without the extremum |
+|---|---|---|---|---|
+| `mlp` | **5/5** | +0.1451 | +0.1915 | — |
+| `transformer` | **5/5** | +0.2484 | +0.2596 | — |
+| `ssm` | **3/5** | +0.2836 | **+0.0016** | +0.0510 |
+
+On `ssm` the mean is set by one seed. Seed 1 contributes **+1.2141**; the other four are
++0.0016, -0.0005, +0.2412, -0.0384 — two of them within `1e-3` of zero, one negative.
+Fig. 3 already draws all five points in every column, so the figure never claimed more than
+this. The prose of 27.8.3 did.
+
+**Why that column was expected to be uninformative, declared before the runs.** 27.6 records
+the risk in writing: the ssm family's 10/10 completion was measured at `n = 256` (24.0) and
+this root runs at `n = 32`, and "if the ssm arms diverge at `n = 32` **that is published as
+measured**". 27.8.2 then measures the outcome — `ssm_k` fails the arm-neutral lower bound on
+**5/5** seeds, `min_ssm` on **3/5**. The `ssm` column is therefore a contrast between two arms
+of which neither reliably left the trivial baseline, and two of its five differences sitting
+within `1e-3` of zero is what that looks like from the outside.
+
+**The bounded statement, which replaces 27.8.3's last sentence as the citable one.** The
+paired contrast is positive on all three backbones. It is carried by every seed on `mlp` and
+by every seed on `transformer` — the two whose rate provenance 27.8.3 already names as the
+strongest. On `ssm` it is not carried by the seeds and **is not counted as a third
+independent confirmation**. What this root establishes is that the repository's negative
+generalizes across **two** backbones; the third is uninformative, for a reason 27.6 declared
+before the first cell ran.
+
+**The same qualification inside 27.8.4.** Of its nine exploratory differences, three sit
+between 1.19 and 1.88 SE of zero — `ssm_k > transformer_k` (1.21), `ssm_k > mlp_k` (1.88),
+`ssm_k > min_ssm` (1.19) — and all three involve `ssm_k`. The remaining six are at 2.31 SE
+and above. "All nine exclude zero at `+-1 SE`" is literally true and is the pre-registered
+wording of 27.3; the spread behind it is published here so the sentence is not read as nine
+equally supported statements. That subsection remains exploratory and is still promoted to
+nothing.
+
+**R4 note.** This precision is written after the numbers, like 27.8.4 and unlike 27.7. It
+therefore *records* rather than repairs, and it is deliberately confined to **weakening a
+descriptive claim of my own**. No eligibility rule, threshold, statistic or verdict moves. A
+precision that strengthened a claim after the fact would not be admissible under 9; this one
+only takes back reach that the seeds do not support.
+
+## 28. Amendment 18 — the ceiling of 27.5 is lifted a second time, for the one experiment 26.0 named and declined (dated 2026-08-15)
+
+### 28.0 What is being overridden, and the argument for overriding it
+
+27.5 closes with: "**This is the LAST root declared. No further root follows it, whatever it
+returns.** The ceiling of 25.5 is restored by this sentence, over this section." This section
+overrides that sentence, once, and gives the argument in full — because a ceiling lifted
+without an argument was never a ceiling.
+
+**What the ceiling exists to forbid.** 25.5 and 27.5 exist to stop one specific failure: an
+author who keeps opening roots, each with one more knob, until one returns the sign he
+wanted. The test of whether *this* section is that failure is not the author's account of his
+own motives. It is a question about the object: **does the new root re-ask a question that
+already has an answer?**
+
+It does not. The six oscillator roots and 27's factorial all ask one question in one set of
+coordinates — *in the identity basis, does the structured class beat the unstructured one?*
+That question is answered, and answered negatively: at `n` in {8, 32, 256}, at `delta(c)` from
+0.000 to 1.029, at `h_fr` in {5, 25}, and on two backbones carried by every seed (27.9).
+**Nothing below re-opens that question, and nothing below can repair it.**
+
+26.0 asks a different question, and its own closing sentence records that it is not testing
+it:
+
+> the structure demands a basis, the basis has to be learned jointly with the operator, and
+> 20.1 already measured that the joint problem is not reached by gradient descent even where
+> ordinary least squares recovers the operator to 2.11e-08. **No experiment is declared to
+> test this**, and 25.5's ceiling is why.
+
+The question below was therefore named, argued, and deliberately left unmeasured for a
+**governance** reason and not a scientific one. Running the experiment that an earlier section
+had already specified, and had declined only because of a self-imposed stop, is not the
+failure the ceiling guards against. Re-running a losing comparison with a new knob would be,
+and that is not what follows.
+
+**Decided, not derived**: that the ceiling is lifted at all; that it is lifted a second time
+after 27.5 declared it final; that it is lifted for ONE root and not a programme; that the
+root is `mlp`-only. The author takes this decision on 2026-08-15 **with 27's numbers already
+in hand**, and that fact is itself a reason to distrust the decision. It is why 28.4 —
+what would falsify the prediction, and the commitment to publish that outcome with the same
+prominence — is written here, before the first cell runs, and not after.
+
+### 28.1 The question, stated so that both answers are publishable
+
+26.0 measured, in closed form, that at `c = 0.10` — the configuration where campaign B's
+declared axis reads `delta(c) = 0.000`, "the prior is exact" — the true generator sits at
+Frobenius distance **1.0654** from the block-diagonal rotation-scaling class *in the identity
+basis*, which is **36 %** of `‖A‖_F = 2.9614`; and at distance **1.97e-15** from that same
+class in the basis of its own real Jordan form, with blocks `(-0.05, +-1.5187)` and
+`(-0.05, +-1.0902)`.
+
+The declared misspecification axis of 23.7 therefore moved **one** of two misspecifications
+and held the other fixed at 36 % throughout. Every arm carrying `lift = "mlp"` had to discover
+that change of basis by gradient descent, jointly with the operator, from the one-step loss
+folded through a 25-step closed rollout.
+
+**The question.** Is the penalty this repository has measured seven times a property of the
+structured class, or a property of *asking gradient descent to find the basis and the operator
+at the same time*?
+
+The root answers it by removing exactly one thing — the requirement to discover the basis —
+and changing nothing else.
+
+### 28.2 The root — `results_basis/`, 15 cells, three arms x five seeds
+
+**Stratum, inherited verbatim from 27.1 so the contrasts are commensurable with 27.8.3**:
+`CoupledOscillators`, `OURegime(theta_ou = 1.0)`, `c = 0.10`, `n = 32`, `h_fr = 25`, `H = 25`,
+8000-update budget, identity shared representation, the `mlp` rate of 27.2 (`1e-3`). One
+dataset build, one `data_hash`, shared by all fifteen runs.
+
+**One backbone, `mlp`, and the reason.** 27.9 leaves `mlp` as the column where the negative is
+carried by 5/5 seeds with the tightest SE (0.0351) and the strongest rate provenance. A
+mechanism claim is tested where the effect it must explain is best measured, not where the
+measurement is weakest. `transformer` and `ssm` are **not** run here, and no statement of this
+root extends to them.
+
+**The three arms:**
+
+| arm | `structure` | `lift` | `psi` / `pi` |
+|---|---|---|---|
+| `off` | off | n/a | none |
+| `on-learned` | on | `"mlp"` | learned jointly, exactly 27's `mlp_k` |
+| `on-oracle` | on | `"frozen"` | `psi = T`, `pi = T^-1`, **fixed, no gradient** |
+
+`T` is the similarity transform to the real Jordan form of the true generator `A` at
+`c = 0.10`, computed in closed form by the same routine that produced 26.0's `1.97e-15`, and
+written to the root as an artifact with its own hash before any run starts. `lift = "frozen"`
+is a new third level beside `"mlp"` and `"identity"`, validated by refusal like the other two
+(`_VALID_LIFT`), and requires `2r == d_z` for the same reason `"identity"` does.
+
+**`on-oracle` is an ORACLE arm and is labelled as one everywhere it appears.** `T` is derived
+from the true `A`, which no arm is otherwise allowed to see. This root therefore measures a
+**ceiling** — what the structured class achieves when the basis is given — and `on-oracle`
+is not a fair competitor to `off`. Any sentence that reports 28.3's P3 without the word
+"oracle" is a misreport of this section.
+
+**Budget parity.** `on-oracle`'s `psi`/`pi` carry zero parameters, as `"identity"`'s do.
+`match_budget` sizes the backbone against that, exactly as 25.3's width note prescribes, and
+the three per-arm parameter counts are written into this section **before** the first run,
+not after.
+
+**Cost is measured, not estimated.** One cell of `on-oracle` runs first, alone; its wall-clock
+and its seconds-per-update are recorded here; the remaining fourteen are launched only after
+that number exists. This clause is in response to a measured failure of estimation elsewhere
+in this project and is not decorative.
+
+### 28.3 The reading rule and the three predictions, written before the numbers
+
+**Primary statistic: `e_H` at `H = 25`**, in true-state coordinates on the free rollout, lower
+is better, read out of the same `gate.json` as 27.7's — one endpoint, one set of bytes, no
+second rollout. Per-cell value is the mean over five seeds with `SE = std(ddof = 1) / sqrt(5)`.
+
+**Eligibility — the 27.8.4 repair, applied prospectively.** A cell is eligible when its five
+runs produced a **valid measurement**: terminal sentinel, `gate.json` written, a readable
+`e_h` curve, no divergence. The gate's positive-control verdict (`learns` /
+`does_not_learn`) is published per cell beside the number and is **never** used to exclude a
+cell from a contrast. 27.3 tied eligibility to the positive control; 27.8.4 measured that this
+conflates "the run produced a valid measurement" with "the run passed the two-sided control"
+and sent eight of nine relations to `indeterminate`. That defect was **recorded** in 27.8.5
+rather than repaired, because it surfaced after scoring. Here it is repaired, in a section
+written before any datum exists. That ordering is the whole difference and it is why this
+clause is admissible.
+
+**Pairing.** Every contrast is within-seed: same seed, same `data_hash`, same rate, same
+budget, same stratum. Pairing by file order or group mean is forbidden.
+
+**Verdict.** As 27.3: `supported` when the paired contrast has the predicted strict sign and
+its `+-1 SE` interval excludes zero; `contradicted` on the opposite strict sign under the same
+condition; `indeterminate` otherwise. No test, no alpha, no multiplicity correction, and **no
+`p`-value will be computed or reported**. In addition, and declared now as a consequence of
+27.9: **the per-seed sign count is published for every contrast**, beside its mean and SE, so
+that no mean set by a single seed can be read as a carried effect.
+
+**The three predictions:**
+
+- **P1 — `on-learned` > `off`** (structure costs when the basis must be learned). This
+  replicates 27.8.3's `mlp` column, `+0.1451 +- 0.0351`, inside a fresh root. Expected
+  `supported`. It is a control on this root, not a discovery: if P1 fails to replicate, the
+  root's other two contrasts are uninterpretable and 28.4 says what happens then.
+- **P2 — `on-oracle` < `on-learned`** (giving the basis away helps the structured arm). This
+  is 26.0's coupling candidate stated as a measurable sign, and it is the prediction this
+  root exists to test.
+- **P3 — `on-oracle` < `off`** (with the basis given, the structured class finally beats the
+  unstructured one). This is the strong claim. It can fail while P2 holds, and 28.4 declares
+  in advance how that outcome is reported.
+
+### 28.4 What falsifies, and what each outcome is allowed to be called
+
+Written before the runs, and binding on the reading:
+
+- **P2 `contradicted` or `indeterminate`** — handing over the basis does not help.
+  **26.0's coupling candidate is refuted as the explanation of campaign A's penalty**, and
+  that sentence is published in the README head with the same prominence any positive would
+  have received. This is the outcome that costs the author the most and it is the reason the
+  clause exists.
+- **P2 `supported`, P3 `contradicted` or `indeterminate`** — the basis is a real part of the
+  penalty and not the whole of it. Reported as: *the coupling is a contributing mechanism; it
+  is not sufficient to reverse the sign.* It is **not** reported as "structure works when you
+  fix the basis". This is, on the author's own reading of 20.1, the most likely outcome, and
+  naming it in advance is what stops it from being spun on arrival.
+- **P2 and P3 both `supported`** — the diagnosis holds end to end: the class was never the
+  problem, the joint discovery of basis and operator was. Even here the claim is bounded by
+  the word **oracle**: it says the structured class is reachable when the basis is given, on
+  one system, one backbone, one stratum. It does not say structured predictors win in
+  practice, and 28.5 restates why.
+- **P1 not replicated** — the root is declared **uninterpretable** and P2/P3 are not read at
+  all. No repair, no re-run under a different rate, no rescue. The failure to replicate is
+  itself published, and 27.8.3 is left standing as measured.
+
+**This root cannot repair 27.** Whatever it returns, 27.8.1's verdicts, 27.8.3's contrast and
+27.9's bounded statement stand exactly as written. A positive here does not retroactively make
+the identity-basis negative into a positive; it explains it.
+
+### 28.5 What this root does NOT do
+
+It does not measure the pendulum. **M4 is not crossed**; 21.4 stands unmodified; no statement
+here reaches `DampedPendulum`.
+
+It does not run `transformer` or `ssm`. It does not vary `n`, `h_fr`, `c`, the rate, the
+budget or the loss. It does not touch `representation.kind`: the shared representation stays
+the identity one, so `T` acts on true-state coordinates and means what 26.0 measured it to
+mean.
+
+**No threshold moves.** `gamma = 5`, `gamma_1 = 2`, `tau_1`, `tau = 0.5`, the `1e-3` bound,
+the 8000-update budget and the loss are exactly where they were.
+
+**The ceiling is restored, and hardened.** This is the last root of this repository. A third
+lift is not available to the author on his own signature: any further root requires a written
+external objection, from a named reader who is not the author, recorded in this file with its
+date. That is a deliberately higher bar than the one this section just cleared.
+
+### 28.6 Honesty declaration
+
+- **The ceiling was lifted a second time, after being declared final.** That is recorded here
+  in the first line of 28.0 rather than softened, and the argument that distinguishes it from
+  knob-chasing is given in the same paragraph, where a reader can reject it.
+- **The author had the numbers before deciding.** Declared in 28.0. The mitigation is 28.4,
+  written before the runs, which fixes the report of every outcome including the two that
+  embarrass the decision.
+- **An eligibility rule is repaired here that was only recorded in 27.8.5.** The repair is
+  admissible solely because this section precedes its own data; the same change made to 27.3
+  today would not be, and 27.3 is left exactly where it stands.
+- **The oracle character of `on-oracle` is named three times** — in 28.2, in 28.3's P3, and in
+  28.4's best-case clause — because it is the single most likely thing to be dropped when the
+  result is summarized by someone in a hurry, including the author.
+- **A prediction expected to hold is nonetheless run as a control** (P1), and its failure
+  voids the root rather than being explained away.
+- **R4**: this section precedes every run it authorizes, including this root's first cell.

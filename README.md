@@ -1,34 +1,67 @@
 # structured-latent-dynamics
 
-> Structured latent dynamics in JEPA world models: when does explicit dynamical structure improve rollout stability, state sufficiency, and planning — at what compute cost per successful decision.
+> When does an explicit dynamical prior in a JEPA world model's latent predictor help — and when it does not, why not.
 
-**Fig 1 is retired pending phase D.** `make fig1` (`sld.viz.fig1_rollout.make_fig1`) now raises `NotImplementedError` by design: the per-run OLS readout it used to fit is a free parameter *per arm*, so a rollout-drift comparison built on it is not an equal-footing comparison across the factorial. The replacement is a shared, frozen encoder/readout built once in phase D; no figure ships before that exists — a wrong figure is worse than no figure. No `assets/fig1_rollout.png` is committed.
+**The short answer, on the one system where the prior is exactly correct: it does not help, and the reason is that the prior is a statement about a *basis*, not about coordinates.** Three measurements, in order.
 
-## Result of the oscillator cycle (2026-08-13)
+| | | |
+|---|---|---|
+| ![representable](assets/figA_d3_exactness.png) | ![the contrast](assets/fig3_factorial_effects.png) | ![the basis](assets/figD_misspecification.png) |
+| **1. The optimum is inside the class.** A planted rotation-scaling operator is recovered to `1.9e-15`, and ordinary least squares finds it from data to `2.11e-08`. The theory is not the failure. | **2. Yet the structured arm loses.** Paired within backbone — same seed, dataset, rate and budget, the one confound-free contrast — structure *costs* `e_H`: `+0.1451 ± 0.0351` on `mlp` (5/5 seeds), `+0.2484 ± 0.0670` on `transformer` (5/5 seeds). | **3. Because the declared axis moved one of two misspecifications.** Where the spectral axis reads `δ(c) = 0.000` — "the prior is exact" — the true generator still sits `1.0654` from the class *in the identity basis*: **36 % of ‖A‖**. In its own real Jordan basis: `1.97e-15`. |
 
-**Under the declared regime**, and stated with that scope because that is the scope of what
-was measured: on `CoupledOscillators` — the one system where the rotation-scaling prior is
-*exactly correct* — explicit structure in the latent predictor **does not improve** rollout
-stability. It costs, at every sample size (n = 8, 32, 256), at every level of prior
-misspecification (`delta` from 0.000 to 1.029), and at both training horizons measured
-(`h_fr` = 5 and 25). 164 cells across six self-sufficient roots; `PROTOCOL.md` sections 23
-to 26 carry the pre-registrations, the readings and every confound.
+Gradient descent lands ~200× from an optimum that least squares reaches, and the isolating
+ingredient is the **25-step closed rollout**, not the one-step loss — established by
+elimination, not asserted (`PROTOCOL.md` 20.1). So the structured arm was never only fitting an
+operator: it was being asked to discover a change of basis and the operator at once, from a
+loss folded through 25 steps.
 
-What "under the declared regime" covers, and what it does not:
+**The thesis this leaves standing:** a structural prior of the Koopman family is a claim about
+a basis. Imposing the family in an arbitrary basis is not imposing the prior.
 
-- **Measured robust**: the sign of the effect is unchanged between `h_fr = 5` and `h_fr = 25`
-  (section 25.8), so it is not an artifact of the training horizon within that pair.
-- **Still conditional**: one system, one shared-representation choice (identity), one rate
-  list whose argmin sat at its edge, one optimizer. Every claim here inherits those.
-- **Not a claim about structured world models in general.** `PROTOCOL.md` 25.4 records a
-  published result using the *same* parametrisation and reporting a gain, under a jointly
-  learned representation. Section 26.0 measures the difference that most plausibly separates
-  the two settings and names it as a candidate, not as established.
+## Scope — what is measured, and what is not claimed
 
-The negative results are published as measured, and two were corrected by their own figures
-after the fact rather than after the reading (sections 24 and 26.1) — the corrections are on
-the record beside the measurements.
+Every sentence above holds under: `CoupledOscillators`, `OURegime`, identity shared
+representation, one rate list, one optimizer, `n ∈ {8, 32, 256}`, `δ(c) ∈ [0.000, 1.029]`,
+`h_fr ∈ {5, 25}`. It is 194 cells across seven self-sufficient roots; `PROTOCOL.md` 23–28
+carry every pre-registration, reading and confound.
 
+- **Measured robust**: the sign is unchanged between `h_fr = 5` and `25` (25.8), across all
+  three sample sizes and all four misspecification levels (23.5), and across two backbones
+  each carried by 5/5 seeds (27.8.3, 27.9).
+- **Measured, and explicitly *not* a third confirmation**: the `ssm` column's contrast
+  (`+0.2836 ± 0.2379`) is set by a single seed against a median of `+0.0016`, in a backbone
+  whose both arms fail the arm-neutral lower bound. 27.6 declared that risk before the runs;
+  27.9 reports it rather than counting it.
+- **Not a claim about structured world models in general.** 25.4 records a published result
+  using the *same* parametrisation and reporting a gain, under a jointly learned
+  representation. 26.0 measures the difference that most plausibly separates the two settings
+  and names it a candidate — not as established.
+- **Not a claim about the pendulum.** M4 is not crossed; 21.4 stands; seven of eight
+  positive-control cells on `DampedPendulum` do not pass and nothing here reaches that system.
+
+## The one experiment this diagnosis demands, declared and open
+
+If the penalty is the *joint* discovery of basis and operator, then handing the basis over
+should remove it. `PROTOCOL.md` **28** pre-registers that test — `off` vs `on-learned` vs an
+**oracle** arm whose `ψ` is frozen at the closed-form real Jordan transform — with its three
+predicted signs, its falsification clause, and a commitment written **before** the runs to
+publish a refutation with the same prominence as a confirmation. Section 28.0 states in its
+first line that this lifts a ceiling 27.5 had declared final, and gives the argument a reader
+can reject.
+
+**Status: declared, not yet run. No result from it is reported anywhere in this repository.**
+
+## How this repository is meant to be read
+
+The pre-registrations are load-bearing and the corrections are the point. Two conclusions were
+withdrawn after measurement (22.0, 25.3's branch 1), two figures corrected their own readings
+(24, 26.1), and one eligibility rule was found defective *after* scoring and left standing
+rather than repaired (27.8.5) — because a rule moved with the numbers in hand is not a rule.
+`REGLES.md` R4 (the contract precedes the run) and the correction-over-honesty hierarchy are
+what the section numbering exists to enforce.
+
+A withdrawn result is not a falsified one. Both are on the record, dated, beside the
+measurement they revise.
 
 ## Motivation
 
@@ -45,7 +78,7 @@ make setup          # uv sync + editable install
 make test           # full test suite
 make smoke          # end-to-end factorial smoke (< 5 min)
 uv run sld-factorial --config src/sld/experiments/configs/pendulum_core_partial.yaml   # the 3 executed OFF arms of the 3x2 factorial (30 runs, ~17 min)
-make fig1 fig2      # fig1: raises NotImplementedError (retired pending phase D); fig2: secondary regression display only
+make figures        # fig1 (e_h curves), fig2 (VPT per seed), fig3 (paired ON-OFF contrast) -- PROTOCOL 27.4
 ```
 
 All **6** `backbone` x `structure` pairs now resolve to a predictor family: `(mlp,on)` → `mlp_k`, `(transformer,on)` → `transformer_k`, `(ssm,on)` → `ssm_k`, the three structured arms sharing one transition (`src/sld/predictors/structured.py`, `PROTOCOL.md` section 13.1). The registry holds **seven** families for those six cells: `KoopmanSSMPredictor` stays constructible and loadable so every published artifact keeps its constructor, and is never a cell of the factorial — an arm resolving to it is refused before any run.
@@ -104,7 +137,7 @@ The failed cell — `action_conditioned` / `min_ssm` / seed 4, non-finite traini
 
 **ON half: not run.** It waits on the dose-response study declared in `PROTOCOL.md` section 11.6. The four ON runs currently on disk are protocol-violation traces, kept and marked, never core evidence (section 11.5).
 
-Fig. 2 lands here once the replacement study completes; nothing is reported before it does. Fig. 1 is a separate, more fundamental blocker (see the status note at the top of this README): it is retired pending phase D's shared, frozen readout regardless of how the dose-response study resolves.
+Fig. 2 lands here once the replacement study completes; nothing is reported before it does. Fig. 1 was a separate, more fundamental blocker at the time this section was written — retired pending a shared, frozen readout. **That blocker is since resolved and the sentence is left standing as written**: `assets/fig1_rollout.png` now ships from the oscillator roots under the identity shared representation (`PROTOCOL.md` 19.1, 27.4), which is the frozen readout this paragraph was waiting for. Nothing about the retired μ_J campaign below is revised by it.
 
 ## What didn't work
 
