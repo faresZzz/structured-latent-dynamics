@@ -1,0 +1,113 @@
+# THE BASIS ROOT -- PROTOCOL.md section 28 (Amendment 18) declares this file in
+# full BEFORE its first run (R4).
+#
+# The question, and it is NOT the question the seven roots before it answered.
+# Those asked: in the identity basis, does the structured class beat the
+# unstructured one? Answered, negatively, at every n, every delta(c), both h_fr
+# and two backbones. 26.0 then measured WHY that question was never the whole
+# one: where the declared axis reads delta(c) = 0.000 -- "the prior is exact" --
+# the true generator still sits 1.0654 from the class IN THE IDENTITY BASIS,
+# 36 % of ||A||_F. The prior is exact in a basis, and that basis is not the
+# identity. 26.0 named the experiment and declined to run it under 25.5's
+# ceiling; 28.0 lifts the ceiling for it, once, with the argument in its first
+# line.
+#
+# So: is the penalty a property of the structured CLASS, or a property of asking
+# gradient descent to find the basis AND the operator at the same time?
+#
+# THREE ARMS, one backbone, one stratum. The third differs from the second by
+# `lift: frozen` and by NOTHING else -- same rate, same dataset, same seed, same
+# budget, same width, same psi_hidden. Two arms sharing (backbone, structure)
+# is the pattern osc_decomp.yaml already runs: run identity is config_hash +
+# data_hash, and `lift` moves config_hash, so the cells never collide.
+#
+# `on-oracle` IS AN ORACLE ARM. T is derived from the true generator, which no
+# other arm may see. This root measures a CEILING -- what the class reaches when
+# the basis is given -- and on-oracle is NOT a fair competitor to off. 28.4
+# binds the reading of all four outcomes, written before the first cell.
+#
+# BUDGET MATCHING IS SUSPENDED, not applied (28.2, corrected before any run).
+# psi/pi carry zero TRAINABLE parameters, so budget.py freezes the backbone at
+# on-learned's width exactly as 23.2 does for nolift. Widening it to compensate
+# would make the oracle arm differ in TWO ways and attribute nothing.
+#
+# N_expected = 1 stratum x 3 arms x 5 seeds = 15.
+exp_name: basis_root
+
+datasets:
+  c010_n32:
+    system: {name: CoupledOscillators, params: {}}   # c = 0.1, delta(c) = 0.000
+    regime: {name: OURegime, params: {theta_ou: 1.0}}
+    obs: null
+    n_episodes: 32
+    T: 120
+    dt: 0.05
+    seed: 0
+
+base:
+  d_x: 4
+  d_z: 4
+  d_u: 1
+  encoder_hidden: []
+  target_params: 10000
+  epochs: 8000
+  h_fr: 25
+  grad_clip: 100
+  step_subsample: 1.0
+  results_root: results_basis
+
+representation:
+  # identity: T then acts on TRUE-STATE coordinates, which is the only thing
+  # that makes it mean what 26.0 measured it to mean (28.5).
+  kind: identity
+  d_z: 4
+
+arms:
+  # lr = 1e-3 on all three: 23.3's argmin for mlp, inherited unchanged. 23.5(2)
+  # forbids a second sweep, so the oracle arm inherits on-learned's rate rather
+  # than selecting its own -- stated because it is a real asymmetry.
+
+  # off
+  - backbone: mlp
+    structure: 'off'
+    overrides: {mu_j: 0.0, lr: 0.001}
+
+  # on-learned -- psi/pi are MLPs. Identical to 27's mlp_k arm, re-run here
+  # rather than read out of results_primary_factorial/ (14.6 self-sufficiency).
+  - backbone: mlp
+    structure: 'on'
+    overrides: {mu_j: 0.0, lr: 0.001, delta: 0.05, radius: bounded, r: 2}
+
+  # on-oracle -- psi = T, pi = T^-1, frozen, gradient-free.
+  #
+  # T IS FROZEN AS A LITERAL, NOT RECOMPUTED AT RUN TIME, and that is a
+  # decision with a reason: numpy's eig does not guarantee eigenvector SCALING
+  # or ordering across LAPACK builds, so recomputing T on another machine would
+  # give a different matrix realising the same basis. The block form is
+  # invariant under per-block rescaling; the LATENT SCALE is not. Freezing the
+  # literal makes the run byte-reproducible and makes the normalisation an
+  # auditable choice instead of a platform artifact.
+  #
+  # Verified properties of this matrix, recomputed in tests/test_basis_root.py
+  # rather than trusted here:
+  #   T A T^-1 block-diagonal rotation-scaling to 1.3e-15
+  #   blocks (-0.05, +-1.5187) and (-0.05, +-1.0902)   -- 26.0's two pairs
+  #   singular values [1.1966, 1.3494, 1.4894, 1.8208], cond = 1.5216
+  #   E||T z|| / E||z|| = 1.476 for z ~ N(0, I)        -- the scale it imposes
+  #   sha256 of its float64 bytes = e026f402194929b09fdb6c7c88fe801e5d945131daa537947cd13ac7b8736be5
+  - backbone: mlp
+    structure: 'on'
+    overrides:
+      mu_j: 0.0
+      lr: 0.001
+      delta: 0.05
+      radius: bounded
+      r: 2
+      lift: frozen
+      psi_matrix:
+      - [1.1904593427464641e-16, 2.2580015396627155e-16, -0.6293606894554686, 1.0183269867220146]
+      - [0.9568600283595341, -1.5482320483619134, 0.020720073318874894, -0.03352578287932911]
+      - [2.5583209179248577e-16, -1.2095277550369865e-16, 1.1537668091260325, 0.7130671031313999]
+      - [-1.260454339376832, -0.7790036230021764, -0.05291655436826805, -0.03270422916712154]
+
+seeds: [0, 1, 2, 3, 4]

@@ -89,7 +89,13 @@ _REQUIRED_KEYS = ("exp_name", "seed", "family", "d_x", "d_z", "d_u")
 # every existing structured run's config and move all 134 config_hashes. Absent
 # means "mlp", decided at construction in budget._kwargs_for, exactly as
 # ``radius`` already works.
-_STRUCTURED_KEYS = frozenset({"delta", "r", "radius", "lift"})
+# `psi_matrix` (PROTOCOL 28.2) joins them under the SAME discipline and for the
+# same reason: it is an allow-list entry only. It is NOT added to _DEFAULTS and
+# NOT resolved before hashing, so every config that does not name it hashes
+# exactly as before and the 134 existing config_hashes do not move. Absent means
+# "no frozen basis"; present is legal only with lift="frozen", which
+# structured.py refuses to relax.
+_STRUCTURED_KEYS = frozenset({"delta", "r", "radius", "lift", "psi_matrix"})
 _FAMILY_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "mlp": frozenset(),
     "transformer": frozenset({"n_heads", "max_len"}),

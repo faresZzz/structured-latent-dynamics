@@ -4598,6 +4598,24 @@ receives under 23.2, for the same stated reason.
 The three realised counts — total and trainable, per arm — are written into this section
 **before** the first run, not after.
 
+**The three realised counts (added 2026-08-17, before any run — the sentence above, kept).**
+Measured by construction and pinned by `tests/test_basis_root.py`
+(`test_the_frozen_lift_oracle_arm_inherits_on_learned_s_budget_exactly`,
+`test_the_budget_tolerance_exempts_the_frozen_arm_by_name_not_by_widening`):
+
+- `off` (`mlp`): total = trainable = **10074** (+0.7% against `target_params = 10000`, inside
+  the ±5% contract that applies to matched arms).
+- `on-learned` (`mlp_k`): `width = 85`, `psi_hidden = (87,)`, total = trainable = **9997**
+  (−0.03%).
+- `on-oracle` (`mlp_k`, `lift="frozen"`): `width = 85` and `psi_hidden = (87,)` inherited from
+  `on-learned` exactly; total **8455**, trainable **8423**. The 32 non-trainable entries are
+  `2 * d_z^2` — precisely `T` and `T^-1`, nothing else. The trainable gap to `on-learned` is
+  **1574**, exactly the learned `psi`/`pi` pair, which is the quantity this root exists to
+  attribute. The arm sits 15.8% below target in trainable parameters and raises nothing: the
+  ±5% contract exempts it **by name** (`budget.py`'s `zero_param_lift`), not by a widened
+  tolerance — an ordinary arm that misses its target still raises, and the suite pins that
+  contrast.
+
 **Cost is measured, not estimated.** One cell of `on-oracle` runs first, alone; its wall-clock
 and its seconds-per-update are recorded here; the remaining fourteen are launched only after
 that number exists. This clause is in response to a measured failure of estimation elsewhere
