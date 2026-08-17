@@ -175,6 +175,16 @@ avec les mêmes clés quelle que soit la famille de predictor :
   (cf. `OBJECTIFS.md` §3). Ce contrat est ce qui permet à `viz/` de lire
   `results/` sans connaître la famille de predictor — ne pas le casser sans
   migrer toutes les familles en même temps.
+- **Note datée 2026-08-17 — racines factorielles.** Pour les racines orchestrées
+  par `sld-factorial` (`results_gate_d/`, les racines oscillateurs,
+  `results_primary_factorial/`, `results_basis/`), `audit.json` peut être vide
+  et `figs/` rester vide : l'identité et le verdict par run vivent dans
+  `config.yaml`, `metrics.csv`, `ckpt.pt`, `run_complete.json` et `gate.json`,
+  et les figures sont produites au niveau de la **racine** (`viz/results.py` →
+  `assets/` avec sidecars CSV + `.sha256`), pas par run. Produire N audits
+  identiques par racine serait de la redondance ; les remplir rétroactivement
+  fabriquerait des artefacts post-hoc. Le contrat ci-dessus reste inchangé pour
+  les runs unitaires hors orchestrateur.
 
 ---
 
@@ -480,6 +490,10 @@ python3 /Users/captain/Documents/Projects/_publication/validate_publication.py \
 - Notebook : JSON valide, outputs nettoyés, `execution_count: null`
   (`scripts/check_notebooks.py`), pas de hack `sys.path`, parité package
   vérifiée (§8, niveau 3).
+- **(Adopté 2026-08-17.)** Toute session qui produit un commit met à jour
+  `RESUME_SESSION.md` **dans la même session**. Contrôle d'ouverture : date du
+  dernier commit contre date d'en-tête du document — un écart se corrige avant
+  de commencer quoi que ce soit d'autre.
 
 ---
 
