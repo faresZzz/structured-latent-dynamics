@@ -314,8 +314,12 @@ def _kwargs_for(family: str, w: int, d_z: int, d_u: int, fixed: dict) -> dict:
             # "free" (alpha unbounded) or "bounded" (alpha = logsigmoid(rho)/Delta,
             # so the discrete radius is sigmoid(rho) in (0,1)) -- PROTOCOL section 23
             radius=fixed.get("radius", "free"),
-            # "mlp" (psi/pi are MLPs) or "identity" (both are nn.Identity, so
-            # the structured transition acts directly on z) -- PROTOCOL 25.3
+            # "mlp" (psi/pi are MLPs), "identity" (both nn.Identity, so the
+            # structured transition acts directly on z -- PROTOCOL 25.3), or
+            # "frozen" (psi = T, pi = T^-1, fixed and gradient-free: the basis
+            # is GIVEN and only the operator is learned -- PROTOCOL 28.2).
+            # "frozen" additionally requires psi_matrix=... and r = d_z/2, both
+            # refused by the constructor when absent rather than defaulted.
             lift=fixed.get("lift", "mlp"),
             # r defaults to d_z HERE, not to the r=2 default the three
             # constructors carry in structured.py -- deliberately: this is
@@ -438,8 +442,19 @@ def match_budget(family: str, d_z: int, d_u: int, target_params: int = 10_000, *
     # comes out 15.7% smaller overall (8423 against 9997 at d_z=4, r=2,
     # target 10 000). That difference IS the lift pair, which is the whole
     # quantity this root exists to attribute.
-    identity_lift = fixed.get("lift") == "identity"
-    search_fixed = {**fixed, "lift": "mlp"} if identity_lift else fixed
+    # PROTOCOL 28.2 extends this to lift="frozen" for exactly the same reason
+    # and with the same consequence: psi/pi carry ZERO TRAINABLE parameters, so
+    # both knobs below lose their effect and letting the matcher widen the
+    # backbone to compensate would make the oracle arm differ from `on-learned`
+    # in TWO ways -- width AND basis -- and attribute nothing. The oracle arm
+    # therefore inherits `on-learned`'s width and psi_hidden EXACTLY and comes
+    # out smaller by precisely the learned lift pair, which IS the quantity
+    # 28's root exists to attribute. `psi_matrix` is dropped from the search
+    # because the search builds with lift="mlp", which refuses it.
+    zero_param_lift = fixed.get("lift") in ("identity", "frozen")
+    search_fixed = {k: v for k, v in fixed.items() if k != "psi_matrix"} if zero_param_lift else fixed
+    if zero_param_lift:
+        search_fixed = {**search_fixed, "lift": "mlp"}
 
     def build_at(w: int, extra: dict):
         return _FAMILY_CONSTRUCTORS[family](**_kwargs_for(family, w, d_z, d_u, {**search_fixed, **extra}))
@@ -477,13 +492,14 @@ def match_budget(family: str, d_z: int, d_u: int, target_params: int = 10_000, *
             trim = {"psi_hidden": (p,), "pi_hidden": (p,)}
         kwargs = _kwargs_for(family, w, d_z, d_u, {**fixed, **trim})
         achieved = count_params(
-            _FAMILY_CONSTRUCTORS[family](**kwargs) if identity_lift else build_at(w, trim)
+            _FAMILY_CONSTRUCTORS[family](**kwargs) if zero_param_lift else build_at(w, trim)
         )
 
     # the +/-5% contract is a statement about a matched budget; the nolift arm
-    # is declared NOT matched (23.2), so it is exempt BY NAME rather than by a
-    # widened tolerance, and its realised count is returned for publication.
-    rel_err = 0.0 if identity_lift else abs(achieved - target_params) / target_params
+    # (23.2) and 28.2's frozen-basis oracle arm are both declared NOT matched,
+    # so they are exempt BY NAME rather than by a widened tolerance, and their
+    # realised counts are returned for publication.
+    rel_err = 0.0 if zero_param_lift else abs(achieved - target_params) / target_params
     if rel_err > 0.05:
         raise ValueError(
             f"match_budget: could not hit target_params={target_params} for family={family!r} "

@@ -110,7 +110,12 @@ def test_an_unknown_lift_is_refused_rather_than_defaulted(builder):
     campaign on the wrong arm and every gate would be green."""
     with pytest.raises(ValueError, match="lift"):
         builder(**BASE, lift="none")
-    assert set(_VALID_LIFT) == {"mlp", "identity"}
+    # CLOSED SET, on purpose, and it must stay closed: a fourth level added by
+    # accident has to fail HERE rather than run a campaign on an arm nobody
+    # declared. `>=` or `in` would defeat the whole assertion. Updating this
+    # line is therefore a deliberate act, done in the same commit that adds the
+    # level -- "frozen" is PROTOCOL 28.2's oracle lift and was added that way.
+    assert set(_VALID_LIFT) == {"mlp", "identity", "frozen"}
 
 
 def test_a_silent_fallback_to_an_mlp_lift_would_be_caught():

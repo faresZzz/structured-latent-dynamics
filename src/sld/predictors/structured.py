@@ -90,10 +90,23 @@ from sld.predictors.min_ssm import SelectiveSSMContextBackbone
 from sld.predictors.mlp import MLPContextBackbone
 from sld.predictors.transformer import CausalTransformerContextBackbone
 
-# the two levels of the lift parametrisation (PROTOCOL section 25.3). Kept
-# beside _VALID_RADIUS and validated the same way: a typo must be a refusal,
-# never a silent fallback to the default.
-_VALID_LIFT = ("mlp", "identity")
+# the three levels of the lift parametrisation (PROTOCOL 25.3, then 28.2 for
+# "frozen"). Kept beside _VALID_RADIUS and validated the same way: a typo must
+# be a refusal, never a silent fallback to the default.
+#
+#   "mlp"      -- psi/pi are learned MLPs. The arm must DISCOVER the basis and
+#                 the operator at once, which is the joint problem 26.0 named.
+#   "identity" -- psi/pi are nn.Identity: the arm is pinned to the identity
+#                 basis and faces 26.0's 1.0654 misspecification (25.3).
+#   "frozen"   -- psi = T, pi = T^-1, fixed linear maps with NO gradient. The
+#                 basis is GIVEN and only the operator is learned. 28.2's
+#                 oracle arm, and the one contrast that separates "the class is
+#                 wrong" from "the joint discovery is what fails".
+_VALID_LIFT = ("mlp", "identity", "frozen")
+
+# a basis whose inverse cannot be trusted is a silent misspecification, which
+# is the exact failure 28.2's oracle arm exists to remove. Refuse instead.
+_MAX_BASIS_COND = 1e8
 
 # the two levels of the radius parametrisation (PROTOCOL section 23)
 _VALID_RADIUS: tuple[str, ...] = ("free", "bounded")
@@ -162,6 +175,7 @@ class StructuredPredictor(PredictorModule):
         pi_hidden: tuple[int, ...] = (64,),
         radius: str = "free",
         lift: str = "mlp",
+        psi_matrix: Tensor | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
@@ -171,11 +185,23 @@ class StructuredPredictor(PredictorModule):
             raise ValueError(f"radius must be one of {_VALID_RADIUS}, got {radius!r}")
         if lift not in _VALID_LIFT:
             raise ValueError(f"lift must be one of {_VALID_LIFT}, got {lift!r}")
-        if lift == "identity" and 2 * r != d_z:
+        if lift in ("identity", "frozen") and 2 * r != d_z:
             raise ValueError(
-                f"lift='identity' requires 2r == d_z, got 2*{r} != {d_z}. The identity "
-                "lift is not a projection: it can only be the identity when the lifted "
-                "state and the latent have the SAME dimension."
+                f"lift={lift!r} requires 2r == d_z, got 2*{r} != {d_z}. Neither the "
+                "identity lift nor a frozen change of basis is a projection: both can "
+                "only exist when the lifted state and the latent have the SAME dimension."
+            )
+        if lift == "frozen" and psi_matrix is None:
+            raise ValueError(
+                "lift='frozen' requires psi_matrix=... -- the change of basis is the "
+                "whole content of this arm (PROTOCOL 28.2) and there is no default "
+                "basis that would not be a silent choice."
+            )
+        if lift != "frozen" and psi_matrix is not None:
+            raise ValueError(
+                f"psi_matrix=... is only meaningful with lift='frozen', got lift={lift!r}. "
+                "Accepting and ignoring it would let a config believe it froze a basis "
+                "when it did not."
             )
         delta_f = float(delta)
         # NaN fails every comparison, so `<= 0` alone would admit NaN and +inf
@@ -189,7 +215,38 @@ class StructuredPredictor(PredictorModule):
         self.delta = delta_f
         self.radius = radius
         self.lift_mode = lift
-        if lift == "identity":
+        if lift == "frozen":
+            # PROTOCOL 28.2. psi = T and pi = T^-1 as fixed linear maps with no
+            # bias and no gradient: the arm is HANDED the basis and learns only
+            # the operator. bias=False matters -- an affine psi would not be a
+            # change of basis and T A T^-1 would stop meaning what 26.0
+            # measured.
+            t_mat = torch.as_tensor(psi_matrix, dtype=dtype)
+            if t_mat.shape != (self.d_h, d_z):
+                raise ValueError(
+                    f"psi_matrix must have shape {(self.d_h, d_z)}, got {tuple(t_mat.shape)}"
+                )
+            if not bool(torch.isfinite(t_mat).all()):
+                raise ValueError("psi_matrix contains non-finite entries")
+            cond = float(torch.linalg.cond(t_mat.to(torch.float64)))
+            if not math.isfinite(cond) or cond > _MAX_BASIS_COND:
+                raise ValueError(
+                    f"psi_matrix is numerically singular (cond = {cond:.3e} > "
+                    f"{_MAX_BASIS_COND:.0e}); pi = T^-1 would not invert psi and the "
+                    "arm would carry a silent misspecification instead of a given basis."
+                )
+            t_inv = torch.linalg.inv(t_mat.to(torch.float64)).to(dtype)
+            self.psi = nn.Linear(d_z, self.d_h, bias=False, dtype=dtype)
+            self.pi = nn.Linear(self.d_h, d_z, bias=False, dtype=dtype)
+            with torch.no_grad():
+                self.psi.weight.copy_(t_mat)
+                self.pi.weight.copy_(t_inv)
+            # zero TRAINABLE parameters, exactly like the identity lift; the
+            # 2*d_z^2 entries of T and T^-1 are non-trainable and are reported
+            # as such (28.2's suspended budget matching).
+            self.psi.requires_grad_(False)
+            self.pi.requires_grad_(False)
+        elif lift == "identity":
             # nn.Identity carries no parameters, so this arm's psi/pi
             # contribute exactly zero to the budget -- see PROTOCOL 25.3's
             # width note: match_budget will size the backbone against that.
@@ -340,11 +397,12 @@ class MLPKPredictor(StructuredPredictor):
         pi_hidden: tuple[int, ...] = (64,),
         radius: str = "free",
         lift: str = "mlp",
+        psi_matrix: Tensor | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__(
             MLPContextBackbone(2 * r, width, dtype=dtype),
-            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, dtype,
+            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, psi_matrix, dtype,
         )
 
 
@@ -366,6 +424,7 @@ class TransformerKPredictor(StructuredPredictor):
         pi_hidden: tuple[int, ...] = (64,),
         radius: str = "free",
         lift: str = "mlp",
+        psi_matrix: Tensor | None = None,
         dtype: torch.dtype = torch.float32,
         *,
         n_heads: int = 2,
@@ -377,7 +436,7 @@ class TransformerKPredictor(StructuredPredictor):
                 2 * r, d_u, width,
                 n_heads=n_heads, n_layers=n_layers, max_len=max_len, dtype=dtype,
             ),
-            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, dtype,
+            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, psi_matrix, dtype,
         )
 
 
@@ -399,6 +458,7 @@ class SSMKPredictor(StructuredPredictor):
         pi_hidden: tuple[int, ...] = (64,),
         radius: str = "free",
         lift: str = "mlp",
+        psi_matrix: Tensor | None = None,
         dtype: torch.dtype = torch.float32,
         *,
         delta_min: float = 1e-4,
@@ -408,5 +468,5 @@ class SSMKPredictor(StructuredPredictor):
             SelectiveSSMContextBackbone(
                 2 * r, d_u, width, delta_min=delta_min, delta_max=delta_max, dtype=dtype
             ),
-            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, dtype,
+            d_z, r, d_u, delta, psi_hidden, pi_hidden, radius, lift, psi_matrix, dtype,
         )

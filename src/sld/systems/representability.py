@@ -124,6 +124,44 @@ def real_modal_distance(A: np.ndarray) -> float:
     return representability_distance(M)[0]
 
 
+def real_modal_basis(A: np.ndarray) -> np.ndarray:
+    """``T`` such that ``T @ A @ inv(T)`` is block-diagonal rotation-scaling.
+
+    This is the change of basis 26.0 measures and 28.2 freezes into the oracle
+    arm's ``psi``: with ``h = T x`` the generator the structured head sees is
+    exactly ``T A T^-1``, whose distance to the rotation-scaling class is
+    26.0's ``1.97e-15`` instead of the identity basis's ``1.0654``.
+
+    Returns ``T = P^-1``, where ``P``'s columns are the real and imaginary
+    parts of one eigenvector per conjugate pair -- the SAME ``P``
+    ``real_modal_distance`` builds, so the two functions cannot disagree about
+    which basis is meant.
+
+    Raises ``ValueError`` if any eigenvalue is real: no real basis puts such an
+    ``A`` in block rotation-scaling form (26.0), and quietly returning a
+    best-effort basis would hand the oracle arm a silent misspecification --
+    exactly the failure 26.0 measured in the identity basis.
+    """
+    A = np.asarray(A, dtype=float)
+    lam, vec = np.linalg.eig(A)
+    if not np.all(np.abs(lam.imag) > 1e-12):
+        raise ValueError(
+            "real_modal_basis requires every eigenvalue to be complex; got "
+            f"{lam!r}. No real change of basis makes this A block-diagonal "
+            "rotation-scaling (PROTOCOL 26.0)."
+        )
+    cols: list[np.ndarray] = []
+    used: set[int] = set()
+    for i in range(len(lam)):
+        if i in used:
+            continue
+        j = int(np.argmin([abs(lam[k] - np.conj(lam[i])) if k != i else np.inf for k in range(len(lam))]))
+        used |= {i, j}
+        cols += [vec[:, i].real, vec[:, i].imag]
+    P = np.column_stack(cols)
+    return np.linalg.inv(P)
+
+
 def demo() -> None:
     """Self-check: the two counterexamples PROTOCOL 26.0 names, by hand."""
     from sld.systems.coupled_oscillators import CoupledOscillators

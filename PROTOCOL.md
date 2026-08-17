@@ -4419,8 +4419,18 @@ root extends to them.
 | `on-oracle` | on | `"frozen"` | `psi = T`, `pi = T^-1`, **fixed, no gradient** |
 
 `T` is the similarity transform to the real Jordan form of the true generator `A` at
-`c = 0.10`, computed in closed form by the same routine that produced 26.0's `1.97e-15`, and
-written to the root as an artifact with its own hash before any run starts. `lift = "frozen"`
+`c = 0.10`, computed in closed form by `real_modal_basis`, and written to the root as an
+artifact with its own hash before any run starts. `T = P^-1` where `P` is the SAME matrix
+`real_modal_distance` builds, so the two routines cannot disagree about which basis is meant.
+
+**A numerical discrepancy, named here rather than left to be discovered.** `real_modal_basis`
+reaches the block form by inverting `P`; 26.0's `real_modal_distance` reached it by solving
+`P x = A P`. The two agree to machine precision but not bit-for-bit: the residual distance is
+**1.41e-15** through the inversion path against the **1.97e-15** 26.0 published through the
+solve path. Both are zero at float64 and neither is a measurement — the citable statement
+remains "exactly zero in the best basis, against 1.0654 in the identity basis". No threshold
+depends on which of the two is quoted, and `tests/test_frozen_lift.py` pins both under
+`< 1e-12` rather than pinning either value. `lift = "frozen"`
 is a new third level beside `"mlp"` and `"identity"`, validated by refusal like the other two
 (`_VALID_LIFT`), and requires `2r == d_z` for the same reason `"identity"` does.
 
