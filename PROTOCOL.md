@@ -29,6 +29,91 @@ where exploratory runs get logged — it is not a second, different rule.
 
 ---
 
+---
+
+## Reading map
+
+**This file is an audit trail, not a paper.** It is meant to be *queried*, not read
+front to back. For the study itself — question, design, results, scope, limits — read
+[`FINDINGS.md`](FINDINGS.md); for the result in ninety seconds, [`README.md`](README.md).
+Everything below exists so that every number in those two documents can be traced to the
+declaration that preceded it.
+
+### If you want to check one thing
+
+| you want | go to |
+|---|---|
+| whether structure helps, and by how much | **27.8.3** (paired contrast), qualified by **27.9** (what it covers, where it stops) |
+| whether the prior is even representable | **20** (planted `1.9e-15`, OLS `2.11e-08`, gradient ~200× away) |
+| why gradient descent does not reach it | **20.1** (four candidates eliminated; the 25-step closed rollout is the one that survives) |
+| the diagnosis — basis versus coordinates | **26.0** (identity basis `1.0654` = 36 % of `‖A‖`; real Jordan basis `1.97e-15`) |
+| how far the results generalize, and where they stop | **25.6** (scope rule), **21.4** (the pendulum boundary, never crossed), **27.8.5** and **28.5** (per-root scope) |
+| the confounds, named by the author | **27.2** (rate ≠ backbone), **23.2** (why budget matching is suspended, not applied) |
+| what was withdrawn after measurement | **22** (withdrawal of 21.1), **26.0** (25.3's branch 1 refuted structurally), **11** (withdrawal of P1(b)) |
+| a defect found in a rule *after* scoring, and left standing | **27.8.4** and **27.8.5** |
+| what has been declared but never run | **28** (the oracle-basis root) |
+| how a run's identity is fixed | **12** (endpoint conventions), **19.4** (the gate artifact) |
+
+### The four eras of this file
+
+Sections are chronological and never rewritten, so the file has strata. Knowing which
+stratum you are in saves most of the confusion.
+
+1. **Sections 1–9 — the original contract.** Budgets, seeds, TF/FR schedule, thresholds.
+   Written before anything ran. Sections 6, 7 and 8 were reserved for waves that the
+   project never reached and are *open placeholders*, not omissions.
+2. **Sections 10–12 — the μ_J era, and its failure.** Structure was first encoded as a
+   calibrated Jacobian penalty. The calibration failed its own cross-family
+   comparability check; **11** withdraws the prediction that depended on it. This era is
+   retired and its material is secondary/regression only — but it is kept, because the
+   failure is the most instructive thing in it.
+3. **Sections 13–22 — the pendulum era.** The structure axis becomes architectural
+   (**13**), the phase-D gate is built and repaired (**14–17**), the ssm family is
+   documented as a negative and then rescued by a physically bounded latent step
+   (**18**, **24**), D3 proves the path (**20**) and D4's reading is withdrawn (**21**,
+   **22**). **21.4** marks the boundary — seven of eight positive-control cells fail on
+   `DampedPendulum` — and no later section crosses it.
+4. **Sections 23–28 — the oscillator era, where the result lives.** Six self-sufficient
+   roots (**23**, **25**), their two dated precisions (**26**), the primary factorial
+   across backbones (**27**), and the basis root, declared and unrun (**28**).
+
+### The eighteen amendments, one line each
+
+| § | amendment | what it changed |
+|---|---|---|
+| 10 | 1 | repaired the μ_J calibration after its first version proved non-comparable across families |
+| 11 | 2 | **withdrew** prediction P1(b); the calibrated margin was never validated as physically comparable |
+| 12 | 3 | fixed endpoint conventions and introduced the two-sided positive-control gate |
+| 13 | 4 | made the structure axis **architectural** — a predictor family, never a numeric penalty |
+| 14 | 5 | fixed the phase-D gate budget and its execution contract |
+| 15 | 6 | repaired the phase-D gate and declared the second probe |
+| 16 | 7 | retained the probe's entry values; declared probe round 3 |
+| 17 | 8 | added the gradient guard and re-ran round 3's ssm cells clipped |
+| 18 | 9 | narrowed the grid to two backbones; documented the ssm family as a negative |
+| 19 | 10 | fixed D3's measurement coordinates and made the spectral and action bounds well-posed |
+| 20 | 11 | D3's verdict: the path is proven, exact identification is not reached |
+| 21 | 12 | D4's reading: an upper bound that is not arm-neutral, and one declared re-selection |
+| 22 | 13 | **withdrew** 21.1's conclusion |
+| 23 | 14 | opened the oscillator campaigns: three-level structure factor, sample-size axis, closed-form misspecification axis |
+| 24 | 15 | the ssm family trains under a physically bounded latent step |
+| 25 | 16 | declared two roots together: the training-horizon regime, then the decomposition |
+| 26 | — | two dated precisions: why `nolift` is worse than both arms, and campaign B's hidden mechanism |
+| 27 | 17 | lifted the ceiling for ONE root — the backbone axis, never measured |
+| 28 | 18 | lifted it a second time, for the one experiment 26.0 named and declined |
+
+### Three conventions that explain the shape of this file
+
+- **The contract precedes the run.** A section is committed before the cells it
+  authorises execute. This is why amendments accumulate instead of edits.
+- **A withdrawn result is not a falsified one.** Withdrawals are dated and placed beside
+  the measurement they revise; nothing is deleted, and no history is rewritten.
+- **A defect visible before the data is repaired; a defect visible only after scoring is
+  recorded.** That distinction is why **27.7** is an amendment and **27.8.4** is an
+  observation, and it is the reason a rule that turned out to be the wrong instrument was
+  left exactly where it was written.
+
+---
+
 ## 1. Budgets (fixed at Wave 3)
 
 Every predictor family in a comparison cell is matched to the same parameter
@@ -4433,6 +4518,32 @@ depends on which of the two is quoted, and `tests/test_frozen_lift.py` pins both
 `< 1e-12` rather than pinning either value. `lift = "frozen"`
 is a new third level beside `"mlp"` and `"identity"`, validated by refusal like the other two
 (`_VALID_LIFT`), and requires `2r == d_z` for the same reason `"identity"` does.
+
+**`T` is frozen as a literal, not recomputed at run time, and the normalisation is a
+DECISION (added 2026-08-15, before any run).** Two facts force this, both measured rather
+than assumed:
+
+- `numpy.linalg.eig` does not guarantee eigenvector **scaling** or ordering across LAPACK
+  builds. Recomputing `T` on another machine yields a different matrix realising the same
+  basis, so a recomputed basis would make this root non-reproducible across platforms while
+  looking deterministic.
+- The block form is **invariant** under per-block rescaling of `T` — verified: rescaling by
+  `diag(3, 3, 0.2, 0.2)` leaves `T A T^-1` block-diagonal rotation-scaling with the same two
+  pairs — but the **latent scale is not**: the same rescaling moves `E‖T z‖ / E‖z‖` by a
+  factor of 2.1. This is the ψ/π scale gauge this project already met, reappearing on the
+  oracle side.
+
+The matrix actually used therefore ships in `basis_root.yaml` as a literal with its
+`sha256 = e026f402194929b09fdb6c7c88fe801e5d945131daa537947cd13ac7b8736be5` over its float64
+bytes, and its properties are **recomputed in `tests/test_basis_root.py` rather than
+trusted**: block form to `1.3e-15`, blocks `(-0.05, +-1.5187)` and `(-0.05, +-1.0902)`,
+singular values `[1.1966, 1.3494, 1.4894, 1.8208]`, `cond = 1.5216`, and
+`E‖T z‖ / E‖z‖ = 1.476`. The normalisation is numpy's unit-norm eigenvectors, which is
+**decided, not derived** — it is one representative of a gauge orbit, chosen because it
+leaves the latent scale within 1.5x of the identity's and therefore does not hand the oracle
+arm a conditioning advantage on top of the basis. The dynamics themselves are scale-invariant
+(a global rescaling of `h` is a similarity transform and leaves `A_bar`'s spectrum fixed), so
+this choice affects the optimisation landscape and nothing about what the arm can represent.
 
 **`on-oracle` is an ORACLE arm and is labelled as one everywhere it appears.** `T` is derived
 from the true `A`, which no arm is otherwise allowed to see. This root therefore measures a
