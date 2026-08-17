@@ -3258,6 +3258,18 @@ results now on record.
   binds against it in advance and in writing.
 - **R4**: this section precedes the sweep and the re-run it authorizes.
 
+### 21.6 The 21.3(5) re-run — cancelled unexecuted (dated 2026-08-17)
+
+21.3(5) authorised one LR re-selection and one 20-cell re-run into `results_gate_d2/`,
+and 22 restated that plan after 21.1's conclusion was withdrawn. The re-run never
+started: as of this date `results_gate_d2/` holds zero runs — one cached representation
+file and nothing else. It is **cancelled rather than left pending**. The reason is 23.4:
+the comparative programme moved to the oscillator roots, the pendulum gate path is
+parked, and a re-run whose sole purpose was to feed that gate would measure something no
+live section reads. Cancelling an unexecuted authorisation removes no measurement, and
+nothing on disk is deleted. If the pendulum path resumes, a new dated section must
+re-authorise a re-run rather than revive this one.
+
 ## 22. Amendment 13 — withdrawal of 21.1's conclusion (dated 2026-08-11)
 
 ### 22.0 What is withdrawn
@@ -3976,6 +3988,18 @@ like when the denominator makes its move early.
   record in `_private/`). Disaggregation is not a reading precaution here; it is the
   measurement.
 
+
+### 26.3 A trace limit, recorded (dated 2026-08-17)
+
+Sections 21 through 26 entered git as **one retrospective commit** (`752502d`,
+2026-08-14), unlike every other amendment in this file, which carries its own commit.
+Their internal declaration-before-run ordering is therefore attested by the dated text
+alone; git cannot independently confirm, for that batch, that 23.6 preceded 24.0. This
+is recorded as a **known limit of the trace, not repaired**: rewriting history to
+manufacture per-section commits after the fact would be worse than the gap it papered
+over. From 27 onward the one-commit-per-declaration discipline resumed and is
+git-verifiable (27's declaration `3a7d8f0` precedes its results `38829d1` in commit
+order).
 
 ## 27. Amendment 17 — the ceiling of 25.5 is lifted for ONE root: the backbone axis, never measured (dated 2026-08-14)
 
