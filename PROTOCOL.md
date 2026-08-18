@@ -4621,6 +4621,18 @@ and its seconds-per-update are recorded here; the remaining fourteen are launche
 that number exists. This clause is in response to a measured failure of estimation elsewhere
 in this project and is not decorative.
 
+**Measured, and the root started (2026-08-18 — the clause above, executed).** `--shard 11/15`
+ran one cell, `on-oracle` seed 0 (`a1f9a32f-3cb3e669`), alone on the machine with
+`OMP_NUM_THREADS=1`: **wall-clock 2186 s** (36 min 26 s, of which 2181.6 s training),
+8000/8000 epochs, **0.273 s per update**, `final_val_loss = 2.7546`, artifacts complete. The
+remaining fourteen launch after this paragraph as three concurrent stride shards (`1/3`,
+`2/3`, `3/3`; the completed cell resumes by its sentinel). Extrapolation, written before the
+launch: serial would be 14 × 2182 s ≈ 8.5 h; three shards bound it below by ~3 h (five cells
+serial, zero contention), and D4's measured contention on this machine (1.77× for `mlp_k`,
+3.7× for `mlp`, at five concurrent) makes **~4-6 h** the honest expectation — re-measured
+from the first completions rather than asserted. `test_no_cell_has_run_yet`, the tripwire on
+this ordering, has done its work and is deleted in the commit that records this start.
+
 ### 28.3 The reading rule and the three predictions, written before the numbers
 
 **Primary statistic: `e_H` at `H = 25`**, in true-state coordinates on the free rollout, lower

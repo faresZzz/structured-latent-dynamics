@@ -329,15 +329,3 @@ def test_the_budget_tolerance_exempts_the_frozen_arm_by_name_not_by_widening(T):
 
     with pytest.raises(ValueError, match="match_budget"):
         match_budget("mlp_k", 4, 1, 1, delta=0.05, r=2, radius="bounded")
-
-
-def test_no_cell_has_run_yet():
-    """28.2: cost is MEASURED on one cell before the other fourteen launch. This
-    test is a tripwire on the ordering, and is expected to be deleted -- with a
-    dated line in 28 -- at the moment the root legitimately starts."""
-    root = CONFIG.resolve().parents[4] / "results_basis"
-    assert not root.exists() or not any(root.rglob("gate.json")), (
-        "results_basis/ already holds scored cells; if the root has legitimately "
-        "started, delete this test in the same commit that records the start in "
-        "PROTOCOL 28."
-    )

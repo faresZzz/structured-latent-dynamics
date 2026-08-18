@@ -111,6 +111,8 @@ GEMINI.md
 /results_osc_hfr/
 /results_osc_decomp/
 /results_primary_factorial/
+# PROTOCOL.md section 28's basis root (declared 2026-08-15, started 2026-08-18).
+/results_basis/
 /results_smoke/
 # Comptabilite d'execution, pas des sources : marqueurs de reprise et journaux
 # de shards. Le contenu scientifique vit dans les racines results_* (ignorees)
