@@ -175,7 +175,7 @@ Two conclusions in this repository were withdrawn after measurement, and one pre
 
 ```bash
 make setup                 # uv sync + editable install
-make test                  # 1106 tests
+make test                  # 1123 tests
 make figures               # fig1 e_h curves, fig2 VPT per seed, fig3 paired contrast
 uv run sld-factorial --config src/sld/experiments/configs/primary_factorial.yaml --dry-run
 ```
