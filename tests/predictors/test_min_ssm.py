@@ -87,8 +87,8 @@ def test_selectivity_varies_with_state():
 
 def test_local_operator_coherence():
     """A, B from local_operator must match the autograd Jacobian of the
-    frozen recurrence (c held constant), relative error < 1e-5 -- the wave
-    gate. Uses B=1 so torch.func.jacrev's batch Jacobian reduces to the
+    frozen recurrence (c held constant), relative error < 1e-5. Uses B=1
+    so torch.func.jacrev's batch Jacobian reduces to the
     single-sample block directly (no cross-batch terms to discard).
     """
     gen = torch.Generator().manual_seed(6)

@@ -8,8 +8,8 @@ or the gate arithmetic -- every one of those already exists, once, in
 ``sld.audit.rollout`` and is imported and called here. This module's own job
 is exactly two things:
 
-1. Run the rollout GENUINELY free (PROTOCOL.md's rule D6, phaseD-apprentissage-
-   plan.md): after the initial condition, no ground truth and no future
+1. Run the rollout GENUINELY free (PROTOCOL.md's rule D6): after the initial
+   condition, no ground truth and no future
    embedding reaches the predictor -- not as input, not as state, not through
    a cache. ``evaluate_free_rollout`` calls ``predictor.rollout(h0, u_seq)``
    exactly ONCE; every downstream array (the model's ``e_h``, the per-episode
@@ -100,8 +100,8 @@ class RolloutDivergence(ValueError):
 
 
 # Index convention for one evaluation episode's true-state trajectory
-# (z_true, shape (B, T+1, d)) -- PINNED here, once, because it is the trap
-# the wave brief names explicitly:
+# (z_true, shape (B, T+1, d)) -- PINNED here, once, because it is an easy
+# off-by-one trap:
 #   index 0       -> x_{-1}  (one step before the rollout's initial condition;
 #                              feeds ONLY the linear baseline, never the model)
 #   index 1       -> x_0     (the rollout's initial condition, h=0; encoded
@@ -190,7 +190,7 @@ def evaluate_free_rollout(
             doctrine (``sld.audit._common``, REGLES section 5): this
             evaluation runs offline, in float64, never in the training-time
             float32 forward pass (float32 would cap the exact-ZOH oracle
-            test at ~1e-7, not the 1e-12 the wave brief requires). Enforced
+            test at ~1e-7, not the 1e-12 this evaluation requires). Enforced
             loudly here via ``require_cpu_float64_module``, the SAME helper
             every other audit entry point in this repo already uses --
             never a silent cast, so a float32 model reaching this function

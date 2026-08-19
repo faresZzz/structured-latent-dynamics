@@ -2,9 +2,7 @@
 and PROTOCOL.md section 15.1's ``tau_1`` rule.
 
 This module **is** the D0 validator -- the never-delivered checkbox of
-milestone D0 (``phaseD-apprentissage-PROGRESS.md``'s own "Validateur" line;
-read there for history, but the values below are the authority, not that
-doc). ``H_GATE``/``GAMMA``/``TAU_VPT``/``GAMMA_1`` exist nowhere else in this
+milestone D0. ``H_GATE``/``GAMMA``/``TAU_VPT``/``GAMMA_1`` exist nowhere else in this
 codebase: every caller imports them from here instead of repeating the
 literal, so a real number can no longer drift silently between PROTOCOL.md's
 prose and the code that gates a run.

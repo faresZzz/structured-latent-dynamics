@@ -466,7 +466,7 @@ def test_attention_negative_shifted_positional_index():
 from sld.predictors.transformer import CausalTransformerContextBackbone  # noqa: E402
 
 CTX_DTYPE = torch.float64
-CTX_TOL = 1e-10  # float64 forward, single layer -- see the wave report
+CTX_TOL = 1e-10  # float64 forward, single layer
 
 
 def _ramp(*shape: int, scale: float, offset: float = 0.0) -> Tensor:
@@ -484,7 +484,7 @@ def _hand_set_context_backbone() -> CausalTransformerContextBackbone:
     ``nn.Identity`` so the oracle may skip it -- it must be a real no-op in the
     module, not merely assumed away -- and both MLP ``Linear``s are zeroed
     weight AND bias so that branch contributes exactly 0 whatever ``ln2`` and
-    GELU do upstream. Everything the wave is about stays real and hand-set:
+    GELU do upstream. Everything this oracle depends on stays real and hand-set:
     ``q_in`` (query read-in, h ONLY), ``pair_in`` (cache read-in, the pair),
     ``kv_proj``, ``q_proj``, ``attn_out`` and the learned BOS entry.
     """

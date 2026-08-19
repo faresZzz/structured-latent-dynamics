@@ -260,7 +260,7 @@ def test_rollout_is_called_exactly_once(monkeypatch):
 
 
 def test_teacher_forcing_curve_differs_from_free_running():
-    # The negative that matters most (wave brief): an unstable predictor
+    # The negative that matters most (REGLES section 7.1): an unstable predictor
     # (larger spectral radius than the TRUE system) compounds every step's
     # error exponentially under FREE running, while teacher-forcing resets
     # to the true state every step and only ever sees ONE step of the

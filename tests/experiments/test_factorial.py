@@ -2191,7 +2191,7 @@ def test_no_representation_block_pins_the_same_config_hash_as_before_this_wave(t
     assert trainer.config_hash == "8c438faa"
 
 
-# -- the wiring test, and the point of the wave (R7) --------------------------
+# -- the wiring test, the point of this suite (R7) --------------------------
 
 
 def test_representation_wired_into_trainer_at_the_call_site(tmp_path):

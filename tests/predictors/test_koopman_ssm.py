@@ -8,7 +8,7 @@ Discipline (REGLES sections 5, 6):
    random tensors; ``torch.manual_seed`` is used solely to make nn.Module
    parameter init reproducible.
  - tolerances tied to the claim: exact steps at 1e-12/1e-14, autograd Jacobians
-   at 1e-10, the gold eigenvalue gate at 8e-3 relative (the wave gate).
+   at 1e-10, the gold eigenvalue gate at 8e-3 relative.
 """
 
 import numpy as np

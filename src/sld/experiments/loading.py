@@ -173,7 +173,7 @@ def read_index(results_root: str | Path, exp_name: str) -> list[dict]:
     if not index_path.exists():
         raise FileNotFoundError(
             f"{index_path} does not exist -- run the experiment sweep first "
-            "(see the Makefile / RESUME_SESSION.md for the current wave); "
+            "(see the Makefile for how to run the sweep); "
             "viz never falls back to scanning results/ directly"
         )
     with open(index_path, newline="") as f:

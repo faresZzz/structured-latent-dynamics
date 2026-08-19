@@ -2,7 +2,7 @@
 # Le sous-ensemble de `run_all.sh` qui ne depend PAS du bras `on-stable`.
 #
 # Le bras `on-stable` est en attente d'une decision de l'auteur
-# (_private/AGENT_JOURNAL.md, entree du 2026-08-11 18h10 : le rayon n'excede
+# (note du 2026-08-11 18h10 : le rayon n'excede
 # jamais 1, mais sigmoid(rho) sature a exactement 1.0 en float32 des
 # rho > 17.33, donc l'assertion stricte `< 1` du test ne peut pas etre
 # honoree). Les campagnes A et B contiennent 15 et 20 cellules de ce niveau et

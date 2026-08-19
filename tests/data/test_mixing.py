@@ -25,8 +25,8 @@ def _z_reaching(mixing, target):
     return ((np.full(mixing.a.shape, float(target)) - mixing.b) / mixing.a) @ mixing.R_1
 
 
-# Declared interior domain of the exact-inversion identity (PLAN_EXECUTION
-# Wave 1, corrected 2026-08-03): |a_i (R_1 z)_i + b_i| <= 5 for all i.
+# Declared interior domain of the exact-inversion identity (Wave 1,
+# corrected 2026-08-03): |a_i (R_1 z)_i + b_i| <= 5 for all i.
 INTERIOR_ARG = 5.0
 # atanh(1 - 1e-7) = 8.4056...: past this the clamp in SmoothMixing.inverse
 # engages and exact inversion is lost BY DESIGN.

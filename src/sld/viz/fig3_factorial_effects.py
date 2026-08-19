@@ -95,7 +95,7 @@ def make_fig3(
                        capsize=4, linewidth=1.6, zorder=5)
         n_by_backbone[backbone] = len(diffs)
 
-    # Readability fix (coordinator review): the separate "n=5" annotation
+    # Readability fix: the separate "n=5" annotation
     # sat right where the xtick labels are drawn and overlapped them --
     # folded into the tick label itself instead, so there is exactly one
     # piece of text per column rather than two competing for the same strip.

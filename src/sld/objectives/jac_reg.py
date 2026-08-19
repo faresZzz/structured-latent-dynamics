@@ -2,7 +2,7 @@
 
 STATUS (jalon B2, demotion explicite) -- SECONDARY -- not primary thesis.
 The mu_J penalty line failed and was withdrawn from the thesis, which is
-now the backbone x structure factorial (MASTER-plan.md). This module
+now the backbone x structure factorial. This module
 REMAINS AVAILABLE and REMAINS TESTED (tests/objectives/test_jac_reg.py,
 26 tests) for regression/secondary-study purposes only; it blocks NO gate
 of phases C-E. Historical trace of the campaign: reports/historical/mu_j/.

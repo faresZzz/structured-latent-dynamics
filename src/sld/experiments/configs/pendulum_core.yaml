@@ -59,8 +59,7 @@ base:
   # back to the default before hashing there, so off-cell identities are
   # unaffected).
   step_subsample: 1.0
-# lr/mu_j filled from the step E selection report
-# (_private/research/mu-j-calibration/step_e_report.json, 2026-07-31), run under
+# lr/mu_j filled from the step E selection report (2026-07-31), run under
 # the amended constants. `transformer` and `min_ssm` ON cells keep `mu_j: null`:
 # their calibration terminated in PROTOCOL section 5 step 6's "band not reached"
 # state, so they cannot enter the core grid until the further dated amendment

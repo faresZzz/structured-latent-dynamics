@@ -9,9 +9,9 @@ Discipline (REGLES sections 5, 7):
    no global ``set_seed``. Gold tests compare a model against a reference
    computed FROM the same model's parameters, so they do not depend on the
    ambient torch RNG state.
- - the EDMD gold test is the wave gate: it must be validated in MULTI-STEP
-   rollout, never one-step residual alone (the gauge trap -- Wave 3
-   spectral-identifiability lesson; REGLES section 7 gold-test doctrine).
+ - the EDMD gold test must be validated in MULTI-STEP rollout, never one-step
+   residual alone (the gauge trap -- Wave 3 spectral-identifiability lesson;
+   REGLES section 7 gold-test doctrine).
 """
 
 from __future__ import annotations

@@ -78,7 +78,7 @@ def test_sum_backbone_satisfies_the_protocol():
 
 
 # ---------------------------------------------------------------------------
-# THE POSITIVE -- derived by hand, see the wave report
+# THE POSITIVE -- derived by hand (REGLES section 7.1)
 # ---------------------------------------------------------------------------
 # r = 1, d_u = 1, d_z = 2, Delta = 1.
 #   A_bar = exp(Delta*alpha) * R(Delta*omega) must equal 0.5 * R(pi/2)
@@ -1122,7 +1122,7 @@ def test_perturbing_the_future_leaves_every_earlier_output_bit_identical(cls):
 @pytest.mark.parametrize("cls", FACADES)
 def test_u_t_cannot_reach_c_t_but_does_reach_c_next(cls):
     """NEGATIVE 5, three halves (the third was added after a mutation survived
-    the first two -- see the wave report).
+    the first two).
 
     Half one alone would pass on a backbone that ignores u entirely; half two
     alone would pass on one that leaks it. Both read the operator, so BOTH are

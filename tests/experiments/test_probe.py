@@ -2,9 +2,9 @@
 (PROTOCOL.md sections 14.3, 14.11).
 
 Lean by design (module docstring in probe.py): this is exploratory-code
-infrastructure, not the gate itself. Tests cover exactly what the wave
-brief asks for -- the axis expansion (one axis at a time, no
-cross-product), --dry-run writing nothing, resume skipping a genuinely
+infrastructure, not the gate itself. Tests cover exactly this: the axis
+expansion (one axis at a time, no cross-product), --dry-run writing
+nothing, resume skipping a genuinely
 complete cell but training an incomplete one, the namespace guard actually
 refusing an outside path, and e_25 being gate.py's own returned value
 rather than a second computation.

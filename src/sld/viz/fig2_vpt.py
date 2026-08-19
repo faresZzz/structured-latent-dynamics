@@ -96,7 +96,7 @@ def make_fig2(
         for entry in vpt[family]["per_seed"].values()
         if entry["status"] == "crossed"
     ]
-    # Readability fix (coordinator review): with only ONE finite value on the
+    # Readability fix: with only ONE finite value on the
     # real grid (ssm_k seed 1, VPT=10) the old `*1.15` ceiling sat at 11.5 --
     # 1.5 units above the one informative point, so it visually blended into
     # the ring of censored markers sitting right on the reference line. A
