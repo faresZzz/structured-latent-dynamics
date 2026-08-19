@@ -1,0 +1,16 @@
+arm,seed,e_h_gate,verdict
+off,0,0.0795651316242399,learns
+off,1,0.07308733278665672,learns
+off,2,0.07687065656252874,learns
+off,3,0.05991573084366281,learns
+off,4,0.06151097756888766,learns
+on-learned,0,0.10892200208172545,does_not_learn
+on-learned,1,0.1712524824186233,does_not_learn
+on-learned,2,0.2890703063549693,does_not_learn
+on-learned,3,0.25145900223646234,does_not_learn
+on-learned,4,0.2557366729344198,does_not_learn
+on-oracle,0,0.04316958658263671,learns
+on-oracle,1,0.1321835007325001,learns
+on-oracle,2,0.10392259658838873,learns
+on-oracle,3,0.10727317473930488,learns
+on-oracle,4,0.03905271601589128,learns

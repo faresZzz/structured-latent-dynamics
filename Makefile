@@ -1,4 +1,4 @@
-.PHONY: setup test smoke grid-core figA figB figC figD figE figF figG fig1 fig2 fig3 figures reproduce-figures clean-nb
+.PHONY: setup test smoke grid-core figA figB figC figD figE figF figG fig1 fig2 fig3 figH figures reproduce-figures clean-nb
 
 CONFIGS := src/sld/experiments/configs
 # Declared configs are written configs. `oscillators`, `lorenz`, `cartpole`,
@@ -101,6 +101,15 @@ fig2:                     ## VPT, five raw per-seed values per cell, censoring s
 
 fig3:                     ## the three paired ON-OFF contrasts of e_h_gate
 	uv run python -m sld.viz.fig3_factorial_effects
+
+# figH -- PROTOCOL.md section 28, the basis-oracle root (results_basis/).
+# Same reason fig1/fig2/fig3 stay out of FIGURES: results_basis/ is
+# gitignored, so `make figures` on a fresh clone would fail on a root that
+# was never meant to be checked in. `make figH` still works standalone once
+# the root exists on disk.
+
+figH:                     ## basis root: off / on-learned / on-oracle, P1-P3 paired contrasts
+	uv run python -m sld.viz.figH_basis_oracle
 
 figures: $(FIGURES)
 
