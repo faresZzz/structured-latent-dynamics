@@ -552,10 +552,17 @@ one the neuron community proved stable in 2024–2025. Four references, verified
 the diagonal form; Mamba — Gu & Dao — for selectivity; Izhikevich for the resonate-and-fire
 neuron.)*
 
-**What this repository measures next** (developed in §5 of the companion notebook): free
-versus bounded radius with **encoder, decoder and backbone matched**, which the Koopman
-Dreamer ablation does not do; the **gain-versus-sample-size** curve, which nobody publishes
-and which matters because an inductive bias buys sample efficiency and has nothing to buy in
-an over-determined regime; and this bridge inside a **predictive-latent (JEPA)** world model
-rather than a reconstructive one. That last sign is **not predicted** — both outcomes are the
+**What this repository has since measured.** The **gain-versus-sample-size** curve that
+nobody else publishes returned a structure penalty at every sample size run, not the
+sample-efficiency gain an inductive bias is supposed to buy (`PROTOCOL.md §25.0`, campaign
+A). The repository's negative also generalizes across backbone: the paired ON-OFF contrast
+is carried by every seed on `mlp` and on `transformer`; on `ssm` it is not carried by the
+seeds and does not count as a third independent confirmation, for a reason declared before
+that cell ran (`PROTOCOL.md §27.9`) — the negative holds on **two** backbones, the third is
+uninformative at this sample size.
+
+**What it still measures next** (developed in §5 of the companion notebook): free versus
+bounded radius with **encoder, decoder and backbone matched**, which the Koopman Dreamer
+ablation does not do; and this bridge inside a **predictive-latent (JEPA)** world model
+rather than a reconstructive one. That sign is **not predicted** — both outcomes are the
 result.

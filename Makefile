@@ -20,11 +20,10 @@ test:
 	uv run pytest -q
 
 # --- Guard: fail with a clear message instead of a raw traceback when the ---
-# --- module/config a target depends on has not been implemented yet       ---
-# --- (see RESUME_SESSION.md for the current wave).                       ---
+# --- module/config a target depends on has not been implemented yet.     ---
 define require_module
 	@uv run python -c "import importlib; importlib.import_module('sld.$(1)')" >/dev/null 2>&1 \
-		|| (echo "sld.$(1) not implemented yet — nothing to run. See RESUME_SESSION.md for the current wave." && exit 1)
+		|| (echo "sld.$(1) not implemented yet — nothing to run." && exit 1)
 endef
 
 # --- Experiments -----------------------------------------------------------
@@ -84,12 +83,15 @@ figB:                     ## D4 horizon-resolved: where the structured arms pay 
 	uv run python -m sld.viz.figB_horizon
 
 # fig1/fig2/fig3 -- PROTOCOL.md section 27.4, the primary factorial
-# (results_primary_factorial/). NOT added to FIGURES yet: that campaign is
-# still running (30 cells, live at the time these targets were written) and
-# main() refuses to render on an empty/partial root rather than ship a wrong
-# figure (same doctrine as figA..figG). Add all three to FIGURES together,
-# once the root actually produces images -- "declared figures are delivered
-# figures" above applies to this trio too.
+# (results_primary_factorial/). The campaign is CLOSED (30/30 cells) and all
+# three already ship in assets/ with CSV sidecars + .sha256. NOT added to
+# FIGURES: regenerating in this same environment reproduces every sidecar
+# CSV bit-for-bit (verified in a tmpdir against the committed .sha256) but
+# NOT the PNG -- the tight-bbox canvas width itself differs run to run
+# (e.g. fig1: 1194px vs 1211px at identical dpi, same matplotlib version),
+# which is a text-layout nondeterminism, not a data difference. Folding
+# them into FIGURES would make every `make figures` dirty the tree for no
+# data reason. `make fig1` / `fig2` / `fig3` still work standalone.
 
 fig1:                     ## e_h rollout curves, mean +-1 SE, 3 backbones x 2 structures
 	uv run python -m sld.viz.fig1_rollout

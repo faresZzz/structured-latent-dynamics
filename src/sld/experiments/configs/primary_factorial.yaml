@@ -48,9 +48,10 @@ base:
   results_root: results_primary_factorial
 
 representation:
-  # identity, so e_recon = 2.60e-08 and the measurement scores the predictor
-  # rather than the shared readout (19.1). 20.4 is why a learned representation
-  # is NOT attempted incidentally here.
+  # identity, so e_recon = 1.87e-08 (this root's own artifact,
+  # reports/primary/state_scale.json, digest 409a5317) and the measurement
+  # scores the predictor rather than the shared readout (19.1). 20.4 is why a
+  # learned representation is NOT attempted incidentally here.
   kind: identity
   d_z: 4
 

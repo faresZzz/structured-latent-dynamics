@@ -6,7 +6,8 @@ via a linear readout fit by OLS INDEPENDENTLY PER RUN -- a free parameter per
 arm, not an at-arms-length cross-arm comparison. It is reactivated here on
 section 27.1's grid: ``representation.kind = identity`` means the SAME frozen
 readout is shared and identical for every one of the 30 cells
-(``e_recon = 2.60e-08``), so no per-run OLS fit exists to distort the
+(``e_recon = 1.87e-08``, this root's own artifact, ``reports/primary/state_scale.json``,
+digest ``409a5317``), so no per-run OLS fit exists to distort the
 comparison -- the retirement's stated condition ("the replacement is a
 shared, frozen encoder/readout") is met, and this is the first grid where it
 is. ``e_h`` is read straight off ``gate.json`` (``sld.viz.results``, which is
@@ -211,7 +212,7 @@ def make_fig1(
         ax.legend(fontsize=7.5, loc="upper left", framealpha=0.95, ncol=2)
 
     if non_eligible:
-        # Readability fix (coordinator review): the old per-cell status box
+        # Readability fix: the old per-cell status box
         # was drawn INSIDE the axes and covered the low end of both curves
         # plus clipped the y-label. The full per-seed detail already lives
         # in the caption's own "Non-eligible:" clause below -- this stays a

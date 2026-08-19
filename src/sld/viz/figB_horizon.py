@@ -121,8 +121,10 @@ def make_figB(root: str | Path = DEFAULT_ROOT, out: str | Path = DEFAULT_OUT, *,
     ax.set_yscale("log")
 
     fig.suptitle(
-        "D4, read across the horizon. The structured arms start worse at one step and compound more slowly "
-        "in 3 of the 4 (backbone, stratum) pairs -- 40 runs already on disk, no new training.",
+        "D4, read across the horizon, on DampedPendulum: the positive control fails on 7 of 8 cells and on "
+        "every structured one (section 21.4), so no structured cell reaches the gate. Read descriptively, the "
+        "structured arms start worse at one step and compound more slowly in 3 of the 4 (backbone, stratum) "
+        "pairs -- 40 runs already on disk, no new training.",
         fontsize=9.5, color=INK_PRIMARY,
     )
     fig.text(
