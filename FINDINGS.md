@@ -155,7 +155,7 @@ Stated at the same volume as the results, because a scope claim that is easy to 
 
 If the penalty is the *joint* discovery of basis and operator, then handing the basis over should remove it. That test is pre-registered in [`PROTOCOL.md` §28](PROTOCOL.md) and **declared, not run**:
 
-three arms on one backbone — `off`, `on-learned`, and an **oracle** arm whose `ψ` is frozen at the closed-form real Jordan transform with zero trainable parameters — five seeds each, in the stratum of §4 so the contrasts are commensurable. Three predicted signs are declared, including one that serves as a control whose failure voids the root. The falsification clause is written before any cell executes and binds the reporting of all four possible outcomes, including the one that refutes the diagnosis above.
+three arms on one backbone — `off`, `on-learned`, and an **oracle** arm whose `ψ` is frozen at the closed-form real Jordan transform with zero trainable parameters — five seeds each, in the stratum of §4 so the contrasts are commensurable. Three predicted signs are declared, including a control prediction whose failure voids the root. The falsification clause is written before any cell executes and binds the reporting of all four possible outcomes, including the one that refutes the diagnosis above.
 
 Opening it required overriding a ceiling that a previous section had declared final. That override is argued in the first line of §28.0 where a reader can reject it, and the ceiling is restored afterwards at a higher bar: a third lift requires a written external objection, not the author's signature.
 
