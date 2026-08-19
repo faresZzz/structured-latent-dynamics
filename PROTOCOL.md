@@ -4443,6 +4443,19 @@ descriptive claim of my own**. No eligibility rule, threshold, statistic or verd
 precision that strengthened a claim after the fact would not be admissible under 9; this one
 only takes back reach that the seeds do not support.
 
+### 27.10 A dated correction to 27.1's parenthesis (dated 2026-08-18)
+
+27.1's held-fixed list wrote `e_recon = 2.60e-08` for this root's stratum. That number was
+measured in 20.4 on the D3-era oscillator stratum (`e_1_pers = 0.0777`) and reached 27.1 by
+copy. This root's own artifact — `reports/primary/state_scale.json`, digest `409a5317` —
+measures `e_recon = 1.8656e-08` and `e_1_pers = 0.0479` on the stratum actually run. Nothing
+downstream read the wrong value: the reconstruction floor of the identity representation
+enters no gate (27.7 made `e_H` the primary statistic), and the parenthesis's point — the
+identity representation reconstructs at numerical floor, so the measurement scores the
+predictor — holds at either number. The original line stands as written; the copies of the
+same number in `primary_factorial.yaml`, `ssm_delta.yaml` and `fig1_rollout.py`'s docstring
+are corrected to the artifact value in the change that adds this section.
+
 ## 28. Amendment 18 — the ceiling of 27.5 is lifted a second time, for the one experiment 26.0 named and declined (dated 2026-08-15)
 
 ### 28.0 What is being overridden, and the argument for overriding it
