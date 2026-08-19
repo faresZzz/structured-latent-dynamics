@@ -11,7 +11,7 @@ Farès Zaghouane · August 2026
 
 In a JEPA-style world model the encoder learns *what* to represent; the predictor, which moves latent states forward in time, is usually a generic network with no transition structure. A natural conjecture is that giving it an explicit dynamical structure — the Koopman-style family of 2×2 rotation-scaling blocks under exact zero-order-hold discretization — should improve long-horizon rollout stability.
 
-This study tests that conjecture on the system where it is *most* favourable: coupled linear oscillators, whose generator lies in the structured family by construction. **The conjecture fails there.** Across 194 cells and seven independent result roots, the structured arm is worse at every sample size, every level of prior misspecification, both training horizons measured, and on two backbones independently — in a design where the structured and unstructured arms of a backbone share rate, dataset, seed and budget, so the contrast carries no confound.
+This study tests that conjecture on the system where it is *most* favourable: coupled linear oscillators, whose generator lies in the structured family by construction. **The conjecture fails there.** Across 194 cells and seven independent result roots, the structured arm is worse at every sample size, every level of prior misspecification, both training horizons measured, and on two backbones independently — in a design where the structured and unstructured arms of a backbone share rate, dataset, seed and budget, so the contrast carries no confound. An eighth root (15 cells) then hands the structured arm the true basis as a frozen oracle: most of the penalty disappears on every seed, without putting the structured arm ahead of the unstructured one (§9).
 
 The study then identifies why, and the reason is not that the prior is wrong. The optimum sits inside the model class and ordinary least squares recovers it from data to `2.1e-08`; gradient descent lands about 200× away. Isolating the responsible ingredient by elimination points to the closed 25-step rollout rather than the one-step loss. And a closed-form measurement shows that the declared misspecification axis had been moving one of *two* misspecifications: at the configuration where the spectral axis reads "the prior is exact", the true generator is still `36 %` of its own norm away from the model class **in the identity basis**, and at machine precision from it in its own real Jordan basis.
 
@@ -153,9 +153,9 @@ Stated at the same volume as the results, because a scope claim that is easy to 
 
 ## 9. The experiment this diagnosis demands
 
-If the penalty is the *joint* discovery of basis and operator, then handing the basis over should remove it. That test is pre-registered in [`PROTOCOL.md` §28](PROTOCOL.md) and **declared, not run**:
+If the penalty is the *joint* discovery of basis and operator, then handing the basis over should remove it. That test was pre-registered in [`PROTOCOL.md` §28](PROTOCOL.md) — three arms on one backbone (`off`, `on-learned`, and an **oracle** arm whose `ψ` is frozen at the closed-form real Jordan transform with zero trainable parameters), five seeds each, in the stratum of §4, with three predicted signs, a control prediction whose failure voids the root, and a falsification clause binding the reporting of all four outcomes before any cell executed. **It ran on 2026-08-19, and the outcome is the one §28.4 had named in advance as most likely ([§28.7](PROTOCOL.md)):**
 
-three arms on one backbone — `off`, `on-learned`, and an **oracle** arm whose `ψ` is frozen at the closed-form real Jordan transform with zero trainable parameters — five seeds each, in the stratum of §4 so the contrasts are commensurable. Three predicted signs are declared, including a control prediction whose failure voids the root. The falsification clause is written before any cell executes and binds the reporting of all four possible outcomes, including the one that refutes the diagnosis above.
+**The coupling is a contributing mechanism; it is not sufficient to reverse the sign.** Handing the basis over helps on every seed (`on-oracle − on-learned` = `−0.1302 ± 0.0340`, 0/5 seeds positive) and returns the structured arm to the positive-control gate that the learned-basis arm fails 5/5 (`on-oracle` passes 5/5); it does not put the structured arm ahead of the unstructured one (`on-oracle − off` = `+0.0149 ± 0.0189`, 3/5 seeds positive — indeterminate). The control contrast replicates §4's `mlp` column exactly (`+0.1451 ± 0.0351`, 5/5) — a determinism check on the pipeline, not an independent draw. The claim stays bounded by the word *oracle*: one system, one backbone, one stratum, basis given rather than learned.
 
 Opening it required overriding a ceiling that a previous section had declared final. That override is argued in the first line of §28.0 where a reader can reject it, and the ceiling is restored afterwards at a higher bar: a third lift requires a written external objection, not the author's signature.
 
@@ -175,8 +175,9 @@ Two conclusions in this repository were withdrawn after measurement, and one pre
 
 ```bash
 make setup                 # uv sync + editable install
-make test                  # 1123 tests
-make figures               # fig1 e_h curves, fig2 VPT per seed, fig3 paired contrast
+make test                  # 1122 tests
+make figures               # figA-figG from their result roots
+make fig1 fig2 fig3        # the primary-factorial trio (PROTOCOL 27.4), standalone
 uv run sld-factorial --config src/sld/experiments/configs/primary_factorial.yaml --dry-run
 ```
 
