@@ -6011,16 +6011,16 @@
     {
       "source": "results/pendulum_core_selection/selection_report.csv",
       "destination_or_url": "reports/historical/mu_j/traces/pendulum_core_selection/selection_report.csv",
-      "size_bytes": 10092,
-      "sha256": "9ba37195c4679219a5cf52cba0a1420c1781f578e72d1640dee13b358da42fee",
+      "size_bytes": 7053,
+      "sha256": "f2c3a825d3c6f0dfef9c6e6d31030539b72a9164e90ef0a9cf1b94d5e87079ac",
       "category": "mu-j-calibration",
       "verdict": "band-not-reached-3-of-4-families"
     },
     {
       "source": "results/pendulum_core_selection/selection_report.json",
       "destination_or_url": "reports/historical/mu_j/traces/pendulum_core_selection/selection_report.json",
-      "size_bytes": 22837,
-      "sha256": "0f6c072f8d54bcc1da3d531ac71e8079e7090f92f02249d2f790fe3135247433",
+      "size_bytes": 19848,
+      "sha256": "9c0ccbf9776e5944ec7c98df114e50c3879353fc27eb01baf2880a6ea60eee3f",
       "category": "mu-j-calibration",
       "verdict": "band-not-reached-3-of-4-families"
     },
@@ -7379,10 +7379,6 @@
   ],
   "summary": {
     "by_category": {
-      "mu-j-calibration": {
-        "files": 578,
-        "bytes": 2718787
-      },
       "pre-amendment": {
         "files": 159,
         "bytes": 1098007
@@ -7391,6 +7387,14 @@
         "files": 16,
         "bytes": 125955
       },
+      "mu-j-calibration": {
+        "files": 578,
+        "bytes": 2712759
+      },
+      "smoke": {
+        "files": 9,
+        "bytes": 2185
+      },
       "post-hoc-repair": {
         "files": 157,
         "bytes": 1091908
@@ -7398,13 +7402,9 @@
       "divergence": {
         "files": 3,
         "bytes": 6639
-      },
-      "smoke": {
-        "files": 9,
-        "bytes": 2185
       }
     },
     "total_files": 922,
-    "total_bytes": 5043481
+    "total_bytes": 5037453
   }
 }

@@ -10,7 +10,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/c12fc29d-cf06208a",
+      "run_dir": "results/pendulum_core_selection/c12fc29d-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -24,7 +24,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/c12fc29d-26608bd2",
+      "run_dir": "results/pendulum_core_selection/c12fc29d-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -38,7 +38,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/43965c1e-cf06208a",
+      "run_dir": "results/pendulum_core_selection/43965c1e-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -52,7 +52,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/43965c1e-26608bd2",
+      "run_dir": "results/pendulum_core_selection/43965c1e-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -66,7 +66,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/62c98662-cf06208a",
+      "run_dir": "results/pendulum_core_selection/62c98662-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -80,7 +80,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/62c98662-26608bd2",
+      "run_dir": "results/pendulum_core_selection/62c98662-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -94,7 +94,7 @@
       "mu_j": 0.001,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/e7df0c19-cf06208a",
+      "run_dir": "results/pendulum_core_selection/e7df0c19-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.0301104725416923
     },
@@ -108,7 +108,7 @@
       "mu_j": 0.01,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/1cc12ab2-cf06208a",
+      "run_dir": "results/pendulum_core_selection/1cc12ab2-cf06208a",
       "seed": 0,
       "sigma_max_median": 0.9994594978607916
     },
@@ -122,7 +122,7 @@
       "mu_j": 0.1,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/ba6d6360-cf06208a",
+      "run_dir": "results/pendulum_core_selection/ba6d6360-cf06208a",
       "seed": 0,
       "sigma_max_median": 0.9048621251335076
     },
@@ -136,7 +136,7 @@
       "mu_j": 1.0,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/0f93a4d8-cf06208a",
+      "run_dir": "results/pendulum_core_selection/0f93a4d8-cf06208a",
       "seed": 0,
       "sigma_max_median": 0.8754758383863571
     },
@@ -150,7 +150,7 @@
       "mu_j": 0.01,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/1cc12ab2-cf06208a",
+      "run_dir": "results/pendulum_core_selection/1cc12ab2-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -164,7 +164,7 @@
       "mu_j": 0.01,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/1cc12ab2-26608bd2",
+      "run_dir": "results/pendulum_core_selection/1cc12ab2-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -178,7 +178,7 @@
       "mu_j": 0.01,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/0cf9c6fc-cf06208a",
+      "run_dir": "results/pendulum_core_selection/0cf9c6fc-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -192,7 +192,7 @@
       "mu_j": 0.01,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/0cf9c6fc-26608bd2",
+      "run_dir": "results/pendulum_core_selection/0cf9c6fc-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -206,7 +206,7 @@
       "mu_j": 0.01,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/69ccc5c1-cf06208a",
+      "run_dir": "results/pendulum_core_selection/69ccc5c1-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -220,7 +220,7 @@
       "mu_j": 0.01,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/69ccc5c1-26608bd2",
+      "run_dir": "results/pendulum_core_selection/69ccc5c1-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -234,7 +234,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/4942a1ce-cf06208a",
+      "run_dir": "results/pendulum_core_selection/4942a1ce-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -248,7 +248,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/4942a1ce-26608bd2",
+      "run_dir": "results/pendulum_core_selection/4942a1ce-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -262,7 +262,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/ec4e0508-cf06208a",
+      "run_dir": "results/pendulum_core_selection/ec4e0508-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -276,7 +276,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/ec4e0508-26608bd2",
+      "run_dir": "results/pendulum_core_selection/ec4e0508-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -290,7 +290,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/0fb36529-cf06208a",
+      "run_dir": "results/pendulum_core_selection/0fb36529-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -304,7 +304,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/0fb36529-26608bd2",
+      "run_dir": "results/pendulum_core_selection/0fb36529-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -318,7 +318,7 @@
       "mu_j": 0.001,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/ca976df2-cf06208a",
+      "run_dir": "results/pendulum_core_selection/ca976df2-cf06208a",
       "seed": 0,
       "sigma_max_median": 7.2021502726221645
     },
@@ -332,7 +332,7 @@
       "mu_j": 0.01,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/e2e75408-cf06208a",
+      "run_dir": "results/pendulum_core_selection/e2e75408-cf06208a",
       "seed": 0,
       "sigma_max_median": 6.321198807440943
     },
@@ -346,7 +346,7 @@
       "mu_j": 0.1,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/4fdee3d7-cf06208a",
+      "run_dir": "results/pendulum_core_selection/4fdee3d7-cf06208a",
       "seed": 0,
       "sigma_max_median": 5.915614997062715
     },
@@ -360,7 +360,7 @@
       "mu_j": 1.0,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/fc75c6b2-cf06208a",
+      "run_dir": "results/pendulum_core_selection/fc75c6b2-cf06208a",
       "seed": 0,
       "sigma_max_median": 5.82167781819515
     },
@@ -374,7 +374,7 @@
       "mu_j": 10.0,
       "phase": "mu_j_calibration_refinement",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/59e5e322-cf06208a",
+      "run_dir": "results/pendulum_core_selection/59e5e322-cf06208a",
       "seed": 0,
       "sigma_max_median": 5.831459003933654
     },
@@ -388,7 +388,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/3199aadd-cf06208a",
+      "run_dir": "results/pendulum_core_selection/3199aadd-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -402,7 +402,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/3199aadd-26608bd2",
+      "run_dir": "results/pendulum_core_selection/3199aadd-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -416,7 +416,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/cab2339e-cf06208a",
+      "run_dir": "results/pendulum_core_selection/cab2339e-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -430,7 +430,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/cab2339e-26608bd2",
+      "run_dir": "results/pendulum_core_selection/cab2339e-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -444,7 +444,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/cb722bb5-cf06208a",
+      "run_dir": "results/pendulum_core_selection/cb722bb5-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -458,7 +458,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/cb722bb5-26608bd2",
+      "run_dir": "results/pendulum_core_selection/cb722bb5-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -472,7 +472,7 @@
       "mu_j": 0.001,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/3180711e-cf06208a",
+      "run_dir": "results/pendulum_core_selection/3180711e-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.3299122900610942
     },
@@ -486,7 +486,7 @@
       "mu_j": 0.01,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/2a9f9d33-cf06208a",
+      "run_dir": "results/pendulum_core_selection/2a9f9d33-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.1550723705767112
     },
@@ -500,7 +500,7 @@
       "mu_j": 0.1,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/4d5469f2-cf06208a",
+      "run_dir": "results/pendulum_core_selection/4d5469f2-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.0767115672766827
     },
@@ -514,7 +514,7 @@
       "mu_j": 1.0,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/44760959-cf06208a",
+      "run_dir": "results/pendulum_core_selection/44760959-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.0644207979444993
     },
@@ -528,7 +528,7 @@
       "mu_j": 10.0,
       "phase": "mu_j_calibration_refinement",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/43495c58-cf06208a",
+      "run_dir": "results/pendulum_core_selection/43495c58-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.0638652694334954
     },
@@ -542,7 +542,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/2e781258-cf06208a",
+      "run_dir": "results/pendulum_core_selection/2e781258-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -556,7 +556,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/2e781258-26608bd2",
+      "run_dir": "results/pendulum_core_selection/2e781258-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -570,7 +570,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/1bc33e5e-cf06208a",
+      "run_dir": "results/pendulum_core_selection/1bc33e5e-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -584,7 +584,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/1bc33e5e-26608bd2",
+      "run_dir": "results/pendulum_core_selection/1bc33e5e-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -598,7 +598,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/6d156f25-cf06208a",
+      "run_dir": "results/pendulum_core_selection/6d156f25-cf06208a",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -612,7 +612,7 @@
       "mu_j": 0.0,
       "phase": "lr_sweep",
       "regime": "action_conditioned",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/6d156f25-26608bd2",
+      "run_dir": "results/pendulum_core_selection/6d156f25-26608bd2",
       "seed": 0,
       "sigma_max_median": null
     },
@@ -626,7 +626,7 @@
       "mu_j": 0.001,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/7876ad95-cf06208a",
+      "run_dir": "results/pendulum_core_selection/7876ad95-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.032632537142519
     },
@@ -640,7 +640,7 @@
       "mu_j": 0.01,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/e467f950-cf06208a",
+      "run_dir": "results/pendulum_core_selection/e467f950-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.033991496388035
     },
@@ -654,7 +654,7 @@
       "mu_j": 0.1,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/b1ac8ca6-cf06208a",
+      "run_dir": "results/pendulum_core_selection/b1ac8ca6-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.0347879969941212
     },
@@ -668,7 +668,7 @@
       "mu_j": 1.0,
       "phase": "mu_j_calibration",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/b0fb84be-cf06208a",
+      "run_dir": "results/pendulum_core_selection/b0fb84be-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.0347874716742829
     },
@@ -682,7 +682,7 @@
       "mu_j": 10.0,
       "phase": "mu_j_calibration_refinement",
       "regime": "ou",
-      "run_dir": "/Users/captain/Documents/Projects/structured-latent-dynamics/results/pendulum_core_selection/dffaf8cd-cf06208a",
+      "run_dir": "results/pendulum_core_selection/dffaf8cd-cf06208a",
       "seed": 0,
       "sigma_max_median": 1.034727855263163
     }

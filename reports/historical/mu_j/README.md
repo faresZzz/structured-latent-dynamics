@@ -22,6 +22,13 @@ destination dans le paquet, sa taille, son sha256, et un classement
 `category`/`verdict` à deux champs. `manifest.sha256` permet de vérifier l'intégrité
 de la copie à tout moment.
 
+**Note datée 2026-08-19.** Les deux `selection_report.csv`/`.json` portaient des chemins
+absolus de la machine d'origine dans leurs champs `run_dir` ; ces préfixes ont été réécrits
+en chemins relatifs au dépôt avant publication. Aucune mesure, aucun verdict, aucun autre
+champ n'a changé — seule la métadonnée de chemin. `manifest.sha256` et `inventory.json`
+portent les empreintes mises à jour de ces deux fichiers (922/922 vérifiés après l'opération) ;
+les valeurs d'origine restent lisibles dans l'historique git.
+
 ## Campagnes
 
 ### `mu-j-calibration` — `results/pendulum_core_selection/` → `traces/pendulum_core_selection/`
