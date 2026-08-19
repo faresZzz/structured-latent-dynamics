@@ -171,10 +171,10 @@ avec les mêmes clés quelle que soit la famille de predictor :
   predictor sans projection) est explicitement `None`, jamais omis en silence.
 - `metrics` : résumé court et fini (dernière/meilleure valeur, seed, hash de
   config) — jamais un tenseur brut.
-- `paths` : `config.yaml`, `metrics.csv`, `audit.json`, `ckpt.pt`, `figs/`
-  (cf. `OBJECTIFS.md` §3). Ce contrat est ce qui permet à `viz/` de lire
-  `results/` sans connaître la famille de predictor — ne pas le casser sans
-  migrer toutes les familles en même temps.
+- `paths` : `config.yaml`, `metrics.csv`, `audit.json`, `ckpt.pt`, `figs/`.
+  Ce contrat est ce qui permet à `viz/` de lire `results/` sans connaître la
+  famille de predictor — ne pas le casser sans migrer toutes les familles en
+  même temps.
 - **Note datée 2026-08-17 — racines factorielles.** Pour les racines orchestrées
   par `sld-factorial` (`results_gate_d/`, les racines oscillateurs,
   `results_primary_factorial/`, `results_basis/`), `audit.json` peut être vide
@@ -192,9 +192,9 @@ avec les mêmes clés quelle que soit la famille de predictor :
 
 Proportionnels au risque, comportementaux d'abord :
 
-- **Gold tests** (OBJECTIFS §6) : ils prouvent que l'instrument mesure juste
-  avant de mesurer quoi que ce soit d'appris. Aucun run de grille ne se lance si
-  un gold test est rouge.
+- **Gold tests** : ils prouvent que l'instrument mesure juste avant de
+  mesurer quoi que ce soit d'appris. Aucun run de grille ne se lance si un
+  gold test est rouge.
 - **Tests de propriété** : stabilité de la cellule ON ∀Δ>0 ; invariance des
   pairings sous reparamétrisation ; contrôles négatifs silencieux ; énergie
   infinie hors de l'image.
@@ -275,6 +275,31 @@ pire qu'un chiffre absent : il ferme la question.
 
 ---
 
+### Les règles transverses R1-R7
+
+Le code et le README citent ces labels ; les quatre que le lecteur rencontrera :
+
+- **R1 — Prouver, pas « ça tourne ».** Le critère d'écriture d'un test : *une
+  implémentation fausse échouerait-elle à ce test ?* Si la réponse n'est pas un
+  oui démontrable, le test n'est pas écrit. La règle des deux checks (§7.1) en
+  est la forme obligatoire.
+- **R2 — Référence indépendante.** Un objet ne se valide jamais contre
+  lui-même : ni sa sortie stockée, ni une quantité du même chemin de code, ni
+  une version plus fine de lui-même.
+- **R4 — Le contrat avant le run.** Seuils déclarés avant les runs ; un
+  amendement se commite **avant** l'exécution qu'il autorise (règle apprise à
+  ses dépens : une grille a d'abord tourné 1 h 34 avant l'amendement qui
+  l'autorisait, et a été relancée) ; un résultat négatif se publie tel quel ;
+  jamais de rétrécissement post-hoc d'un seuil.
+- **R7 — Vérifier le site d'appel, jamais la docstring.** Une spec écrite sans
+  être câblée laisse la suite verte précisément parce que le défaut préserve
+  l'ancien comportement ; seul le site d'appel réel fait foi.
+
+R3 et R5 renvoient au vocabulaire (§3) et à la règle de citation (§8) ; R6 est
+une règle d'organisation du travail sans effet sur le contenu publié.
+
+---
+
 ## 8. Règles notebooks — le cours qui prouve le package
 
 Les notebooks sont le point d'entrée pédagogique. Rythme imposé, hérité de
@@ -340,8 +365,9 @@ Chaque objet mathématique central d'un notebook passe par trois niveaux,
 dans cet ordre, dans le notebook :
 
 1. **La preuve.** Dérivation complète niveau M2, hypothèses énoncées, pas de
-   rigueur mesure-théorique. Les preuves marquées ★ dans OBJECTIFS §5 sont
-   celles qu'un chercheur regardera — zéro raccourci. Un algorithme complet
+   rigueur mesure-théorique. Les preuves marquées ★ (celles que le chapitre
+   doit établir, pas seulement enseigner) sont celles qu'un chercheur
+   regardera — zéro raccourci. Un algorithme complet
    s'écrit en bloc LaTeX (`\boxed{\begin{aligned}...\end{aligned}}`), pas en
    liste Markdown.
 2. **L'implémentation minimale en cellule.** Une version pédagogique de l'objet
@@ -406,22 +432,17 @@ boucle de polish : une passe décisive, puis la revue.
   d'énergie, VPT), l'accompagner de la courbe ou du portrait de phase qui la
   rend visible.
 - **Citations avec lien cliquable**, format `[Auteur (année), Titre](url)` ;
-  chaque lien **vérifié par WebFetch avant insertion** (protocole ✱ du
-  workspace) ; jamais de citation morte.
+  chaque lien **vérifié avant insertion** ; jamais de citation morte.
 - **Notation alignée code ↔ équations** : `h_t`, `A_bar`, `W_c` identiques dans
   le texte, les maths et le code.
 - **Hygiène** : `execution_count: null`, outputs nettoyés avant commit
   (`scripts/check_notebooks.py` en gate) ; les figures destinées au README vivent
   dans `assets/`, régénérées par `make figN`.
 - **Conclusion active** : ne pas se contenter de lister ce qui a été prouvé —
-  expliquer pourquoi le rung suivant de l'échelle (§3 OBJECTIFS, ladder du
-  statement) devient nécessaire, et fermer sur le bloc court "quand ce niveau
-  de structure paie, quand descendre au suivant" (point 10 de la structure
+  expliquer pourquoi le niveau de structure suivant devient nécessaire, et
+  fermer sur le bloc court "quand ce niveau de
+  structure paie, quand descendre au suivant" (point 10 de la structure
   recommandée ci-dessus).
-- **Passe humanizer unique** sur le texte des notebooks et du README avant
-  publication (une seule passe décisive, pas une boucle — cf. « Qualité, pas
-  quantité » ci-dessus) — sans toucher aux équations, noms d'API, variables
-  ni citations.
 
 ---
 
@@ -432,17 +453,16 @@ lire le plan -> situer -> prouver (notebook ou note) -> implémenter (package)
     -> tester (gold/propriété) -> vérifier la parité -> documenter -> committer
 ```
 
-1. Lire `PLAN_EXECUTION.md` (la wave concernée) et la section du plan v2 qui
-   fixe la science.
+1. Lire la section de `PROTOCOL.md` qui fixe la science du composant
+   (seuils, valeurs attendues, contrat d'exécution).
 2. Si l'objet est mathématique : écrire ou vérifier la dérivation d'abord
    (elle finira dans le notebook correspondant).
 3. Implémenter dans `src/sld/`, tests dans le miroir `tests/`.
 4. Si l'objet est un diagnostic : le passer au stress test d'invariance avant
    de l'exposer.
-5. Mettre à jour la colonne Statut d'`OBJECTIFS.md` §4/§5.
-6. Commits atomiques, identité git de l'utilisateur uniquement, jamais
-   d'attribution IA (politique globale du workspace). **Aucun commit sans
-   demande explicite de l'utilisateur.**
+5. Mettre à jour le suivi de statut du composant.
+6. Commits atomiques. **Aucun commit sans demande explicite de
+   l'utilisateur.**
 
 ---
 
@@ -477,8 +497,7 @@ un composant terminé :
 ```bash
 pytest -q
 python -m compileall -q src tests
-python3 /Users/captain/Documents/Projects/_publication/validate_publication.py \
-    /Users/captain/Documents/Projects/structured-latent-dynamics
+python3 ../_publication/validate_publication.py .
 ```
 
 - Le validateur doit sortir **0 FAIL** — gate obligatoire, **jamais
@@ -490,10 +509,6 @@ python3 /Users/captain/Documents/Projects/_publication/validate_publication.py \
 - Notebook : JSON valide, outputs nettoyés, `execution_count: null`
   (`scripts/check_notebooks.py`), pas de hack `sys.path`, parité package
   vérifiée (§8, niveau 3).
-- **(Adopté 2026-08-17.)** Toute session qui produit un commit met à jour
-  `RESUME_SESSION.md` **dans la même session**. Contrôle d'ouverture : date du
-  dernier commit contre date d'en-tête du document — un écart se corrige avant
-  de commencer quoi que ce soit d'autre.
 
 ---
 

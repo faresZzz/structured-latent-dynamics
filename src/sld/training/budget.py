@@ -1,6 +1,7 @@
 """Parameter-budget matching and analytic FLOP accounting for the seven
-predictor families (fairness contract: comparing families means comparing
-them at the SAME parameter budget, OBJECTIFS' cross-family comparison).
+predictor families (fairness contract, REGLES section 4 "Equite": families
+are compared at the SAME parameter budget, +/-5%, psi/pi/head/context all
+counted -- FLOPs are a separate, declared axis, see below).
 
 ``match_budget`` searches each family's single width knob by build-and-count
 (construct, ``count_params``, compare) rather than a closed-form inverse --
@@ -15,8 +16,10 @@ compared arms or declare encoder capacity as a separate, unmatched factor.
 
 ``count_flops_per_step``/``count_flops_per_trajectory`` are a SEPARATE axis
 from the parameter budget: two families matched on the same parameter count
-can still cost very different FLOPs per step -- most visibly the
-transformer, whose attention cost grows with trajectory position.
+can still cost very different FLOPs per step -- most visibly the two
+attention arms (``transformer``, ``transformer_k``), whose cost grows
+linearly with trajectory position; the other five families stay flat
+(affine in H over a full trajectory).
 """
 
 from __future__ import annotations

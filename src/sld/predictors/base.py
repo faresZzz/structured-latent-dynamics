@@ -1,6 +1,10 @@
 """Shared contract for the seven predictor families.
 
-Semantics locked by OBJECTIFS section 4.4 -- subclasses must not weaken them:
+This module IS the contract (subclasses must not weaken it): four
+unstructured families (``mlp``, ``transformer``, ``min_ssm``,
+``koopman_ssm``) and three structured arms sharing one cell (``mlp_k``,
+``transformer_k``, ``ssm_k``) -- see ``predictors/registry.py``'s
+``FAMILIES``/``STRUCTURED_FAMILIES`` for the authoritative names.
 
 - ``step`` and ``rollout`` iterate **in the predictor's latent space H**.
   For lifted families (``koopman_ssm`` and the three structured arms
@@ -48,7 +52,7 @@ class PredictorState(NamedTuple):
 
 @runtime_checkable
 class Predictor(Protocol):
-    """The contract shared by the seven families (OBJECTIFS section 4.4).
+    """The contract shared by the seven predictor families.
 
     ``local_operator`` returns the frozen-context first-order pair
     ``(A, B)`` of the family's *recurrent-state* update -- ``A`` is

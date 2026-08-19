@@ -4,13 +4,13 @@
 #   bash tools/run_sharded.sh <nom-marqueur> <config.yaml> [K]
 #
 # Pourquoi ce script existe. `tools/run_all.sh` lance `sld-factorial --config`
-# sans `--shard`, donc en UN processus : c'est la colonne "mono-thread" du
-# recapitulatif du RUNBOOK (112 h au total), pas la colonne "sur 5 shards"
-# (23 h) que le meme tableau annonce. Le decoupage est celui que PROTOCOL 14.7
-# declare et que l'aide de `--shard` prescrit mot pour mot ("set
-# OMP_NUM_THREADS per shard process") : l'expansion et le preflight de collision
-# restent GLOBAUX dans chaque processus, seule la boucle d'evaluation se
-# retrecit, donc la disjonction des shards est garantie par construction.
+# sans `--shard`, donc en UN processus mono-thread -- nettement plus lent que
+# les shards concurrents pour lesquels ce script est concu. Le decoupage est
+# celui que PROTOCOL 14.7 declare et que l'aide de `--shard` prescrit mot
+# pour mot ("set OMP_NUM_THREADS per shard process") : l'expansion et le
+# preflight de collision restent GLOBAUX dans chaque processus, seule la
+# boucle d'evaluation se retrecit, donc la disjonction des shards est
+# garantie par construction.
 #
 # Le shard 1 part seul et prend de l'avance : c'est lui qui materialise la
 # representation gelee du stratum si elle est absente. Les autres la trouvent

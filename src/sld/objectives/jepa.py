@@ -142,10 +142,10 @@ class JEPALoss(nn.Module):
         if h_hat is None:
             consistency = torch.zeros((), dtype=pred.dtype, device=pred.device)
         else:
-            # the WHOLE lifted target is stopped (sg[psi(sg[z])], OBJECTIFS
-            # 4.5): psi must not be able to move the regression target toward
-            # h_hat through this term. psi still trains through the pred path
-            # (h_true = lift(z) feeds the predictor upstream).
+            # the WHOLE lifted target is stopped (sg[psi(sg[z])]): psi must
+            # not be able to move the regression target toward h_hat through
+            # this term. psi still trains through the pred path (h_true =
+            # lift(z) feeds the predictor upstream).
             lifted_target = lift(z_sg).detach()
             if h_hat.shape != lifted_target.shape:
                 raise ValueError(

@@ -116,14 +116,19 @@ GEMINI.md
 /results_smoke/
 # Comptabilite d'execution, pas des sources : marqueurs de reprise et journaux
 # de shards. Le contenu scientifique vit dans les racines results_* (ignorees)
-# et dans PROTOCOL.md / _private/AGENT_JOURNAL.md (versionne / prive).
+# et dans PROTOCOL.md.
 /.runstate/
 /logs/
 *.npz
 
-# --- Private planning / candidacy context (never publish) ---
+# --- Notes de travail locales (jamais publiees) ---
 _private/
 RESUME_SESSION.md
+# Internalized 2026-08-19: normative content (contracts, run instructions)
+# now lives in public files (REGLES.md, module docstrings) -- see git history
+# for the last public revision.
+OBJECTIFS.md
+RUNBOOK.md
 
 # Cimetiere local : le pont device ne peut pas supprimer, il deplace ici.
 /_to_delete/
