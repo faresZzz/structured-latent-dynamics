@@ -4748,3 +4748,36 @@ date. That is a deliberately higher bar than the one this section just cleared.
 - **A prediction expected to hold is nonetheless run as a control** (P1), and its failure
   voids the root rather than being explained away.
 - **R4**: this section precedes every run it authorizes, including this root's first cell.
+
+### 28.7 What the root returned (dated 2026-08-19)
+
+15/15 cells complete, zero divergence, one `gate.json` per run. Positive-control status,
+published beside the numbers and never used for eligibility (28.3): `off` **5/5 `learns`**,
+`on-learned` **0/5**, `on-oracle` **5/5**. Arm means over five seeds, `e_H` at `H = 25`:
+`off` **0.0702**, `on-learned` **0.2153**, `on-oracle` **0.0851**.
+
+The three contrasts, paired within seed, per-seed sign counts beside every mean (28.3):
+
+| prediction | mean ± SE | signs | per-seed differences | verdict |
+|---|---|---|---|---|
+| P1 `on-learned` − `off` > 0 | +0.1451 ± 0.0351 | 5+/0− | +0.029 +0.098 +0.212 +0.192 +0.194 | **supported** |
+| P2 `on-oracle` − `on-learned` < 0 | −0.1302 ± 0.0340 | 0+/5− | −0.066 −0.039 −0.185 −0.144 −0.217 | **supported** |
+| P3 `on-oracle` − `off` < 0 | +0.0149 ± 0.0189 | 3+/2− | −0.036 +0.059 +0.027 +0.047 −0.022 | **indeterminate** |
+
+**28.4's second outcome applies, and its sentence is the report: the coupling is a
+contributing mechanism; it is not sufficient to reverse the sign.** Handing the structured
+arm the true basis removes most of the penalty on every seed (P2, 0+/5−) and returns the arm
+to the positive-control gate that the learned-basis arm fails on every seed (5/5 `learns`
+against 0/5); it does not put the structured class ahead of the unstructured one (P3
+straddles zero, 3+/2−). Per 28.4 this is NOT reported as "structure works when you fix the
+basis", and 27.8.1, 27.8.3 and 27.9 stand exactly as written.
+
+**P1's exact replication is determinism, not an independent draw.** +0.1451 ± 0.0351 matches
+27.8.3's `mlp` column to the printed precision because the pipeline is deterministic end to
+end — same seeds, same `data_hash` `3cb3e669`, same schedule, retrained from scratch in this
+root under 14.6's self-sufficiency. It validates reproducibility; it adds no statistical
+independence, and it is counted as the control 28.3 declared it to be, not as a discovery.
+
+The cost clause of 28.2 closes as measured: one cell alone at 2186 s wall-clock
+(0.273 s/update), the fourteen others as three concurrent stride shards; the root completed
+without any threshold, rate, clamp or sample-size change (28.6).
