@@ -2060,6 +2060,15 @@ def test_representation_kind_absent_dispatches_to_pretrain_representation_unchan
     )
 
 
+_REAL_RESULTS_AMENDED_PENDULUM_CORE_DIR = (
+    Path(__file__).resolve().parents[2] / "results_amended" / "pendulum_core"
+)
+
+
+@pytest.mark.skipif(
+    not _REAL_RESULTS_AMENDED_PENDULUM_CORE_DIR.exists(),
+    reason="results_amended/pendulum_core artifacts not present on this machine",
+)
 def test_results_amended_pendulum_core_forty_run_dirs_still_self_consistent():
     """Investigation note (task brief asked for a test reconstructing
     results_amended/pendulum_core's 40 run-dir identities): those 40 dirs
@@ -2080,9 +2089,7 @@ def test_results_amended_pendulum_core_forty_run_dirs_still_self_consistent():
     before -- this test pins it as a literal, measured fact instead of an
     assumption.
     """
-    results_dir = (
-        Path(__file__).resolve().parents[2] / "results_amended" / "pendulum_core"
-    )
+    results_dir = _REAL_RESULTS_AMENDED_PENDULUM_CORE_DIR
     run_dirs = sorted(p for p in results_dir.iterdir() if p.is_dir())
     assert len(run_dirs) == 40, f"expected 40 run dirs, found {len(run_dirs)}: {run_dirs}"
     for run_dir in run_dirs:

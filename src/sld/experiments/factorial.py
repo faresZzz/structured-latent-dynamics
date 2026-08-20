@@ -172,7 +172,7 @@ _RUNNER_OWNED_KEYS = frozenset({"exp_name", "seed", "family", "stratum_system", 
 # entry in trainer_mod._DEFAULTS (PROTOCOL.md section 17.1: grad_clip is
 # deliberately absent from _DEFAULTS so a config that never declares it
 # keeps the EXACT config_hash it had before grad_clip existed -- pinned by
-# tests/experiments/test_probe.py's "42cf513a" literal). _trainer_allowed_keys
+# tests/experiments/test_probe.py's "4149e34a" literal). _trainer_allowed_keys
 # used to derive its allow-list FROM _DEFAULTS, so this deliberate omission
 # fell through as "unknown Trainer config key" -- `base: {grad_clip: 100}`
 # was refused by expand() even though Trainer itself has always accepted and
