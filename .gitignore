@@ -31,6 +31,7 @@ weights/
 /data/
 /datasets/
 /dataset/
+
 *.csv
 # ...sauf la trace historique publiee : ses metrics.csv/index.csv/rapport de
 # selection SONT la donnee mesuree, et "publie" ne veut rien dire si Git ne les
@@ -85,35 +86,10 @@ Thumbs.db
 AGENTS.md
 AGENT.md
 CLAUDE.md
-GEMINI.md
-
+REGLES.md
 # --- Run artifacts (never committed; assets/ holds the final figures) ---
-/results/
-/results_amended/
-# phase-D roots (PROTOCOL.md section 14.6's four disjoint namespaces)
-/results_probe_d/
-/results_gate_d/
-/results_pilot_d/
-/results_factorial/
-# D3 control (PROTOCOL.md section 19.7): a fifth root, disjoint from the four
-# above -- a control is not a gate, its resume sentinels must not be
-# adoptable by one. D3's own non-gating section 19.3 diagnostic writes to a
-# sixth, separate root.
-/results_d3_oscillator/
-/results_d3_diagnostic/
-# PROTOCOL.md section 23's three NEW self-sufficient roots, plus the 23.3 rate
-# sweep that feeds them and the 21.3 re-run root -- 140 runs x one ckpt.pt.
-/results_sweep_osc/
-/results_ssm_delta/
-/results_osc_n/
-/results_osc_delta/
-/results_gate_d2/
-/results_osc_hfr/
-/results_osc_decomp/
-/results_primary_factorial/
-# PROTOCOL.md section 28's basis root (declared 2026-08-15, started 2026-08-18).
-/results_basis/
-/results_smoke/
+/results*/
+
 # Comptabilite d'execution, pas des sources : marqueurs de reprise et journaux
 # de shards. Le contenu scientifique vit dans les racines results_* (ignorees)
 # et dans PROTOCOL.md.
