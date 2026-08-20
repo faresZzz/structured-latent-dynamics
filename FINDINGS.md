@@ -163,10 +163,11 @@ Opening it required overriding a ceiling that a previous section had declared fi
 
 ## 10. How this repository is meant to be read
 
-Three layers, deliberately.
+Four layers, deliberately.
 
 - **`README.md`** — the result in ninety seconds, with the three figures.
 - **This document** — the study, its scope and its limits, in the order a reader wants them.
+- **`notebooks/`** — the course: `00` through `06`, from the problem and the instrument to the figures. It is meant to be worked through in order, not queried.
 - **`PROTOCOL.md`** — the audit trail: 28 sections, 18 dated amendments, every pre-registration committed before the runs it authorises. It is long because it is complete, and it is not meant to be read front to back. Its reading map is at the top.
 
 Two conclusions in this repository were withdrawn after measurement, and one prediction known in advance to fail was published unmodified rather than quietly replaced. **A withdrawn result is not a falsified one**; both are on the record, dated, beside the measurement they revise. That convention, and the rule that the contract precedes the run, are what the section numbering exists to enforce.

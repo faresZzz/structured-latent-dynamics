@@ -21,7 +21,9 @@ a basis. Imposing the family in an arbitrary basis is not imposing the prior.
 **Read next:** [`FINDINGS.md`](FINDINGS.md) — the study in six pages: question, design, the three
 results above with their numbers, the diagnosis, and an explicit list of what it does not show.
 [`PROTOCOL.md`](PROTOCOL.md) is the audit trail behind every figure quoted here; it opens with a
-reading map, and is meant to be queried rather than read.
+reading map, and is meant to be queried rather than read. [`notebooks/`](notebooks/) is the same
+material as a seven-notebook course, `00` through `06`, from the problem and the instrument to
+the figures — start at `00`.
 
 ## Scope — what is measured, and what is not claimed
 
