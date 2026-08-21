@@ -7,9 +7,9 @@ the answer is no. Structure costs accuracy on two backbones, on every seed. The 
 then isolates why, and confirms the mechanism with an oracle experiment whose reading
 rules were declared before its runs.
 
-This is original research, not a reproduction of a paper: the question, the design,
-the measurement contract and the diagnosis are the project. It is also small by design:
-every run fits on a laptop CPU.
+This is original research in progress, not a finished artifact and not a reproduction
+of a paper: the question, the design, the measurement contract and the diagnosis are
+the project. It is also small by design: every run fits on a laptop CPU.
 
 ## Why this project exists
 
@@ -138,8 +138,13 @@ fresh clone.
 
 ## Status
 
-The pre-registered campaign is closed and read: the grid, the diagnosis and the
-oracle confirmation are published. The repository is stable.
+Work in progress. The first pre-registered campaign — the factorial grid, the
+diagnosis and the oracle confirmation — is closed and published; that is what this
+repository documents today. The diagnosis opens the next questions rather than
+closing them: what accounts for the part of the penalty the basis does not explain,
+and whether a jointly learned representation — the one setting where the literature
+reports a gain — changes the picture. The next cycles will follow the same
+discipline: contract first, then runs.
 
 ## Limitations
 
