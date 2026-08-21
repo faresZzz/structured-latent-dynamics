@@ -1,125 +1,159 @@
 # structured-latent-dynamics
 
-> When does an explicit dynamical prior in a JEPA world model's latent predictor help — and when it does not, why not.
+A pre-registered factorial study of one question: does an explicit dynamical prior in
+the latent predictor of a JEPA world model buy rollout stability? The study measures
+the answer on the one system where the prior is exactly correct by construction — and
+the answer is no. Structure costs accuracy on two backbones, on every seed. The study
+then isolates why, and confirms the mechanism with an oracle experiment whose reading
+rules were declared before its runs.
 
-**The short answer, on the one system where the prior is exactly correct: it does not help, and the reason is that the prior is a statement about a *basis*, not about coordinates.** Three measurements, in order.
+This is original research, not a reproduction of a paper: the question, the design,
+the measurement contract and the diagnosis are the project. It is also small by design:
+every run fits on a laptop CPU.
 
-| | | |
-|---|---|---|
-| ![representable](assets/figA_d3_exactness.png) | ![the contrast](assets/fig3_factorial_effects.png) | ![the basis](assets/figD_misspecification.png) |
-| **1. The optimum is inside the class.** A planted rotation-scaling operator is recovered to `1.9e-15`, and ordinary least squares finds it from data to `2.11e-08`. The theory is not the failure. | **2. Yet the structured arm loses.** Paired within backbone — same seed, dataset, rate and budget, the one confound-free contrast — structure *costs* `e_H`: `+0.1451 ± 0.0351` on `mlp` (5/5 seeds), `+0.2484 ± 0.0670` on `transformer` (5/5 seeds). | **3. Because the declared axis moved one of two misspecifications.** Where the spectral axis reads `δ(c) = 0.000` — "the prior is exact" — the true generator still sits `1.0654` from the class *in the identity basis*: **36 % of ‖A‖**. In its own real Jordan basis: `1.97e-15`. |
+## Why this project exists
 
-Gradient descent lands ~200× from an optimum that least squares reaches, and the isolating
-ingredient is the **25-step closed rollout**, not the one-step loss — established by
-elimination, not asserted (`PROTOCOL.md` 20.1). So the structured arm was never only fitting an
-operator: it was being asked to discover a change of basis and the operator at once, from a
-loss folded through 25 steps.
+I wanted to do one piece of research end to end with the discipline I admire in good
+experimental work: freeze the thresholds before the runs, publish the negatives with
+the same weight as the positives, and leave an audit trail someone else could attack.
+The literature reports a gain for exactly this kind of structured predictor. Instead
+of reproducing that result, I built the cleanest test of it I could: a system whose
+true generator lies inside the structured family, so that a negative answer would
+mean something.
 
-**The thesis this leaves standing:** a structural prior of the Koopman family is a claim about
-a basis. Imposing the family in an arbitrary basis is not imposing the prior.
+A sibling project, `constrained-trace-ebm`, studies the other half of the same
+world-model question: there the dynamics are exact and only the cost is learned;
+here the cost is fixed and the dynamics model is the object of study.
 
-**Read next:** [`FINDINGS.md`](FINDINGS.md) — the study in six pages: question, design, the three
-results above with their numbers, the diagnosis, and an explicit list of what it does not show.
-[`PROTOCOL.md`](PROTOCOL.md) is the audit trail behind every figure quoted here; it opens with a
-reading map, and is meant to be queried rather than read. [`notebooks/`](notebooks/) is the same
-material as a seven-notebook course, `00` through `06`, from the problem and the instrument to
-the figures — start at `00`.
+## The question and the design
 
-## Scope — what is measured, and what is not claimed
+A JEPA world model encodes observations into a latent state `z` and moves `z`
+forward in time with a predictor that never decodes back. Generic predictors — an
+MLP, a small causal transformer, a Mamba-style selective SSM — can fit the one-step
+loss well and still drift once rolled out freely, because nothing constrains the
+composition of many steps. The structured alternative routes the transition through
+2×2 rotation-scaling blocks under exact zero-order-hold discretization: the natural
+linear family for oscillatory dynamics, in the spirit of Koopman-style lifted models.
 
-Every sentence above holds under: `CoupledOscillators`, `OURegime`, identity shared
-representation, one rate list, one optimizer, `n ∈ {8, 32, 256}`, `δ(c) ∈ [0.000, 1.029]`,
-`h_fr ∈ {5, 25}`. It is 209 cells across eight self-sufficient roots; `PROTOCOL.md` 23–28
-carry every pre-registration, reading and confound.
+```
+backbone ∈ {mlp, transformer, ssm}   ×   structure ∈ {off, on}
 
-- **Measured robust**: the sign is unchanged between `h_fr = 5` and `25` (25.8), across all
-  three sample sizes and all four misspecification levels (23.5), and across two backbones
-  each carried by 5/5 seeds (27.8.3, 27.9).
-- **Measured, and explicitly *not* a third confirmation**: the `ssm` column's contrast
-  (`+0.2836 ± 0.2379`) is set by a single seed against a median of `+0.0016`, in a backbone
-  whose both arms fail the arm-neutral lower bound. 27.6 declared that risk before the runs;
-  27.9 reports it rather than counting it.
-- **Not a claim about structured world models in general.** 25.4 records a published result
-  using the *same* parametrisation and reporting a gain, under a jointly learned
-  representation. 26.0 measures the difference that most plausibly separates the two settings
-  and names it a candidate — not as established.
-- **Not a claim about the pendulum.** M4 is not crossed; 21.4 stands; seven of eight
-  positive-control cells on `DampedPendulum` do not pass and nothing here reaches that system.
-
-## The one experiment this diagnosis demands — run, and read under its pre-declared rule
-
-If the penalty is the *joint* discovery of basis and operator, then handing the basis over
-should remove it. `PROTOCOL.md` **28** pre-registered that test — `off` vs `on-learned` vs an
-**oracle** arm whose `ψ` is frozen at the closed-form real Jordan transform — with three
-predicted signs and a falsification clause written **before** the runs, binding the report of
-every outcome. It ran on 2026-08-19, and the outcome is the one 28.4 had named in advance as
-most likely (**28.7**):
-
-**The coupling is a contributing mechanism; it is not sufficient to reverse the sign.**
-Handing the structured arm the true basis helps on every seed (`on-oracle − on-learned` =
-`−0.1302 ± 0.0340`, 0/5 seeds positive) and returns it to the positive-control gate the
-learned-basis arm fails 5/5; it does not put the structured class ahead of the unstructured
-one (`on-oracle − off` = `+0.0149 ± 0.0189`, 3/5 — indeterminate). The claim is bounded by
-the word *oracle*: one system, one backbone, one stratum, basis given rather than learned.
-
-## How this repository is meant to be read
-
-The pre-registrations are load-bearing and the corrections are the point. Two conclusions were
-withdrawn after measurement (22.0, 25.3's branch 1), two figures corrected their own readings
-(24, 26.1), and one eligibility rule was found defective *after* scoring and left standing
-rather than repaired (27.8.5) — because a rule moved with the numbers in hand is not a rule.
-`REGLES.md` R4 (the contract precedes the run) and the correction-over-honesty hierarchy are
-what the section numbering exists to enforce.
-
-A withdrawn result is not a falsified one. Both are on the record, dated, beside the
-measurement they revise.
-
-## Motivation
-
-When does explicit dynamical structure in a JEPA world model's latent predictor improve rollout stability, state sufficiency, and planning — at equal compute cost? Generic predictors (MLP, causal transformer) can fit the one-step loss well and still drift catastrophically under free-running rollout; structured predictors (2×2 rotation-scaling blocks, selective SSM, Koopman-style lifting) impose an explicit transition law on the latent state, at the cost of expressivity. This repo runs that comparison as a controlled factorial rather than a leaderboard.
-
-**Calibrating that penalty to a margin comparable *across* families was attempted and failed.** Cross-family physical comparability of the calibrated margin was never validated, and the pre-registered common band was reached by one family at one seed. What follows from that — which predictions survive, which are withdrawn, which are unresolved — is in [`docs/historical_mu_j_campaign.md`](docs/historical_mu_j_campaign.md) and in `PROTOCOL.md` section 11. Read that before reading any number in this repo as a cross-family comparison.
-
-The design crosses **backbone** (`mlp`, `transformer`, `ssm`) with **structure** (`off`/`on` — whether the backbone runs its structured variant, an architectural choice, never a numeric penalty) and with data regime. The package implements four systems (damped pendulum, coupled oscillators, Lorenz-63, CartPole); every published comparison is on `CoupledOscillators`, the pendulum carries only the positive-control root that gates it, and the other two systems have no published measurement here. This is the current primary axis; the paragraph above documents an earlier attempt to encode structure as a calibrated total-Jacobian penalty μ_J instead — that attempt failed and μ_J is now a secondary/regression study only (`src/sld/objectives/jac_reg.py`, `spectral_reg.py`, Fig. 2), never load-bearing for the thesis. An audit panel separates what is displayed from what is measured: the spectrum (or field of local spectra) is display/screening only, never a stability certificate; stability is read off the total Jacobian on the augmented state; identifiability is read off R²/Procrustes recovery against the true state. The baseline every arm has to beat is val loss alone.
-
-## Reproduce
-
-```bash
-make setup          # uv sync + editable install
-make test           # full test suite
-make smoke          # end-to-end factorial smoke (< 5 min)
-uv run sld-factorial --config src/sld/experiments/configs/pendulum_core_partial.yaml   # the 3 executed OFF arms of the 3x2 factorial (30 runs, ~17 min)
-make figures        # figA-figG from their result roots
-make fig1 fig2 fig3 # the primary-factorial trio (PROTOCOL 27.4), standalone
+paired within backbone: same seed, same data, same learning rate,
+same parameter budget (±5%) — the on−off contrast carries no confound
 ```
 
-All **6** `backbone` x `structure` pairs now resolve to a predictor family: `(mlp,on)` → `mlp_k`, `(transformer,on)` → `transformer_k`, `(ssm,on)` → `ssm_k`, the three structured arms sharing one transition (`src/sld/predictors/structured.py`, `PROTOCOL.md` section 13.1). The registry holds **seven** families for those six cells: `KoopmanSSMPredictor` stays constructible and loadable so every published artifact keeps its constructor, and is never a cell of the factorial — an arm resolving to it is refused before any run.
+All published comparisons run on coupled linear oscillators, whose generator belongs
+to the structured family by construction. The prior has every advantage there, so a
+negative result is informative rather than trivial. The primary statistic is `e_H`,
+the free-rollout error at horizon 25 in true-state coordinates, read under rules
+committed before the runs.
 
-`pendulum_core.yaml` is still **not runnable**: it is a frozen historical config kept on the retired `family`/`constraint` schema (the μ_J-era axis), and the backbone/structure validator refuses it outright. `pendulum_core_partial.yaml` above is the frozen record of the 30 OFF cells that ran. The full 3x2 grid (6 arms x 2 datasets x 5 seeds = 60 cells) is a **new pre-registration under a new result root**, and its training budget is not committed yet — no cell of it may execute until it is (`PROTOCOL.md` section 13.3).
+## What is measured
 
-Full core grid: ~550 runs, ~30-55 CPU-hours on a laptop — frugal by design.
+Both halves are published with the same weight.
 
-## The retired μ_J campaign (historical)
+**The optimum is inside the class, and the right tool finds it.** A planted
+structured operator is recovered exactly (`1.9e-15`), and ordinary least squares
+recovers it from the training data to `2.11e-08`. Gradient descent under the actual
+training objective lands about 200× away. The theory is not the failure;
+reachability is.
 
-The first design encoded structure as a calibrated Jacobian penalty (μ_J) rather than an
-architectural switch. It failed its own calibration in three audited stages — a budget
-that measured almost nothing, a metric whose verdict moved ×23 under an equally
-defensible choice of basis, and a target band reached by one family at one seed — and
-two candidate mechanisms for the failure were tested against the checkpoints and
-refuted. The predictions it carried (P1–P5), the robustness bars, the grid arithmetic
-and the full post-mortem are preserved **verbatim, exactly as measured**, in
-[`docs/historical_mu_j_campaign.md`](docs/historical_mu_j_campaign.md); the complete
-run trace (922 files, manifest-verified) is published under `reports/historical/mu_j/`.
-That campaign is secondary/regression material — never load-bearing for the thesis
-above (`PROTOCOL.md` §11).
+**And yet the structured arm loses.** The paired on−off contrast on `e_H` is
+`+0.1451 ± 0.0351` on the MLP backbone and `+0.2484 ± 0.0670` on the transformer,
+positive on every seed in both — positive means structure costs. The ssm column is
+reported and not counted: its mean is set by a single seed and both of its arms fail
+an arm-neutral baseline, a risk declared in writing before the runs.
 
-## Scope and limitations
+**The diagnosis: the prior is a statement about a basis, not about coordinates.**
+Where the declared misspecification axis reads "the prior is exact", the true
+generator still sits 36 % of its own norm away from the model class in the identity
+basis — and at machine precision (`1.97e-15`) in its own real Jordan basis. Imposing
+the family in an arbitrary basis is not imposing the prior.
 
-- One core model size — a Pareto *slope* claim needs ≥ 3 sizes; that is Year-2 PhD work, not this repo.
-- ATM is the Year-1 PhD baseline, out of flagship scope — the gap is declared, not measured here.
-- CartPole here is a controlled-dynamics and planning bench, not an RL benchmark (distinct from the author's `rl_from_scratch` repo).
-- ~8 system × regime pairs at flagship scale — limited power, declared.
-- Spectral quantities are display/screening only; stability claims go through the total Jacobian audit.
+**An oracle experiment confirms the mechanism, and bounds it.** Handing the
+structured arm the true basis — `ψ` frozen at the closed-form real Jordan
+transform — removes most of the penalty on every seed and returns the arm to a
+positive control that the learned-basis arm fails 5/5. It does not put the
+structured class ahead of the unstructured one. The pre-registered reading: the
+coupling is a contributing mechanism; it is not sufficient to reverse the sign.
+
+## How the study is run
+
+- Thresholds, predictions and reading rules are committed before the runs they
+  govern; every later change is a dated amendment committed before the execution it
+  authorizes. [`PROTOCOL.md`](PROTOCOL.md) — 28 sections, 18 amendments, a reading
+  map at the top — is that audit trail.
+- Two conclusions withdrawn after measurement stay published, and an eligibility
+  rule found defective after scoring was left standing and documented rather than
+  repaired: a rule moved with the numbers in hand is not a rule.
+- 1130 tests run beside the code, including mutation tests and a two-check rule:
+  every mathematical object carries a positive and a negative test against an
+  independent reference.
+- Every published figure traces back to a committed CSV with its hash, and runs are
+  deterministic end to end.
+
+[`FINDINGS.md`](FINDINGS.md) is the study in six pages — question, design, results,
+diagnosis, and an explicit list of what it does not show.
+
+## Repository structure
+
+```text
+src/sld/
+  systems/        ground-truth dynamics (pendulum, coupled oscillators, Lorenz-63, CartPole)
+  data/           data regimes (OU, action-conditioned) and dataset generation
+  predictors/     the backbones and the structured wrapper (2×2 blocks, ψ/π lifts)
+  objectives/     the JEPA loss (EMA target, stop-gradient)
+  training/       trainer and parameter-budget matching (±5%)
+  experiments/    factorial orchestrator, gates, protocol constants
+  audit/, viz/    diagnostics and figure generation
+
+notebooks/        a seven-notebook course (in French), 00 → 06
+assets/           published figures with their CSV sidecars and hashes
+FINDINGS.md       the study in six pages
+PROTOCOL.md       the measurement contract and audit trail
+```
+
+## The notebooks
+
+Seven notebooks form a course, in French, meant to be read in order: `00` the
+problem and the instrument, `01` from the neuron to the operator, `02` the factorial
+arms and budget fairness, `03` training and measurement, `04` what the grid said,
+`05` the oracle experiment, `06` the figures. They rebuild the project's reasoning
+rather than paraphrasing the code, and they verify the package against the course
+with `np.allclose` parity cells.
+
+## Quick start
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+pytest -q                                     # 1130 tests
+uv run --with jupyter jupyter lab notebooks/  # the course
+```
+
+Result roots (`results_*/`) are gitignored and stay local: the published numbers
+live in `PROTOCOL.md`, `FINDINGS.md` and the hashed sidecars in `assets/`. The few
+notebook cells that read result roots say so, and fail with a clear message on a
+fresh clone.
+
+## Status
+
+The pre-registered campaign is closed and read: the grid, the diagnosis and the
+oracle confirmation are published. The repository is stable.
+
+## Limitations
+
+- One system family carries every published comparison (coupled linear
+  oscillators). The pendulum enters only as a positive control, which mostly fails
+  and is reported as such; Lorenz-63 and CartPole are implemented but have no
+  published measurement.
+- One model size (~10k predictor parameters) and one shared representation (the
+  identity map): the published contrasts score the predictor, not a learned encoder.
+- Not a claim about structured world models in general. The literature contains a
+  published gain with the same parametrisation under a jointly learned
+  representation; the study names that difference as a candidate explanation and
+  does not settle it.
+- Small scale by design: five seeds per cell, CPU only.
 
 ## License
 

@@ -165,7 +165,7 @@ Opening it required overriding a ceiling that a previous section had declared fi
 
 Four layers, deliberately.
 
-- **`README.md`** — the result in ninety seconds, with the three figures.
+- **`README.md`** — the project and its result in ninety seconds.
 - **This document** — the study, its scope and its limits, in the order a reader wants them.
 - **`notebooks/`** — the course: `00` through `06`, from the problem and the instrument to the figures. It is meant to be worked through in order, not queried.
 - **`PROTOCOL.md`** — the audit trail: 28 sections, 18 dated amendments, every pre-registration committed before the runs it authorises. It is long because it is complete, and it is not meant to be read front to back. Its reading map is at the top.
