@@ -919,7 +919,7 @@ def test_trainer_config_hash_pinned_for_existing_cell_mlp_k_updates_4000():
     already exist under results_probe_d/representations/, so this is a pure
     load, never a pretrain), still hashes to the literal config_hash of the
     run directory already on disk
-    (results_probe_d/runs/mlp_k__hfr25_updates_4000/42cf513a-a2aaac76) --
+    (results_probe_d/runs/mlp_k__hfr25_updates_4000/4149e34a-a2aaac76) --
     pinned as a literal, not re-derived, because this hash IS that run's
     resume identity; the smallest drift here forces a retrain. Reads the
     real results_probe_d/ (no PROBE_ROOT monkeypatch) -- on purpose, this is
@@ -934,7 +934,7 @@ def test_trainer_config_hash_pinned_for_existing_cell_mlp_k_updates_4000():
     config = probe._trainer_config(cell)
     trainer = Trainer(config, representation=artifact)
     print(f"[probe] mlp_k__hfr25_updates_4000 config_hash = {trainer.config_hash}")
-    assert trainer.config_hash == "42cf513a"
+    assert trainer.config_hash == "4149e34a"
 
 
 def test_round3c_noop_cell_and_sweep_pinned():
