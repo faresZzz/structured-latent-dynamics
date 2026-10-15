@@ -2060,6 +2060,15 @@ def test_representation_kind_absent_dispatches_to_pretrain_representation_unchan
     )
 
 
+_REAL_RESULTS_AMENDED_PENDULUM_CORE_DIR = (
+    Path(__file__).resolve().parents[2] / "results_amended" / "pendulum_core"
+)
+
+
+@pytest.mark.skipif(
+    not _REAL_RESULTS_AMENDED_PENDULUM_CORE_DIR.exists(),
+    reason="results_amended/pendulum_core artifacts not present on this machine",
+)
 def test_results_amended_pendulum_core_forty_run_dirs_still_self_consistent():
     """Investigation note (task brief asked for a test reconstructing
     results_amended/pendulum_core's 40 run-dir identities): those 40 dirs

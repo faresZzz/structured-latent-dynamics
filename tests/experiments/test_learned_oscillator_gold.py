@@ -886,7 +886,8 @@ def test_mutant_dispersion_not_computed_would_hide_context_dependence():
         f"repeated-first-probe mutant std={mutant_std:.3e}"
     )
     assert bounds["eig_relative_error_std"] > 0.0, "a non-neutral context must produce a nonzero field"
-    assert mutant_std == 0.0
+    # np.std of identical floats is zero up to rounding (~1e-18 on some platforms)
+    assert mutant_std <= 1e-12 * bounds["eig_relative_error_std"]
     assert bounds["eig_relative_error_std"] > mutant_std
 
 
