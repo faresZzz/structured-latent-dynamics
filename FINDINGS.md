@@ -11,9 +11,9 @@ Farès Zaghouane · August 2026
 
 In a JEPA-style world model the encoder learns *what* to represent; the predictor, which moves latent states forward in time, is usually a generic network with no transition structure. A natural conjecture is that giving it an explicit dynamical structure — the Koopman-style family of 2×2 rotation-scaling blocks under exact zero-order-hold discretization — should improve long-horizon rollout stability.
 
-This study tests that conjecture on the system where it is *most* favourable: coupled linear oscillators, whose generator lies in the structured family by construction. **The conjecture fails there.** Across 194 cells and seven independent result roots, the structured arm is worse at every sample size, every level of prior misspecification, both training horizons measured, and on two backbones independently — in a design where the structured and unstructured arms of a backbone share rate, dataset, seed and budget, so the contrast carries no confound. An eighth root (15 cells) then hands the structured arm the true basis as a frozen oracle: most of the penalty disappears on every seed, without putting the structured arm ahead of the unstructured one (§9).
+This study tests that conjecture on the system where it is *most* favourable: coupled linear oscillators, whose generator lies in the structured family by construction. **The conjecture fails there.** Across 194 cells and seven independent result roots — 209 and eight counting the oracle root below — the structured arm is worse at every sample size, every level of prior misspecification, both training horizons measured, and on two backbones independently — in a design where the structured and unstructured arms of a backbone share rate, dataset, seed and budget, so the contrast carries no confound. That eighth root, 15 cells, then hands the structured arm the true basis as a frozen oracle: most of the penalty disappears on every seed, without putting the structured arm ahead of the unstructured one (§9).
 
-The study then identifies why, and the reason is not that the prior is wrong. The optimum sits inside the model class and ordinary least squares recovers it from data to `2.1e-08`; gradient descent lands about 200× away. Isolating the responsible ingredient by elimination points to the closed 25-step rollout rather than the one-step loss. And a closed-form measurement shows that the declared misspecification axis had been moving one of *two* misspecifications: at the configuration where the spectral axis reads "the prior is exact", the true generator is still `36 %` of its own norm away from the model class **in the identity basis**, and at machine precision from it in its own real Jordan basis.
+The study then identifies why, and the reason is not that the prior is wrong. The optimum sits inside the model class and ordinary least squares recovers it from data to `2.1e-08`; gradient descent stops around `0.1`, some six orders of magnitude further, and about 100× above the pre-registered `1e-3` bound. Four checks rule out the data, the architecture, the budget and the contextual head; what is left is the training regime itself, a 25-step rollout loss under AdamW and mini-batches. A toy model shows the closed rollout can be enough to open such a gap; the real runs have not isolated it. And a closed-form measurement shows that the declared misspecification axis had been moving one of *two* misspecifications: at the configuration where the spectral axis reads "the prior is exact", the true generator is still `36 %` of its own norm away from the model class **in the identity basis**, and at machine precision from it in its own real Jordan basis.
 
 **A structural prior of the Koopman family is a statement about a basis, not about coordinates.** Imposing the family in an arbitrary basis is not imposing the prior.
 
@@ -33,7 +33,7 @@ The cost is expressivity. So the question is a trade, and the trade is empirical
 
 > Does explicit dynamical structure in a JEPA predictor buy rollout stability, at equal compute budget, and if so where?
 
-The reason to expect *yes* is strong enough that the literature contains a published result using the same parametrisation and reporting a gain ([`PROTOCOL.md` §25.4](PROTOCOL.md)). The reason this study still matters is that the published setting differs from this one in a specific way, named in §7 below, which turns out to be the whole story.
+The reason to expect *yes* is strong enough that concurrent work reaches for the same parametrisation and reports a gain ([`PROTOCOL.md` §25.4](PROTOCOL.md)). The reason this study still matters is that the published setting differs from this one in a specific way, named in §7 below, which turns out to be the whole story.
 
 ---
 
@@ -65,7 +65,7 @@ Before asking whether training reaches a good structured predictor, the study as
 |---|---|
 | planted operator, recovered exactly | `1.9e-15` |
 | same operator, recovered from data by ordinary least squares | `2.11e-08` |
-| same operator, reached by gradient descent under the training objective | **~200× worse** |
+| same operator, reached by gradient descent under the training objective | **`0.112`** (spectral error, median of 10 runs; ~100× above the `1e-3` bound) |
 
 The first two lines say the theory is sound: the target is representable in the class, and it is recoverable from the observations the model actually receives. The third line says the problem is elsewhere. This distinction — *expressible* versus *reachable* — organises everything that follows, and it is the reason the negative result below is not a refutation of the prior.
 
@@ -99,9 +99,9 @@ This is not an isolated measurement. Six earlier roots, 164 further cells, put t
 
 Knowing *that* structure costs is worth little without knowing *why*. The study eliminates candidates rather than proposing one ([§20.1](PROTOCOL.md)).
 
-The natural first hypothesis — that Adam on a one-step loss simply cannot reach least-squares precision — **is false, and was refuted by its own control**: Adam reaches `1e-16` on the one-step objective, including in mini-batch. Three further candidates were eliminated in the same way.
+Four candidates were each tested by their own measurement ([§20.1](PROTOCOL.md)). **Not the data**: least squares on the same training split recovers the operator (spectral error `2.11e-08`, free rollout `e_100 = 7.98e-14`). **Not the architecture**: with parameters planted by hand the same class reproduces the exact solution to `1.9e-15`. **Not the budget**: the validation curve has flattened, and closing the gap at its terminal rate would take 7 to 13 times the declared number of updates. **Not an over-free contextual head**: forcing the operator to be constant makes both bounds worse, not better.
 
-The ingredient that reproduces the phenomenon is the **closed 25-step rollout**, alone, which opens a gap of order `1.8e13` between what least squares achieves and what gradient descent reaches. Composing the transition twenty-five times and backpropagating through the composition is what makes the structured optimum unreachable — not the class, not the loss at one step, not the optimizer as such.
+What remains is the training regime as a whole: AdamW at `1e-3`, 8000 updates, batches of 8 episodes, and a latent loss rolled out over 25 steps. Inside that regime the closed rollout is the leading candidate. A controlled toy in [`notebooks/04`](notebooks/04_ce_que_la_grille_a_dit.ipynb) (§2.4–2.5, marked illustrative) shows that it *can* be enough: holding the linear structured model, the optimizer and the synthetic data fixed between the two objectives, Adam reaches machine precision on the one-step loss and stalls about thirteen orders of magnitude higher on the closed 25-step loss. The toy has no encoder, no nonlinear lift and no contextual head, so it does not show that the rollout is what blocks the real runs. No run of the study trains the same arm on the one-step loss alone against the rollout loss alone; that pair is the measurement that would settle it, and it is listed as open (§8).
 
 A second structural finding came from the same family of measurements. A decomposition arm that keeps the structured transition but removes the lift/projection pair (`ψ`, `π`) landed **above both** the structured and unstructured arms — 3.1× worse at `n = 8`, 13.1× at `n = 256` — which the pre-registered reading rule had predicted would sit *between* them. That prediction was withdrawn, and the reason turned out to be structural rather than empirical, which is §7.
 
@@ -130,7 +130,7 @@ A closed-form computation of the *other* distance ([§26.0](PROTOCOL.md)) gives:
 | identity | **1.0654** | **36 %** |
 | the real Jordan basis of `A` | `1.97e-15` | ~0 |
 
-The two 2×2 blocks recovered in that basis are `(−0.05, ±1.5187)` and `(−0.05, ±1.0902)` — the exact modal decomposition of the system. So at the configuration the protocol called "the prior is exact", the prior is exact **in a basis**, and that basis is not the identity. Every structured arm carrying a learned lift had to discover that change of basis by gradient descent, jointly with the operator, from a loss folded through twenty-five steps — the very composition §5 identified as the obstruction.
+The two 2×2 blocks recovered in that basis are `(−0.05, ±1.5187)` and `(−0.05, ±1.0902)` — the exact modal decomposition of the system. So at the configuration the protocol called "the prior is exact", the prior is exact **in a basis**, and that basis is not the identity. Every structured arm carrying a learned lift had to discover that change of basis by gradient descent, jointly with the operator, from a loss folded through twenty-five steps — the training regime §5 could not rule out.
 
 This also explains the decomposition result of §5 without any new experiment: the arm without a lift is *forced* into the identity basis and therefore faces a misspecification of `1.0654` where the lifted arm faces `0`. It could not have landed between the two arms. The pre-registered prediction was refuted for a structural reason, not an empirical one.
 
@@ -144,10 +144,11 @@ Stated at the same volume as the results, because a scope claim that is easy to 
 
 - **It does not reach the pendulum.** On `DampedPendulum`, seven of eight positive-control cells do not pass ([§21.4](PROTOCOL.md)). No statement here extends to that system, and the protocol marks that boundary explicitly rather than letting it blur.
 - **It is one system, one representation, one optimizer, one rate list.** Coupled oscillators, an identity shared representation, Adam, and a rate list whose argmin sat at its edge. Every claim inherits those.
-- **It is not a claim about structured world models in general.** A published result uses the *same* parametrisation and reports a gain, under a **jointly learned** representation ([§25.4](PROTOCOL.md)). §7 measures the difference that most plausibly separates the two settings and names it a candidate, not an established cause.
+- **It is not a claim about structured world models in general.** Concurrent work — *Koopman Dreamer*, arXiv:2607.19719, July 2026 — uses the *same* 2×2 parametrisation and reports a gain, under a **jointly learned** representation ([§25.4](PROTOCOL.md)). §7 measures the difference that most plausibly separates the two settings and names it a candidate, not an established cause.
 - **The across-backbone ordering is confounded** with rate suitability, and the one confirmatory verdict the primary factorial produced (`transformer` worse than `mlp`, `+0.0496 ± 0.0097`) carries that confound. The unconfounded result is the paired contrast, which is descriptive.
 - **The `ssm` family is largely broken at this sample size**, as §4 records and as the protocol predicted it might.
-- **The oracle experiment of §9 has not been run.** Nothing here reports a result from it.
+- **The mechanism of §5 is not isolated.** The four checks eliminate candidates; they do not show that the 25-step rollout, rather than the regime around it, is what blocks gradient descent. The one-step-only against rollout-only comparison has not been run.
+- **The oracle arm of §9 is a ceiling, not a competitor.** Its basis is computed from the true generator, which no other arm may see. §9 measures what the structured class reaches when the basis is *given*; it says nothing about what it reaches when the basis must be learned, which is the setting every practical model is in.
 
 ---
 
@@ -176,7 +177,7 @@ Two conclusions in this repository were withdrawn after measurement, and one pre
 
 ```bash
 make setup                 # uv sync + editable install
-make test                  # 1122 tests
+make test                  # 1130 tests
 make figures               # figA-figG from their result roots
 make fig1 fig2 fig3        # the primary-factorial trio (PROTOCOL 27.4), standalone
 uv run sld-factorial --config src/sld/experiments/configs/primary_factorial.yaml --dry-run

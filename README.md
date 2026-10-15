@@ -55,8 +55,8 @@ Both halves are published with the same weight.
 **The optimum is inside the class, and the right tool finds it.** A planted
 structured operator is recovered exactly (`1.9e-15`), and ordinary least squares
 recovers it from the training data to `2.11e-08`. Gradient descent under the actual
-training objective lands about 200× away. The theory is not the failure;
-reachability is.
+training objective stops around `0.1`, six orders of magnitude further. The theory is
+not the failure; reachability is.
 
 **And yet the structured arm loses.** The paired on−off contrast on `e_H` is
 `+0.1451 ± 0.0351` on the MLP backbone and `+0.2484 ± 0.0670` on the transformer,

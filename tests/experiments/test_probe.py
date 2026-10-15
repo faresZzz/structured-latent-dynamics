@@ -912,6 +912,19 @@ def test_round3_dry_run_matches_round2_dry_run_cells(tmp_path, monkeypatch, caps
 # --------------------------------------------------------------------------
 
 
+_REAL_PROBE_D_RUN_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "results_probe_d" / "runs" / "mlp_k__hfr25_updates_4000" / "42cf513a-a2aaac76"
+)
+
+
+# The pinned hash is the identity of a run directory on the author's disk; on
+# a fresh clone the representation is rebuilt rather than loaded, so the hash
+# cannot match and the test would also write a pretrain under results_probe_d/.
+@pytest.mark.skipif(
+    not _REAL_PROBE_D_RUN_DIR.exists(),
+    reason="results_probe_d/ campaign artifacts not present on this machine",
+)
 def test_trainer_config_hash_pinned_for_existing_cell_mlp_k_updates_4000():
     """Regression (a): probe._trainer_config's dict for an EXISTING cell,
     combined with the SAME representation artifact _run_cell would load (a

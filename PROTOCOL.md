@@ -44,8 +44,8 @@ declaration that preceded it.
 | you want | go to |
 |---|---|
 | whether structure helps, and by how much | **27.8.3** (paired contrast), qualified by **27.9** (what it covers, where it stops) |
-| whether the prior is even representable | **20** (planted `1.9e-15`, OLS `2.11e-08`, gradient ~200× away) |
-| why gradient descent does not reach it | **20.1** (four candidates eliminated; the 25-step closed rollout is the one that survives) |
+| whether the prior is even representable | **20** (planted `1.9e-15`, OLS `2.11e-08`, gradient `0.112`, about 100× above the `1e-3` bound; see the 2026-10-15 erratum in 20.1) |
+| why gradient descent does not reach it | **20.1** (four candidates eliminated; the training regime, 25-step closed rollout included, survives, without being isolated) |
 | the diagnosis — basis versus coordinates | **26.0** (identity basis `1.0654` = 36 % of `‖A‖`; real Jordan basis `1.97e-15`) |
 | how far the results generalize, and where they stop | **25.6** (scope rule), **21.4** (the pendulum boundary, never crossed), **27.8.5** and **28.5** (per-root scope) |
 | the confounds, named by the author | **27.2** (rate ≠ backbone), **23.2** (why budget matching is suspended, not applied) |
@@ -3062,6 +3062,14 @@ Each candidate explanation was tested and eliminated by its own measurement:
 ordinary least squares finds in closed form on the same data. **The threshold is not
 mis-specified**: 19.7's `1e-3` is attainable, demonstrably, and is therefore left exactly
 where it was. No threshold moves in this section.
+
+> **Erratum (2026-10-15).** The "roughly 200x worse" of the paragraph above compares the
+> wrong pair. The measured values of 20.0 sit 110x to 200x above the `1e-3` threshold
+> (spectral median `0.112`, action `0.198`); against ordinary least squares on the same split
+> (`2.11e-08` spectral) the gap is of order `5e6`. `figA_d3_exactness.py` already carried the
+> right reading. The four eliminations above do not isolate the 25-step closed rollout from
+> the rest of the regime: no run compares the one-step loss alone against the rollout loss
+> alone on the same arm. No threshold, verdict or number of 20.0 changes.
 
 ### 20.2 The decision
 
